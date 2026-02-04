@@ -1,0 +1,30 @@
+name: ici_check
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.10.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  firebase_core: ^4.4.0
+  cloud_firestore: ^6.1.2
+  firebase_auth: ^6.1.4
+  uuid: ^4.5.2
+  excel: ^4.0.6
+  spreadsheet_decoder: ^2.0.1 # La usaremos SOLO para Importar (Es blindada)
+  file_picker: ^8.1.4  # Versión más reciente  path_provider: ^2.1.1
+  share_plus: ^7.2.0  # Para "exportar" (compartir el archivo) en móvil fácilmente
+  permission_handler: ^11.3.1  # AGREGAR ESTA
+  image_picker: ^1.0.4
+  intl: ^0.18.0
+  
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

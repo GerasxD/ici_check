@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "327249223156",
+    "project_id": "ici-check",
+    "storage_bucket": "ici-check.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:327249223156:android:0366249c5a4273641aeda1",
+        "android_client_info": {
+          "package_name": "com.example.ici_check"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDsVdfrLNw1GLB2quu6bTdw2WWcyd_D5Cc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
