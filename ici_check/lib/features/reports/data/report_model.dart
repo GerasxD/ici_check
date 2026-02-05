@@ -123,6 +123,7 @@ class ServiceReportModel {
 }
 
 class ReportEntry {
+  final String? assignedUserId; // <--- AGREGAR ESTO
   final String instanceId;
   final int deviceIndex;
   final String customId; // "EXT-1"
@@ -141,6 +142,7 @@ class ReportEntry {
     this.observations = '',
     this.photos = const [],
     this.activityData = const {},
+    this.assignedUserId,
   });
 
   // --- NUEVO: Método copyWith ---

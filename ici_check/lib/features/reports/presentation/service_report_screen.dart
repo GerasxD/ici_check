@@ -1,9 +1,10 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:ici_check/features/reports/widgets/device_section.dart';
+import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
 import 'package:ici_check/features/reports/widgets/report_controls.dart';
 import 'package:ici_check/features/reports/widgets/report_header.dart';
 import 'package:ici_check/features/reports/widgets/report_signatures.dart';
+import 'package:ici_check/features/reports/widgets/report_summary.dart';
 import 'package:intl/intl.dart';
 import 'package:signature/signature.dart';
 import 'package:image_picker/image_picker.dart';
@@ -633,7 +634,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 orElse: () => DeviceModel(id: defId, name: 'Desconocido', description: '', activities: []),
               );
 
-              return DeviceSection(
+              return DeviceSectionImproved(
                 defId: defId,
                 deviceDef: deviceDef,
                 entries: sectionEntries,
@@ -686,6 +687,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
             // 4. OBSERVACIONES GENERALES
             _buildGeneralObservationsBox(),
+            ReportSummary(report: _report!),
 
             // 5. FIRMAS
             ReportSignatures(

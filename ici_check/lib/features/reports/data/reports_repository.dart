@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 import 'package:ici_check/features/policies/data/policy_model.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
@@ -22,11 +23,10 @@ class ReportsRepository {
   }
 
   Future<void> saveReport(ServiceReportModel report) async {
-    // Usamos set con merge para actualiza o crear si no existe, usando el ID del reporte como ID del documento
     await _db.collection('reports').doc(report.id).set(report.toMap(), SetOptions(merge: true));
   }
 
-  // Lógica para inicializar un reporte nuevo basado en la póliza (Réplica de tu React useEffect)
+  // Lógica para inicializar un reporte nuevo basado en la póliza
   ServiceReportModel initializeReport(
     PolicyModel policy, 
     String dateStr, 
@@ -36,30 +36,69 @@ class ReportsRepository {
   ) {
     List<ReportEntry> entries = [];
 
+    // CORRECCIÓN: Normalizar el timeIndex si viene mal calculado
+    int correctedTimeIndex = timeIndex;
+    
+    if (!isWeekly && dateStr.isNotEmpty) {
+      try {
+        // Parsear el dateStr (formato "2025-02")
+        final parts = dateStr.split('-');
+        if (parts.length == 2) {
+          final reportYear = int.parse(parts[0]);
+          final reportMonth = int.parse(parts[1]);
+          
+          // Calcular desde la fecha de inicio de la póliza
+          final policyStartYear = policy.startDate.year;
+          final policyStartMonth = policy.startDate.month;
+          
+          // Calcular diferencia en meses
+          correctedTimeIndex = (reportYear - policyStartYear) * 12 + (reportMonth - policyStartMonth);
+          
+          debugPrint('📅 Corrigiendo timeIndex: original=$timeIndex, corregido=$correctedTimeIndex para $dateStr');
+        }
+      } catch (e) {
+        debugPrint('⚠️ Error parseando dateStr: $e');
+      }
+    }
+
     for (var devInstance in policy.devices) {
-      final def = definitions.firstWhere((d) => d.id == devInstance.definitionId, orElse: () => DeviceModel(id: 'err', name: 'Unknown', description: '', activities: []));
-      if (def.id == 'err') continue;
+      final def = definitions.firstWhere(
+        (d) => d.id == devInstance.definitionId, 
+        orElse: () => DeviceModel(id: 'err', name: 'Unknown', description: '', activities: [])
+      );
+      
+      if (def.id == 'err') {
+        debugPrint('⚠️ Definición no encontrada para: ${devInstance.definitionId}');
+        continue;
+      }
 
       for (int i = 1; i <= devInstance.quantity; i++) {
         Map<String, String?> activityResults = {};
-        // ignore: unused_local_variable
-        bool hasScheduled = false;
 
         for (var act in def.activities) {
           bool isDue = false;
           
           if (isWeekly) {
-            if (act.frequency == Frequency.SEMANAL) isDue = true;
+            // En reportes semanales, solo incluir actividades semanales
+            if (act.frequency == Frequency.SEMANAL) {
+              isDue = true;
+            }
           } else {
-            // Lógica mensual
+            // En reportes mensuales, EXCLUIR actividades semanales
             if (act.frequency != Frequency.SEMANAL) {
-              double freqMonths = _getFrequencyVal(act.frequency); // Helper function
+              double freqMonths = _getFrequencyVal(act.frequency);
               int offset = devInstance.scheduleOffsets[act.id] ?? 0;
-              double adjustedTime = timeIndex - offset.toDouble();
               
-              if (adjustedTime >= -0.05) {
+              // USAR EL TIME INDEX CORREGIDO
+              double adjustedTime = correctedTimeIndex - offset.toDouble();
+              
+              const double epsilon = 0.05;
+              
+              if (adjustedTime >= -epsilon) {
                 double remainder = (adjustedTime % freqMonths).abs();
-                if (remainder < 0.05 || (remainder - freqMonths).abs() < 0.05) {
+                
+                // Verificar si está en el ciclo correcto
+                if (remainder < epsilon || (remainder - freqMonths).abs() < epsilon) {
                   isDue = true;
                 }
               }
@@ -68,11 +107,10 @@ class ReportsRepository {
 
           if (isDue) {
             activityResults[act.id] = null; // Inicializar como null (vacío)
-            hasScheduled = true;
           }
         }
 
-        // Agregamos la entrada incluso si no hay actividades (para mostrar el dispositivo)
+        // SIEMPRE agregamos la entrada, incluso si no tiene actividades programadas
         entries.add(ReportEntry(
           instanceId: devInstance.instanceId,
           deviceIndex: i,
@@ -81,6 +119,8 @@ class ReportsRepository {
         ));
       }
     }
+
+    debugPrint('✅ Reporte inicializado: ${entries.length} entradas para $dateStr');
 
     return ServiceReportModel(
       id: _uuid.v4(),
@@ -93,7 +133,6 @@ class ReportsRepository {
   }
 
   double _getFrequencyVal(Frequency f) {
-    // Retornar valores numéricos según tu lógica (1.0 mensual, 3.0 trimestral, etc)
     switch(f) {
       case Frequency.MENSUAL: return 1.0;
       case Frequency.TRIMESTRAL: return 3.0;
