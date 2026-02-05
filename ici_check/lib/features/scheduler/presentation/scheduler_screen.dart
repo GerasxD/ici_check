@@ -1013,9 +1013,33 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: Text(
-                      def.name,
-                      style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: _textPrimary),
+                    child: Column( // CAMBIO: Usamos Column para poner el contador abajo o Row para al lado
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          def.name,
+                          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: _textPrimary),
+                        ),
+                        const SizedBox(height: 4),
+                        // --- AQUÍ ESTÁ EL CONTADOR DE UNIDADES ---
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: _textSecondary.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: _borderLight),
+                          ),
+                          child: Text(
+                            "${devInstance.quantity} UNIDADES", // Muestra la cantidad real
+                            style: TextStyle(
+                              fontSize: 9, 
+                              fontWeight: FontWeight.bold, 
+                              color: _textSecondary
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -1035,19 +1059,40 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
           children: [
             TableCell(
               child: Container(
-                padding: const EdgeInsets.only(left: 48, top: 12, bottom: 12, right: 12),
-                child: Row(
+                // Ajusté el padding para que se vea bien alineado
+                padding: const EdgeInsets.only(left: 48, top: 10, bottom: 10, right: 12),
+                child: Column( // CAMBIO: Usamos Column para poner el tipo debajo del nombre
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Container(
-                      width: 4, height: 4,
-                      decoration: BoxDecoration(color: _getActivityColor(activity.type), shape: BoxShape.circle),
+                    Text(
+                      activity.name,
+                      style: TextStyle(fontSize: 12, color: _textPrimary, fontWeight: FontWeight.w600),
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        activity.name,
-                        style: TextStyle(fontSize: 12, color: _textPrimary, fontWeight: FontWeight.w500),
-                      ),
+                    const SizedBox(height: 4),
+                    // --- AQUÍ ESTÁ EL INDICADOR DE TIPO ---
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 6, height: 6,
+                          decoration: BoxDecoration(
+                            color: _getActivityColor(activity.type), // Usa tu función de color existente
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          // Convertimos el enum a texto bonito (Ej: ActivityType.INSPECCION -> "Inspección")
+                          activity.type.toString().split('.').last.substring(0, 1).toUpperCase() + 
+                          activity.type.toString().split('.').last.substring(1).toLowerCase(),
+                          style: TextStyle(
+                            fontSize: 10, 
+                            color: _textSecondary, 
+                            fontWeight: FontWeight.w500
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -1100,30 +1145,126 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     );
   }
 
-  Widget _buildLegend() {
+ Widget _buildLegend() {
     return Container(
+      // Mismos márgenes que el grid para que "llegue hasta donde llega el dibujo"
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: _cardWhite,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 10, offset: const Offset(0, 2))],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text("TIPOS DE ACTIVIDAD", style: TextStyle(color: _textSecondary, fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 24, runSpacing: 12,
-            children: [
-              _LegendItem(color: _getActivityColor(ActivityType.INSPECCION), text: "Inspección", icon: Icons.search_outlined),
-              _LegendItem(color: _getActivityColor(ActivityType.PRUEBA), text: "Prueba", icon: Icons.science_outlined),
-              _LegendItem(color: _getActivityColor(ActivityType.MANTENIMIENTO), text: "Mantenimiento", icon: Icons.build_outlined),
-            ],
-          ),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.02),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          )
         ],
       ),
+      child: Center( // CENTRA EL CONTENIDO DENTRO DE LA CAJA
+        child: Wrap(
+          alignment: WrapAlignment.center, // Centra los items si bajan de línea
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 24, // Espacio entre grupos
+          runSpacing: 12,
+          children: [
+            // GRUPO 1: TIPOS DE ACTIVIDAD
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text("ACTIVIDAD:", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 0.5)),
+                const SizedBox(width: 8),
+                _CompactLegendItem(color: _getActivityColor(ActivityType.INSPECCION), text: "Insp.", icon: Icons.search),
+                const SizedBox(width: 8),
+                _CompactLegendItem(color: _getActivityColor(ActivityType.PRUEBA), text: "Prueba", icon: Icons.science),
+                const SizedBox(width: 8),
+                _CompactLegendItem(color: _getActivityColor(ActivityType.MANTENIMIENTO), text: "Mant.", icon: Icons.build),
+              ],
+            ),
+
+            // GRUPO 2: ESTADOS (Separador visual opcional)
+            Container(width: 1, height: 12, color: const Color(0xFFE2E8F0)),
+
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text("ESTADO:", style: TextStyle(color: Color(0xFF94A3B8), fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 0.5)),
+                const SizedBox(width: 8),
+                _CompactStatusItem(type: 'empty', text: "Vacío"),
+                const SizedBox(width: 8),
+                _CompactStatusItem(type: 'partial', text: "Incompleto"),
+                const SizedBox(width: 8),
+                _CompactStatusItem(type: 'full', text: "Completo"),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CompactLegendItem extends StatelessWidget {
+  final Color color;
+  final String text;
+  final IconData icon;
+  
+  const _CompactLegendItem({required this.color, required this.text, required this.icon});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 12, color: color), // Icono muy pequeño
+        const SizedBox(width: 4),
+        Text(text, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
+      ],
+    );
+  }
+}
+
+class _CompactStatusItem extends StatelessWidget {
+  final String type;
+  final String text;
+
+  const _CompactStatusItem({required this.type, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10, height: 10, // Círculo muy pequeño (10px)
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: type == 'full' ? const Color(0xFF64748B) : Colors.white,
+            border: Border.all(color: const Color(0xFF94A3B8), width: 1.5),
+          ),
+          child: type == 'partial'
+              ? ClipRRect(
+                  borderRadius: BorderRadius.circular(5),
+                  child: Row(
+                    children: [
+                      Expanded(child: Container(color: const Color(0xFF94A3B8))),
+                      Expanded(child: Container(color: Colors.white)),
+                    ],
+                  ),
+                )
+              : null,
+        ),
+        const SizedBox(width: 4),
+        Text(
+          text, 
+          style: const TextStyle(
+            fontSize: 10, 
+            fontWeight: FontWeight.w600, 
+            color: Color(0xFF64748B)
+          )
+        ),
+      ],
     );
   }
 }
@@ -1167,6 +1308,7 @@ class _HeaderActionButton extends StatelessWidget {
   }
 }
 
+// ignore: unused_element
 class _LegendItem extends StatelessWidget {
   final Color color;
   final String text;

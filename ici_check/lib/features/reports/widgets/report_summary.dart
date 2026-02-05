@@ -29,49 +29,71 @@ class ReportSummary extends StatelessWidget {
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC), // slate-50
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE2E8F0), width: 2), // slate-200
+        color: const Color(0xFFF8FAFC), // slate-50 background
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE2E8F0)), // slate-200
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header del Resumen
-          Container(
-            padding: const EdgeInsets.only(bottom: 12),
-            decoration: const BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: Color(0xFFE2E8F0), width: 1),
-              ),
-            ),
-            child: const Row(
+          // Header del Resumen con Icono
+          Padding(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: Row(
               children: [
-                Icon(Icons.analytics_outlined, size: 18, color: Color(0xFF1E293B)),
-                SizedBox(width: 8),
-                Text(
-                  'RESUMEN OPERATIVO',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF1E293B),
-                    letterSpacing: 1.0,
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
                   ),
+                  child: const Icon(Icons.analytics_outlined, size: 18, color: Color(0xFF1E293B)),
+                ),
+                const SizedBox(width: 12),
+                const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'RESUMEN OPERATIVO',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1E293B), // slate-800
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    Text(
+                      'Estadísticas del servicio actual',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: Color(0xFF64748B), // slate-500
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
           
-          const SizedBox(height: 16),
-          
-          // Grid de Estadísticas
+          // Grid de Estadísticas (Cards)
           Row(
             children: [
               // OK
               Expanded(
                 child: _StatCard(
-                  label: 'OK',
+                  label: 'CORRECTO',
                   value: stats['ok']!,
-                  color: const Color(0xFF10B981), // green-500
+                  color: const Color(0xFF10B981), // Emerald-500
+                  bgColor: const Color(0xFFECFDF5), // Emerald-50
                   icon: Icons.check_circle,
                 ),
               ),
@@ -82,20 +104,26 @@ class ReportSummary extends StatelessWidget {
                 child: _StatCard(
                   label: 'FALLA',
                   value: stats['nok']!,
-                  color: const Color(0xFFEF4444), // red-500
+                  color: const Color(0xFFEF4444), // Red-500
+                  bgColor: const Color(0xFFFEF2F2), // Red-50
                   icon: Icons.cancel,
-                  subtitle: 'NOK',
                 ),
               ),
-              const SizedBox(width: 12),
-              
+            ],
+          ),
+          
+          const SizedBox(height: 12),
+          
+          Row(
+            children: [
               // N/A
               Expanded(
                 child: _StatCard(
-                  label: 'N/A',
+                  label: 'NO APLICA',
                   value: stats['na']!,
-                  color: const Color(0xFF64748B), // slate-500
-                  icon: Icons.remove_circle_outline,
+                  color: const Color(0xFF64748B), // Slate-500
+                  bgColor: const Color(0xFFF1F5F9), // Slate-100
+                  icon: Icons.not_interested, // Icono más claro para N/A
                 ),
               ),
               const SizedBox(width: 12),
@@ -103,9 +131,10 @@ class ReportSummary extends StatelessWidget {
               // N/R
               Expanded(
                 child: _StatCard(
-                  label: 'N/R',
+                  label: 'NO REALIZADO',
                   value: stats['nr']!,
-                  color: const Color(0xFFF59E0B), // amber-500
+                  color: const Color(0xFFF59E0B), // Amber-500
+                  bgColor: const Color(0xFFFFFBEB), // Amber-50
                   icon: Icons.warning_amber_rounded,
                 ),
               ),
@@ -121,28 +150,28 @@ class _StatCard extends StatelessWidget {
   final String label;
   final int value;
   final Color color;
+  final Color bgColor;
   final IconData icon;
-  final String? subtitle;
 
   const _StatCard({
     required this.label,
     required this.value,
     required this.color,
+    required this.bgColor,
     required this.icon,
-    this.subtitle,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFFE2E8F0)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.02),
+            color: Colors.black.withOpacity(0.01),
             blurRadius: 4,
             offset: const Offset(0, 2),
           ),
@@ -150,42 +179,40 @@ class _StatCard extends StatelessWidget {
       ),
       child: Column(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 14, color: color),
-              const SizedBox(width: 4),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  color: color,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ],
-          ),
-          if (subtitle != null) ...[
-            const SizedBox(height: 2),
-            Text(
-              subtitle!,
-              style: TextStyle(
-                fontSize: 8,
-                color: color.withOpacity(0.7),
-                fontWeight: FontWeight.w600,
-              ),
+          // Icono con fondo circular suave
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: bgColor,
+              shape: BoxShape.circle,
             ),
-          ],
-          const SizedBox(height: 8),
+            child: Icon(icon, size: 20, color: color),
+          ),
+          const SizedBox(height: 12),
+          
+          // Número Grande
           Text(
             value.toString(),
             style: TextStyle(
-              fontSize: 24,
+              fontSize: 28,
               fontWeight: FontWeight.w900,
               color: color,
               height: 1.0,
+              letterSpacing: -1.0, // Tight tracking para números grandes
             ),
+          ),
+          const SizedBox(height: 4),
+          
+          // Etiqueta
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              color: const Color(0xFF94A3B8), // Slate-400
+              letterSpacing: 0.5,
+            ),
+            textAlign: TextAlign.center,
           ),
         ],
       ),

@@ -318,7 +318,9 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   bool _canEditSection(String defId) {
     if (!_isEditable()) return false;
     if (_isUserCoordinator() && _adminOverride) return true;
+    
     final assigned = _report?.sectionAssignments[defId] ?? [];
+    if (assigned.isEmpty) return true; 
     return _currentUserId != null && assigned.contains(_currentUserId);
   }
 
@@ -503,11 +505,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     }
   }
 
-  void _deletePhoto(int photoIndex) {
-    if (_photoContextEntryIdx == null || _report == null) return;
-    _confirmDeletePhoto(photoIndex); // Podrías poner el showDialog aquí
-  }
-
   void _confirmDeletePhoto(int photoIndex) {
     final entryIdx = _photoContextEntryIdx!;
     final activityId = _photoContextActivityId;
@@ -578,199 +575,426 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         backgroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
-          icon: Icon(Icons.arrow_back_ios_new, color: _primaryDark),
+          icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF1E293B), size: 20),
           onPressed: () => Navigator.pop(context),
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Reporte de Servicio', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black)),
-            Text(widget.dateStr, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            const Text(
+              'Reporte de Servicio',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF1E293B),
+                letterSpacing: -0.3,
+              ),
+            ),
+            Row(
+              children: [
+                Icon(Icons.calendar_today, size: 11, color: Colors.grey.shade600),
+                const SizedBox(width: 4),
+                Text(
+                  widget.dateStr,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade600,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                if (_report!.startTime != null) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: _report!.endTime == null
+                          ? const Color(0xFF10B981).withOpacity(0.1)
+                          : const Color(0xFF64748B).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _report!.endTime == null ? Icons.play_circle : Icons.check_circle,
+                          size: 10,
+                          color: _report!.endTime == null
+                              ? const Color(0xFF10B981)
+                              : const Color(0xFF64748B),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          _report!.endTime == null ? 'En curso' : 'Finalizado',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                            color: _report!.endTime == null
+                                ? const Color(0xFF10B981)
+                                : const Color(0xFF64748B),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ],
         ),
         actions: [
           if (_isUserCoordinator())
             IconButton(
-              icon: Icon(_adminOverride ? Icons.lock_open : Icons.lock, color: _adminOverride ? Colors.amber : Colors.grey),
+              icon: Icon(
+                _adminOverride ? Icons.admin_panel_settings : Icons.admin_panel_settings_outlined,
+                color: _adminOverride ? const Color(0xFFF59E0B) : const Color(0xFF94A3B8),
+                size: 22,
+              ),
               onPressed: () => setState(() => _adminOverride = !_adminOverride),
+              tooltip: _adminOverride ? 'Modo Admin Activo' : 'Activar Modo Admin',
             ),
+          const SizedBox(width: 8),
         ],
       ),
-      body: SingleChildScrollView(
-        child: Column(
-          children: [
-            // 1. CABECERA
-            ReportHeader(
-              companySettings: _companySettings!,
-              client: widget.client,
-              serviceDate: _report!.serviceDate,
-              dateStr: widget.dateStr,
-              frequencies: frequencies,
-            ),
+        body: SingleChildScrollView(
+          child: Column(
+            children: [
+              // 1. CABECERA
+              ReportHeader(
+                companySettings: _companySettings!,
+                client: widget.client,
+                serviceDate: _report!.serviceDate,
+                dateStr: widget.dateStr,
+                frequencies: frequencies,
+              ),
 
-            // 2. CONTROLES (Iniciar/Fin/Asignación)
-            ReportControls(
-              report: _report!,
-              users: widget.users,
-              adminOverride: _adminOverride,
-              isUserDesignated: _report!.assignedTechnicianIds.contains(_currentUserId),
-              onStartService: _handleStartService,
-              onEndService: _handleEndService,
-              onResumeService: _handleResumeService,
-              onDateChanged: (newDate) {
-                final updated = _report!.copyWith(serviceDate: newDate);
-                setState(() => _report = updated);
-                _repo.saveReport(_report!);
-              },
-            ),
-
-            // 3. SECCIONES DE DISPOSITIVOS (Tablas/Listas)
-            ...groupedEntries.entries.map((entryGroup) {
-              final defId = entryGroup.key;
-              final sectionEntries = entryGroup.value;
-              
-              final deviceDef = widget.devices.firstWhere(
-                (d) => d.id == defId,
-                orElse: () => DeviceModel(id: defId, name: 'Desconocido', description: '', activities: []),
-              );
-
-              return DeviceSectionImproved(
-                defId: defId,
-                deviceDef: deviceDef,
-                entries: sectionEntries,
+              // 2. CONTROLES (Iniciar/Fin/Asignación)
+              ReportControls(
+                report: _report!,
                 users: widget.users,
-                sectionAssignments: _report!.sectionAssignments[defId] ?? [],
+                adminOverride: _adminOverride,
+                isUserDesignated: _report!.assignedTechnicianIds.contains(_currentUserId),
+                onStartService: _handleStartService,
+                onEndService: _handleEndService,
+                onResumeService: _handleResumeService,
+                onDateChanged: (newDate) {
+                  final updated = _report!.copyWith(serviceDate: newDate);
+                  setState(() => _report = updated);
+                  _repo.saveReport(_report!);
+                },
+              ),
+
+              // 3. SECCIONES DE DISPOSITIVOS (Tablas/Listas)
+              ...groupedEntries.entries.map((entryGroup) {
+                final defId = entryGroup.key;
+                final sectionEntries = entryGroup.value;
+                
+                final deviceDef = widget.devices.firstWhere(
+                  (d) => d.id == defId,
+                  orElse: () => DeviceModel(id: defId, name: 'Desconocido', description: '', activities: []),
+                );
+
+                return DeviceSectionImproved(
+                  defId: defId,
+                  deviceDef: deviceDef,
+                  entries: sectionEntries,
+                  users: widget.users,
+                  sectionAssignments: _report!.sectionAssignments[defId] ?? [],
+                  isEditable: _isEditable(),
+                  allowedToEdit: _isEditable(), // <--- CAMBIO AQUÍ: Permitir ver controles si el reporte está abierto
+                  isUserCoordinator: _isUserCoordinator(),
+                  currentUserId: _currentUserId,
+                  
+                  // CALLBACKS IMPORTANTE: Mapeo de índices locales a globales
+                  onToggleAssignment: (uid) => _toggleSectionAssignment(defId, uid),
+                  
+                  onCustomIdChanged: (localIndex, val) {
+                    final entry = sectionEntries[localIndex];
+                    final globalIndex = _report!.entries.indexOf(entry);
+                    if(globalIndex != -1) _updateEntry(globalIndex, customId: val);
+                  },
+                  
+                  onAreaChanged: (localIndex, val) {
+                    final entry = sectionEntries[localIndex];
+                    final globalIndex = _report!.entries.indexOf(entry);
+                    if(globalIndex != -1) _updateEntry(globalIndex, area: val);
+                  },
+                  
+                  onToggleStatus: (localIndex, activityId) {
+                    final entry = sectionEntries[localIndex];
+                    final globalIndex = _report!.entries.indexOf(entry);
+                    if(globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
+                  },
+                  
+                  onCameraClick: (localIndex, {activityId}) {
+                    final entry = sectionEntries[localIndex];
+                    final globalIndex = _report!.entries.indexOf(entry);
+                    if(globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
+                  },
+                  
+                  onObservationClick: (localIndex, {activityId}) {
+                    final entry = sectionEntries[localIndex];
+                    final globalIndex = _report!.entries.indexOf(entry);
+                    if(globalIndex != -1) {
+                      setState(() {
+                        _activeObservationEntry = globalIndex.toString();
+                        _activeObservationActivityId = activityId;
+                      });
+                    }
+                  },
+                );
+              }),
+
+              // 4. OBSERVACIONES GENERALES
+              _buildGeneralObservationsBox(),
+              ReportSummary(report: _report!),
+
+              // 5. FIRMAS
+              ReportSignatures(
+                providerController: _providerSigController,
+                clientController: _clientSigController,
+                providerName: _report!.providerSignerName,
+                clientName: _report!.clientSignerName,
+                providerSignatureData: _report!.providerSignature, // Base64 desde Firebase
+                clientSignatureData: _report!.clientSignature,
                 isEditable: _isEditable(),
-                allowedToEdit: _canEditSection(defId),
-                isUserCoordinator: _isUserCoordinator(),
-                currentUserId: _currentUserId,
-                
-                // CALLBACKS IMPORTANTE: Mapeo de índices locales a globales
-                onToggleAssignment: (uid) => _toggleSectionAssignment(defId, uid),
-                
-                onCustomIdChanged: (localIndex, val) {
-                   final entry = sectionEntries[localIndex];
-                   final globalIndex = _report!.entries.indexOf(entry);
-                   if(globalIndex != -1) _updateEntry(globalIndex, customId: val);
+                onProviderNameChanged: (val) {
+                  final updated = _report!.copyWith(providerSignerName: val);
+                  setState(() => _report = updated);
+                  _repo.saveReport(_report!);
                 },
-                
-                onAreaChanged: (localIndex, val) {
-                   final entry = sectionEntries[localIndex];
-                   final globalIndex = _report!.entries.indexOf(entry);
-                   if(globalIndex != -1) _updateEntry(globalIndex, area: val);
+                onClientNameChanged: (val) {
+                  final updated = _report!.copyWith(clientSignerName: val);
+                  setState(() => _report = updated);
+                  _repo.saveReport(_report!);
                 },
-                
-                onToggleStatus: (localIndex, activityId) {
-                   final entry = sectionEntries[localIndex];
-                   final globalIndex = _report!.entries.indexOf(entry);
-                   if(globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
-                },
-                
-                onCameraClick: (localIndex, {activityId}) {
-                   final entry = sectionEntries[localIndex];
-                   final globalIndex = _report!.entries.indexOf(entry);
-                   if(globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
-                },
-                
-                onObservationClick: (localIndex, {activityId}) {
-                   final entry = sectionEntries[localIndex];
-                   final globalIndex = _report!.entries.indexOf(entry);
-                   if(globalIndex != -1) {
-                     setState(() {
-                       _activeObservationEntry = globalIndex.toString();
-                       _activeObservationActivityId = activityId;
-                     });
-                   }
-                },
-              );
-            }),
+              ),
 
-            // 4. OBSERVACIONES GENERALES
-            _buildGeneralObservationsBox(),
-            ReportSummary(report: _report!),
-
-            // 5. FIRMAS
-            ReportSignatures(
-              providerController: _providerSigController,
-              clientController: _clientSigController,
-              providerName: _report!.providerSignerName,
-              clientName: _report!.clientSignerName,
-              isEditable: _isEditable(),
-              onProviderNameChanged: (val) {
-                 final updated = _report!.copyWith(providerSignerName: val);
-                 setState(() => _report = updated);
-                 _repo.saveReport(_report!);
-              },
-              onClientNameChanged: (val) {
-                 final updated = _report!.copyWith(clientSignerName: val);
-                 setState(() => _report = updated);
-                 _repo.saveReport(_report!);
-              },
-            ),
-
-            const SizedBox(height: 80),
-          ],
+              const SizedBox(height: 80),
+            ],
+          ),
         ),
-      ),
-      
-      // BOTÓN FLOTANTE
-      floatingActionButton: (_activeObservationEntry == null && _photoContextEntryIdx == null && _isEditable() && (_report!.assignedTechnicianIds.contains(_currentUserId) || _adminOverride))
+        
+        // BOTÓN FLOTANTE
+        floatingActionButton: (_activeObservationEntry == null && 
+          _photoContextEntryIdx == null && 
+          _isEditable() && 
+          (_report!.assignedTechnicianIds.contains(_currentUserId) || _adminOverride))
           ? FloatingActionButton.extended(
               onPressed: _saveReport,
-              backgroundColor: Colors.green,
-              icon: const Icon(Icons.save),
-              label: const Text('Guardar'),
+              backgroundColor: const Color(0xFF10B981),
+              elevation: 4,
+              icon: const Icon(Icons.save_rounded, size: 20),
+              label: const Text(
+                'Guardar Cambios',
+                style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3),
+              ),
             )
           : null,
       
-      // MODALES (Se muestran sobre el contenido si los estados no son nulos)
       bottomSheet: _activeObservationEntry != null 
           ? _buildObservationModal() 
           : (_photoContextEntryIdx != null ? _buildPhotoModal() : null),
     );
   }
 
-  // ==========================================
-  // WIDGETS INTERNOS (Modales y Obs Generales)
-  // ==========================================
-  
-  // Widget simple para Observaciones Generales que quedó fuera de los widgets extraídos
+  List<Map<String, String>> _getRegisteredFindings() {
+    final List<Map<String, String>> findings = [];
+    if (_report == null) return findings;
+
+    for (final entry in _report!.entries) {
+      List<String> deviceFindingsTexts = [];
+
+      // 1. Revisar observación general del dispositivo
+      if (entry.observations.trim().isNotEmpty) {
+        deviceFindingsTexts.add(entry.observations.trim());
+      }
+
+      // 2. Revisar observaciones de cada actividad dentro del dispositivo
+      for (var actData in entry.activityData.values) {
+        if (actData.observations.trim().isNotEmpty) {
+          // Opcional: Podrías prefijar el nombre de la actividad si lo tuvieras disponible aquí
+          deviceFindingsTexts.add(actData.observations.trim());
+        }
+      }
+
+      // Si encontramos hallazgos para este dispositivo, los agregamos a la lista principal
+      if (deviceFindingsTexts.isNotEmpty) {
+        // Usamos el customId (ej. EXT-1) o el índice si no tiene ID.
+        String distinctId = entry.customId.isNotEmpty ? entry.customId : 'Dispositivo #${entry.deviceIndex}';
+        
+        findings.add({
+          'id': distinctId,
+          // Si hay múltiples observaciones en un mismo equipo, las unimos con un salto de línea
+          'text': deviceFindingsTexts.join('\n—\n'), 
+        });
+      }
+    }
+    return findings;
+  }
+
   Widget _buildGeneralObservationsBox() {
+    // Obtenemos los hallazgos dinámicamente
+    final registeredFindings = _getRegisteredFindings();
+    final hasFindings = registeredFindings.isNotEmpty;
+
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+      // Eliminamos el padding interno general para manejarlo por secciones
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade300, width: 2),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+        border: Border.all(color: Colors.grey.shade100),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('OBSERVACIONES GENERALES', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          TextField(
-            enabled: _isEditable(),
-            controller: TextEditingController(text: _report!.generalObservations), // Nota: Esto recrea el controller en cada build, idealmente usar uno persistente o onChanged directo
-            maxLines: 3,
-            decoration: const InputDecoration(
-              hintText: 'Comentarios generales del servicio...',
-              border: OutlineInputBorder(),
+          // ===================== SECCIÓN 1: OBSERVACIONES GENERALES (Editable) =====================
+          _buildSectionHeader(Icons.notes, 'OBSERVACIONES GENERALES DEL SERVICIO'),
+          
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: TextField(
+              enabled: _isEditable(),
+              // Usamos TextEditingController.fromValue para evitar saltos de cursor al reconstruir
+              controller: TextEditingController.fromValue(
+                TextEditingValue(
+                  text: _report!.generalObservations,
+                  selection: TextSelection.collapsed(offset: _report!.generalObservations.length),
+                ),
+              ),
+              maxLines: 3,
+              style: const TextStyle(fontSize: 13, color: Color(0xFF334155)),
+              decoration: InputDecoration(
+                hintText: 'Comentarios globales sobre la visita, accesos, estado general de las instalaciones...',
+                hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                filled: true,
+                fillColor: const Color(0xFFF8FAFC), // Slate-50 background
+                contentPadding: const EdgeInsets.all(12),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide.none,
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: BorderSide(color: Colors.grey.shade200),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+                ),
+              ),
+              onChanged: (val) {
+                _report = _report!.copyWith(generalObservations: val);
+                _repo.saveReport(_report!);
+              },
             ),
-            onChanged: (val) {
-               // Pequeña optimización: no guardar en cada caracter, usar debounce en producción
-               final updated = _report!.copyWith(generalObservations: val);
-               // No hacemos setState aquí para no reconstruir todo el árbol mientras escribe
-               _report = updated; 
-               _repo.saveReport(_report!);
-            },
+          ),
+
+          // Divisor entre secciones
+          Divider(height: 1, color: Colors.grey.shade200),
+
+          // ===================== SECCIÓN 2: HALLAZGOS REGISTRADOS (Lectura) =====================
+          _buildSectionHeader(Icons.find_in_page_outlined, 'HALLAZGOS REGISTRADOS EN DISPOSITIVOS', color: const Color(0xFFF59E0B)), // Color ámbar para resaltar
+
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: hasFindings
+                ? Column(
+                    children: registeredFindings.map((finding) {
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12.0),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // El "Badge" con el ID (ej. EXT-1:)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFE2E8F0), // Slate-200 (Gris claro como en la imagen)
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                "${finding['id']}:",
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF1E293B), // Slate-800
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            // El texto del hallazgo
+                            Expanded(
+                              child: Text(
+                                finding['text']!,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF334155), // Slate-700
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                  )
+                : Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.grey.shade100)
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.check_circle_outline, size: 16, color: Colors.grey.shade400),
+                        const SizedBox(width: 8),
+                        Text(
+                          "No se registraron observaciones individuales en los equipos.",
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade500, fontStyle: FontStyle.italic),
+                        ),
+                      ],
+                    ),
+                  ),
           ),
         ],
       ),
     );
   }
 
-  // Modal de Observaciones (Copiado y adaptado para funcionar con el nuevo stack)
+  Widget _buildSectionHeader(IconData icon, String title, {Color color = const Color(0xFF3B82F6)}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              color: const Color(0xFF1E293B), // Slate-800
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================
+  // 2. MODAL DE OBSERVACIONES (Bottom Sheet)
+  // ==========================================
   Widget _buildObservationModal() {
     if (_activeObservationEntry == null) return const SizedBox();
     
@@ -779,57 +1003,270 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     
     String currentObservation;
     String title;
+    String subtitle;
+    IconData icon;
+    Color accentColor;
 
     if (_activeObservationActivityId != null) {
-      currentObservation = entry.activityData[_activeObservationActivityId]?.observations ?? '';
+      final actData = entry.activityData[_activeObservationActivityId];
+      currentObservation = actData?.observations ?? '';
       title = 'Observación de Actividad';
+      subtitle = 'ID: ${entry.customId} • ${_activeObservationActivityId}';
+      icon = Icons.assignment_outlined;
+      accentColor = const Color(0xFFF59E0B); // Ámbar para actividades
     } else {
       currentObservation = entry.observations;
-      title = '${entry.customId} - Observaciones';
+      title = entry.customId.isNotEmpty ? entry.customId : 'Dispositivo #${entry.deviceIndex}';
+      subtitle = entry.area.isNotEmpty ? entry.area : 'Sin ubicación especificada';
+      icon = Icons.devices_other;
+      accentColor = const Color(0xFF3B82F6); // Azul para dispositivos
     }
 
-    // Usamos un Controller local para el modal
     final textController = TextEditingController(text: currentObservation);
+    final characterCount = ValueNotifier<int>(currentObservation.length);
 
     return Container(
-      color: Colors.white,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 30,
+            offset: const Offset(0, -5),
+          )
+        ],
+      ),
       padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom,
-        left: 16, right: 16, top: 16
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        left: 24, 
+        right: 24, 
+        top: 12
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          // Handle (drag indicator)
+          Center(
+            child: Container(
+              width: 36, 
+              height: 4, 
+              margin: const EdgeInsets.only(bottom: 20),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300, 
+                borderRadius: BorderRadius.circular(2)
+              ),
+            ),
+          ),
+
+          // Header con gradiente sutil
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [accentColor.withOpacity(0.1), accentColor.withOpacity(0.05)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: accentColor.withOpacity(0.2)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: [
+                      BoxShadow(color: accentColor.withOpacity(0.15), blurRadius: 8, offset: const Offset(0, 2))
+                    ],
+                  ),
+                  child: Icon(icon, color: accentColor, size: 24),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title, 
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800, 
+                          fontSize: 15, 
+                          color: Color(0xFF1E293B),
+                          letterSpacing: -0.3,
+                        )
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle, 
+                        style: const TextStyle(
+                          color: Color(0xFF64748B), 
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1, 
+                        overflow: TextOverflow.ellipsis
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8), size: 22), 
+                  onPressed: () => setState(() { 
+                    _activeObservationEntry = null; 
+                    _activeObservationActivityId = null; 
+                  }),
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          
+          const SizedBox(height: 24),
+          
+          // Label del campo
+          const Row(
             children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-              IconButton(icon: const Icon(Icons.close), onPressed: () => setState(() { _activeObservationEntry = null; _activeObservationActivityId = null; })),
+              Icon(Icons.edit_note, size: 16, color: Color(0xFF64748B)),
+              SizedBox(width: 8),
+              Text(
+                'DETALLES Y HALLAZGOS',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF64748B),
+                  letterSpacing: 0.5,
+                ),
+              ),
             ],
           ),
-          TextField(
-            controller: textController,
-            maxLines: 5,
-            autofocus: true,
-            decoration: const InputDecoration(border: OutlineInputBorder()),
+          
+          const SizedBox(height: 12),
+          
+          // Input de Texto con contador
+          Stack(
+            children: [
+              TextField(
+                controller: textController,
+                maxLines: 6,
+                maxLength: 500,
+                autofocus: true,
+                style: const TextStyle(fontSize: 14, height: 1.5, color: Color(0xFF334155)),
+                decoration: InputDecoration(
+                  hintText: 'Describa cualquier anomalía, condición especial o recomendación técnica...',
+                  hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                  filled: true,
+                  fillColor: const Color(0xFFF8FAFC),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.grey.shade200),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.grey.shade200),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: accentColor, width: 2),
+                  ),
+                  contentPadding: const EdgeInsets.all(16),
+                  counterText: '', // Ocultar contador por defecto
+                ),
+                onChanged: (value) => characterCount.value = value.length,
+              ),
+              // Contador custom en la esquina
+              Positioned(
+                bottom: 8,
+                right: 12,
+                child: ValueListenableBuilder<int>(
+                  valueListenable: characterCount,
+                  builder: (context, count, _) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: count > 450 ? Colors.red.shade50 : Colors.white,
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(
+                          color: count > 450 ? Colors.red.shade200 : Colors.grey.shade200
+                        ),
+                      ),
+                      child: Text(
+                        '$count/500',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: count > 450 ? Colors.red.shade700 : const Color(0xFF94A3B8),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 10),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: _primaryDark, foregroundColor: Colors.white),
-            onPressed: () {
-              if (_activeObservationActivityId != null) {
-                final currentData = entry.activityData[_activeObservationActivityId!] ?? ActivityData(photos: [], observations: '');
-                final newActivityData = Map<String, ActivityData>.from(entry.activityData);
-                newActivityData[_activeObservationActivityId!] = ActivityData(photos: currentData.photos, observations: textController.text);
-                _updateEntry(entryIdx, activityData: newActivityData);
-              } else {
-                _updateEntry(entryIdx, observations: textController.text);
-              }
-              setState(() { _activeObservationEntry = null; _activeObservationActivityId = null; });
-            },
-            child: const Text('Guardar Observación'),
+          
+          const SizedBox(height: 24),
+          
+          // Botones de Acción
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => setState(() { 
+                    _activeObservationEntry = null; 
+                    _activeObservationActivityId = null; 
+                  }),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    foregroundColor: const Color(0xFF64748B),
+                    side: BorderSide(color: Colors.grey.shade300),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  child: const Text("Cancelar", style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                flex: 2,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.check_circle_outline, size: 18),
+                  label: const Text('Guardar', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: accentColor,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
+                    shadowColor: accentColor.withOpacity(0.3),
+                  ),
+                  onPressed: () {
+                    if (_activeObservationActivityId != null) {
+                      final currentData = entry.activityData[_activeObservationActivityId!] ?? 
+                          ActivityData(photos: [], observations: '');
+                      final newActivityData = Map<String, ActivityData>.from(entry.activityData);
+                      newActivityData[_activeObservationActivityId!] = ActivityData(
+                        photos: currentData.photos, 
+                        observations: textController.text
+                      );
+                      _updateEntry(entryIdx, activityData: newActivityData);
+                    } else {
+                      _updateEntry(entryIdx, observations: textController.text);
+                    }
+                    setState(() { 
+                      _activeObservationEntry = null; 
+                      _activeObservationActivityId = null; 
+                    });
+                  },
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 20),
         ],
       ),
     );
@@ -841,57 +1278,318 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     final entry = _report!.entries[_photoContextEntryIdx!];
     
     List<String> photos;
+    String contextTitle;
+    
     if (_photoContextActivityId != null) {
       photos = entry.activityData[_photoContextActivityId]?.photos ?? [];
+      contextTitle = 'Fotos de Actividad • ${entry.customId}';
     } else {
       photos = entry.photos;
+      contextTitle = 'Fotos del Dispositivo • ${entry.customId}';
     }
 
     return Container(
-      height: 400,
-      color: Colors.white,
-      padding: const EdgeInsets.all(16),
+      height: MediaQuery.of(context).size.height * 0.65,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 30,
+            offset: const Offset(0, -5),
+          )
+        ],
+      ),
       child: Column(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('Gestión de Fotos', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              IconButton(icon: const Icon(Icons.close), onPressed: () => setState(() { _photoContextEntryIdx = null; _photoContextActivityId = null; })),
-            ],
+          // Handle
+          Center(
+            child: Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.only(top: 12, bottom: 16),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
           ),
-          Expanded(
-            child: GridView.builder(
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, crossAxisSpacing: 8, mainAxisSpacing: 8),
-              itemCount: photos.length + 1,
-              itemBuilder: (ctx, idx) {
-                if (idx == photos.length) {
-                  return InkWell(
-                    onTap: _pickImage,
-                    child: Container(
-                      color: Colors.grey.shade200,
-                      child: const Icon(Icons.add_a_photo, color: Colors.grey),
-                    ),
-                  );
-                }
-                return Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Image.memory(base64Decode(photos[idx]), fit: BoxFit.cover),
-                    Positioned(
-                      top: 0, right: 0,
-                      child: Container(
-                        color: Colors.black54,
-                        child: InkWell(
-                          onTap: () => _deletePhoto(idx),
-                          child: const Icon(Icons.delete, color: Colors.white, size: 20),
+          
+          // Header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF1F5F9),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.photo_library, color: Color(0xFF3B82F6), size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        contextTitle,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                          color: Color(0xFF1E293B),
+                          letterSpacing: -0.3,
                         ),
                       ),
-                    ),
-                  ],
-                );
-              },
+                      Text(
+                        '${photos.length} ${photos.length == 1 ? 'foto' : 'fotos'}',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF64748B),
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8)),
+                  onPressed: () => setState(() {
+                    _photoContextEntryIdx = null;
+                    _photoContextActivityId = null;
+                  }),
+                  style: IconButton.styleFrom(
+                    backgroundColor: const Color(0xFFF1F5F9),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ],
             ),
+          ),
+          
+          const Divider(height: 1),
+          
+          // Grid de fotos
+          Expanded(
+            child: photos.isEmpty
+                ? _buildEmptyPhotoState()
+                : Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: GridView.builder(
+                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 3,
+                        crossAxisSpacing: 12,
+                        mainAxisSpacing: 12,
+                      ),
+                      itemCount: photos.length + 1,
+                      itemBuilder: (ctx, idx) {
+                        if (idx == photos.length) {
+                          return _buildAddPhotoButton();
+                        }
+                        return _buildPhotoThumbnail(photos[idx], idx);
+                      },
+                    ),
+                  ),
+          ),
+          
+          // Botón de acción flotante (si hay fotos)
+          if (photos.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(24),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _pickImage,
+                  icon: const Icon(Icons.add_a_photo, size: 20),
+                  label: const Text(
+                    'Tomar Primera Foto',
+                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF3B82F6),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyPhotoState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF1F5F9),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              Icons.add_a_photo_outlined,
+              size: 48,
+              color: Colors.grey.shade400,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Sin fotos registradas',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: Colors.grey.shade700,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Toca el botón para agregar evidencia fotográfica',
+            style: TextStyle(
+              fontSize: 13,
+              color: Colors.grey.shade500,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAddPhotoButton() {
+    return InkWell(
+      onTap: _pickImage,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFFF8FAFC),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: const Color(0xFF3B82F6),
+            width: 2,
+            strokeAlign: BorderSide.strokeAlignInside,
+          ),
+        ),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.add_circle, color: Color(0xFF3B82F6), size: 32),
+            SizedBox(height: 8),
+            Text(
+              'Agregar',
+              style: TextStyle(
+                color: Color(0xFF3B82F6),
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPhotoThumbnail(String base64Photo, int index) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          )
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Image.memory(
+              base64Decode(base64Photo),
+              fit: BoxFit.cover,
+            ),
+            // Overlay con botón de eliminar
+            Positioned(
+              top: 6,
+              right: 6,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.7),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: IconButton(
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  onPressed: () => _showDeleteConfirmation(index),
+                  icon: const Icon(Icons.delete_outline, color: Colors.white, size: 18),
+                ),
+              ),
+            ),
+            // Indicador de número
+            Positioned(
+              bottom: 6,
+              left: 6,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.7),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  '#${index + 1}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showDeleteConfirmation(int photoIndex) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Color(0xFFF59E0B), size: 24),
+            SizedBox(width: 12),
+            Text('Confirmar Eliminación', style: TextStyle(fontSize: 16)),
+          ],
+        ),
+        content: const Text(
+          '¿Estás seguro de eliminar esta foto? Esta acción no se puede deshacer.',
+          style: TextStyle(fontSize: 14, color: Color(0xFF64748B)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar', style: TextStyle(color: Color(0xFF64748B))),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _confirmDeletePhoto(photoIndex);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            child: const Text('Eliminar'),
           ),
         ],
       ),

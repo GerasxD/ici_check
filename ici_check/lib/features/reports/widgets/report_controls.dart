@@ -31,170 +31,306 @@ class ReportControls extends StatelessWidget {
     });
   }
 
+  // Helper para saber si el servicio está "en curso"
+  bool get _isInProgress => report.startTime != null && report.endTime == null;
+  bool get _isFinished => report.startTime != null && report.endTime != null;
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade200),
+        borderRadius: BorderRadius.circular(16),
+        // Sombra más elegante y profunda
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+        border: Border.all(color: Colors.grey.shade100),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Personal Designado
+          // 1. ZONA DE ESTADO Y PERSONAL (SUPERIOR)
           Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.blue.shade50,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.blue.shade200),
+            padding: const EdgeInsets.all(20),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Etiqueta superior
                 const Row(
                   children: [
-                    Icon(Icons.people, size: 16, color: Color(0xFF3B82F6)),
+                    Icon(Icons.engineering, size: 16, color: Color(0xFF64748B)),
                     SizedBox(width: 8),
-                    Text('PERSONAL DESIGNADO', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900)),
+                    Text(
+                      'EQUIPO TÉCNICO',
+                      style: TextStyle(
+                        fontSize: 11, 
+                        fontWeight: FontWeight.w800, 
+                        color: Color(0xFF64748B),
+                        letterSpacing: 0.5
+                      ),
+                    ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: report.assignedTechnicianIds.map((uid) {
-                    final user = users.firstWhere(
-                      (u) => u.id == uid,
-                      orElse: () => UserModel(id: uid, name: 'Usuario', email: ''),
-                    );
-                    return Chip(
-                      avatar: CircleAvatar(
-                        backgroundColor: const Color(0xFF3B82F6),
-                        child: Text(user.name[0].toUpperCase(), style: const TextStyle(fontSize: 10, color: Colors.white)),
-                      ),
-                      label: Text(user.name, style: const TextStyle(fontSize: 11)),
-                      backgroundColor: Colors.white,
-                      side: BorderSide(color: Colors.blue.shade300),
-                    );
-                  }).toList(),
+                const SizedBox(height: 12),
+                
+                // Lista de Avatares (Más limpia)
+                SizedBox(
+                  width: double.infinity,
+                  child: Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: report.assignedTechnicianIds.isEmpty
+                        ? [const Text("Sin asignar", style: TextStyle(color: Colors.grey, fontSize: 13))]
+                        : report.assignedTechnicianIds.map((uid) {
+                            final user = users.firstWhere(
+                              (u) => u.id == uid,
+                              orElse: () => UserModel(id: uid, name: 'Usuario', email: ''),
+                            );
+                            return _buildUserBadge(user);
+                          }).toList(),
+                  ),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 16),
-          // Fechas y Controles
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+
+          // 2. ZONA DE ACCIÓN Y TIEMPOS (INFERIOR)
+          Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              children: [
+                // Fila de Fecha y Tiempos
+                Row(
                   children: [
-                    const Text('FECHA DE EJECUCIÓN', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Color(0xFF64748B))),
-                    const SizedBox(height: 4),
-                    InkWell(
-                      onTap: adminOverride
-                          ? () async {
-                              final picked = await showDatePicker(
-                                context: context,
-                                initialDate: report.serviceDate,
-                                firstDate: DateTime(2020),
-                                lastDate: DateTime(2030),
-                              );
-                              if (picked != null) onDateChanged(picked);
-                            }
-                          : null,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: adminOverride ? Colors.white : Colors.grey.shade50,
-                          border: Border.all(color: Colors.grey.shade300),
-                          borderRadius: BorderRadius.circular(8),
+                    // Columna FECHA
+                    Expanded(
+                      flex: 4,
+                      child: InkWell(
+                         onTap: adminOverride
+                              ? () async {
+                                  final picked = await showDatePicker(
+                                    context: context,
+                                    initialDate: report.serviceDate,
+                                    firstDate: DateTime(2020),
+                                    lastDate: DateTime(2030),
+                                  );
+                                  if (picked != null) onDateChanged(picked);
+                                }
+                              : null,
+                        borderRadius: BorderRadius.circular(10),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF8FAFC), // Slate-50
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: adminOverride ? const Color(0xFFCBD5E1) : Colors.transparent),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const Text('FECHA', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Color(0xFF94A3B8))),
+                                  if(adminOverride) const Icon(Icons.edit, size: 10, color: Color(0xFF94A3B8)),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  const Icon(Icons.calendar_month, size: 16, color: Color(0xFF334155)),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    DateFormat('dd MMM yyyy', 'es').format(report.serviceDate).toUpperCase(),
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF334155)),
+                                  ),
+                                ],
+                              )
+                            ],
+                          ),
                         ),
-                        child: Row(
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    
+                    // Columna HORARIOS
+                    Expanded(
+                      flex: 3,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                           color: const Color(0xFFF8FAFC), // Slate-50
+                           borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Icon(Icons.calendar_today, size: 14, color: Color(0xFF3B82F6)),
-                            const SizedBox(width: 8),
-                            Text(
-                              DateFormat('dd MMMM yyyy', 'es').format(report.serviceDate),
-                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
-                            ),
+                            const Text('HORARIO', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Color(0xFF94A3B8))),
+                            const SizedBox(height: 4),
+                            Row(
+                               children: [
+                                 Text(
+                                   report.startTime ?? '--:--',
+                                   style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF334155)),
+                                 ),
+                                 const Padding(
+                                   padding: EdgeInsets.symmetric(horizontal: 4),
+                                   child: Icon(Icons.arrow_right_alt, size: 12, color: Color(0xFF94A3B8)),
+                                 ),
+                                 Text(
+                                   report.endTime ?? '--:--',
+                                   style: TextStyle(
+                                     fontSize: 13, 
+                                     fontWeight: FontWeight.w600, 
+                                     color: report.endTime != null ? const Color(0xFF334155) : const Color(0xFFCBD5E1)
+                                    ),
+                                 ),
+                               ],
+                            )
                           ],
                         ),
                       ),
                     ),
                   ],
                 ),
-              ),
-              const SizedBox(width: 16),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('HORARIOS', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Color(0xFF64748B))),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      _buildTimeBox(report.startTime ?? '--:--'),
-                      const SizedBox(width: 12),
-                      _buildTimeBox(report.endTime ?? '--:--'),
-                    ],
+
+                const SizedBox(height: 20),
+
+                // BOTÓN DE ACCIÓN PRINCIPAL (Full Width)
+                if (isUserDesignated) 
+                  SizedBox(
+                    width: double.infinity,
+                    child: _buildActionButton(),
                   ),
-                ],
-              ),
-              if (isUserDesignated) ...[
-                const SizedBox(width: 16),
-                _buildActionButton(),
               ],
-            ],
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildTimeBox(String time) {
+  // Badge de Usuario más limpio
+  Widget _buildUserBadge(UserModel user) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(4, 4, 12, 4),
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border.all(color: Colors.grey.shade300),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.02), blurRadius: 4, offset: const Offset(0, 2))
+        ]
       ),
-      child: Text(time, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CircleAvatar(
+            radius: 10,
+            backgroundColor: const Color(0xFF3B82F6), // Blue-500
+            child: Text(
+              user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
+              style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            user.name.split(' ').first, // Solo primer nombre
+            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF334155)),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildActionButton() {
-    if (report.startTime == null) {
-      return ElevatedButton.icon(
+    if (!_isInProgress && !_isFinished) {
+      // ESTADO: INICIAL (Botón Verde Grande)
+      return ElevatedButton(
         onPressed: onStartService,
-        icon: const Icon(Icons.play_arrow, size: 16),
-        label: const Text('INICIAR'),
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF10B981), // Emerald-500
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.play_circle_fill, size: 20),
+            SizedBox(width: 8),
+            Text('INICIAR SERVICIO', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+          ],
+        ),
       );
-    } else if (report.endTime == null) {
-      return ElevatedButton.icon(
+    } else if (_isInProgress) {
+      // ESTADO: EN PROGRESO (Botón Rojo Pulsante)
+      return ElevatedButton(
         onPressed: onEndService,
-        icon: const Icon(Icons.stop, size: 16),
-        label: const Text('FINALIZAR'),
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFFEF4444), // Red-500
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.stop_circle, size: 20),
+            SizedBox(width: 8),
+            Text('FINALIZAR SERVICIO', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+          ],
+        ),
       );
     } else if (!_isReportComplete()) {
-      return ElevatedButton.icon(
+      // ESTADO: INCOMPLETO (Botón Naranja para reabrir)
+      return ElevatedButton(
         onPressed: onResumeService,
-        icon: const Icon(Icons.refresh, size: 16),
-        label: const Text('REANUDAR'),
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, foregroundColor: Colors.white),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFFF59E0B), // Amber-500
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.replay, size: 20),
+            SizedBox(width: 8),
+            Text('REANUDAR (Incompleto)', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+          ],
+        ),
       );
     } else {
-      return ElevatedButton.icon(
-        onPressed: null,
-        icon: const Icon(Icons.check, size: 16),
-        label: const Text('FINALIZADO'),
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.grey, foregroundColor: Colors.white),
+      // ESTADO: COMPLETADO (Deshabilitado / Gris)
+      return Container(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF1F5F9), // Slate-100
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.check_circle, size: 20, color: Color(0xFF10B981)),
+            SizedBox(width: 8),
+            Text(
+              'SERVICIO COMPLETADO', 
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF64748B), letterSpacing: 0.5)
+            ),
+          ],
+        ),
       );
     }
   }

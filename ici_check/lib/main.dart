@@ -91,11 +91,7 @@ class AuthWrapper extends StatelessWidget {
   }
 }
 
-/// ---------------------------------------------------------------------
-/// WIDGET TEMPORAL: DASHBOARD PLACEHOLDER
-/// Para que el código compile y puedas probar el login.
-/// Luego sustituiremos esto por tu Dashboard.tsx real.
-/// ---------------------------------------------------------------------
+
 class DashboardPlaceholder extends StatelessWidget {
   const DashboardPlaceholder({super.key});
 
