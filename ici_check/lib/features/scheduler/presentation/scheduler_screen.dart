@@ -601,33 +601,31 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   }
   
   void _handleHeaderReportClick(int index) {
-    // 1. Calcular la fecha de la columna (mismo cálculo que en el header)
     DateTime columnDate;
     if (_viewMode == 'monthly') {
       columnDate = DateTime(
         _policy.startDate.year,
         _policy.startDate.month + index,
-        1, // Forzamos día 1 para clave mensual
+        1,
       );
     } else {
       columnDate = _policy.startDate.add(Duration(days: index * 7));
     }
 
-    // 2. Generar la clave (dateStr) para buscar el reporte
     String dateKey = _viewMode == 'monthly'
         ? DateFormat('yyyy-MM').format(columnDate)
         : "${columnDate.year}-W${index + 1}";
 
-    // 3. Navegar a la pantalla de reportes
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => ServiceReportScreen(
           policyId: widget.policyId,
           dateStr: dateKey,
-          policy: _policy, // Pasamos la póliza para no recargarla
-          devices: _deviceDefinitions, // Pasamos las definiciones de equipos
-          users: _allTechnicians, // Pasamos los usuarios
+          policy: _policy,
+          devices: _deviceDefinitions,
+          users: _allTechnicians,
+          client: _client!, // Agregamos el cliente
         ),
       ),
     );

@@ -35,6 +35,46 @@ class ServiceReportModel {
     this.status = 'draft',
   });
 
+  // --- NUEVO: Método copyWith para actualizaciones inmutables ---
+  ServiceReportModel copyWith({
+    String? id,
+    String? policyId,
+    String? dateStr,
+    DateTime? serviceDate,
+    String? startTime,
+    String? endTime,
+    List<String>? assignedTechnicianIds,
+    List<ReportEntry>? entries,
+    String? generalObservations,
+    String? providerSignature,
+    String? clientSignature,
+    String? providerSignerName,
+    String? clientSignerName,
+    Map<String, List<String>>? sectionAssignments,
+    String? status,
+    // Parámetro especial para permitir limpiar el endTime (ponerlo en null)
+    bool forceNullEndTime = false, 
+  }) {
+    return ServiceReportModel(
+      id: id ?? this.id,
+      policyId: policyId ?? this.policyId,
+      dateStr: dateStr ?? this.dateStr,
+      serviceDate: serviceDate ?? this.serviceDate,
+      startTime: startTime ?? this.startTime,
+      // Lógica para permitir 'null' en endTime si se requiere reiniciar (ej. reanudar servicio)
+      endTime: forceNullEndTime ? null : (endTime ?? this.endTime),
+      assignedTechnicianIds: assignedTechnicianIds ?? this.assignedTechnicianIds,
+      entries: entries ?? this.entries,
+      generalObservations: generalObservations ?? this.generalObservations,
+      providerSignature: providerSignature ?? this.providerSignature,
+      clientSignature: clientSignature ?? this.clientSignature,
+      providerSignerName: providerSignerName ?? this.providerSignerName,
+      clientSignerName: clientSignerName ?? this.clientSignerName,
+      sectionAssignments: sectionAssignments ?? this.sectionAssignments,
+      status: status ?? this.status,
+    );
+  }
+
   Map<String, dynamic> toMap() {
     return {
       'id': id,
@@ -50,7 +90,7 @@ class ServiceReportModel {
       'clientSignature': clientSignature,
       'providerSignerName': providerSignerName,
       'clientSignerName': clientSignerName,
-      'sectionAssignments': sectionAssignments, // Firestore soporta Maps
+      'sectionAssignments': sectionAssignments,
       'status': status,
     };
   }
@@ -103,6 +143,29 @@ class ReportEntry {
     this.activityData = const {},
   });
 
+  // --- NUEVO: Método copyWith ---
+  ReportEntry copyWith({
+    String? instanceId,
+    int? deviceIndex,
+    String? customId,
+    String? area,
+    Map<String, String?>? results,
+    String? observations,
+    List<String>? photos,
+    Map<String, ActivityData>? activityData,
+  }) {
+    return ReportEntry(
+      instanceId: instanceId ?? this.instanceId,
+      deviceIndex: deviceIndex ?? this.deviceIndex,
+      customId: customId ?? this.customId,
+      area: area ?? this.area,
+      results: results ?? this.results,
+      observations: observations ?? this.observations,
+      photos: photos ?? this.photos,
+      activityData: activityData ?? this.activityData,
+    );
+  }
+
   Map<String, dynamic> toMap() {
     return {
       'instanceId': instanceId,
@@ -139,6 +202,17 @@ class ActivityData {
   final String observations;
 
   ActivityData({this.photos = const [], this.observations = ''});
+
+  // --- NUEVO: Método copyWith ---
+  ActivityData copyWith({
+    List<String>? photos,
+    String? observations,
+  }) {
+    return ActivityData(
+      photos: photos ?? this.photos,
+      observations: observations ?? this.observations,
+    );
+  }
 
   Map<String, dynamic> toMap() => {'photos': photos, 'observations': observations};
 
