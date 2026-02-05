@@ -116,18 +116,29 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
     setState(() => _isLoading = true);
 
     try {
+      // 1. Limpiar la fecha (quitar horas y minutos) para evitar desfases
+      final cleanStartDate = DateTime(_startDate.year, _startDate.month, _startDate.day);
+
       final devicesList = _selectedDevices.values.map((item) {
+        // 2. Inicializar los offsets en 0 para todas las actividades
+        // Esto garantiza que la actividad comience el día exacto de la 'cleanStartDate'
+        Map<String, int> initialOffsets = {};
+        for (var activity in item.def.activities) {
+          initialOffsets[activity.id] = 0; 
+        }
+
         return PolicyDevice(
           instanceId: _uuid.v4(),
           definitionId: item.def.id,
           quantity: item.qty,
+          scheduleOffsets: initialOffsets, // <--- AGREGAR ESTO
         );
       }).toList();
 
       final newPolicy = PolicyModel(
         id: _uuid.v4(),
         clientId: _selectedClientId!,
-        startDate: _startDate,
+        startDate: cleanStartDate, // <--- USAR LA FECHA LIMPIA
         durationMonths: _durationMonths,
         includeWeekly: _includeWeekly,
         assignedUserIds: [_selectedUserId!],

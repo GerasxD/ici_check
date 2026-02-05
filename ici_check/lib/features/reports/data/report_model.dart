@@ -1,0 +1,151 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class ServiceReportModel {
+  final String id;
+  final String policyId;
+  final String dateStr; // "2025-02" o "2025-W05"
+  final DateTime serviceDate;
+  final String? startTime;
+  final String? endTime;
+  final List<String> assignedTechnicianIds;
+  final List<ReportEntry> entries;
+  final String generalObservations;
+  final String? providerSignature; // Base64 o URL
+  final String? clientSignature;   // Base64 o URL
+  final String? providerSignerName;
+  final String? clientSignerName;
+  final Map<String, List<String>> sectionAssignments; // {defId: [userIds]}
+  final String status; // 'draft', 'completed'
+
+  ServiceReportModel({
+    required this.id,
+    required this.policyId,
+    required this.dateStr,
+    required this.serviceDate,
+    this.startTime,
+    this.endTime,
+    required this.assignedTechnicianIds,
+    required this.entries,
+    this.generalObservations = '',
+    this.providerSignature,
+    this.clientSignature,
+    this.providerSignerName,
+    this.clientSignerName,
+    this.sectionAssignments = const {},
+    this.status = 'draft',
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'policyId': policyId,
+      'dateStr': dateStr,
+      'serviceDate': Timestamp.fromDate(serviceDate),
+      'startTime': startTime,
+      'endTime': endTime,
+      'assignedTechnicianIds': assignedTechnicianIds,
+      'entries': entries.map((x) => x.toMap()).toList(),
+      'generalObservations': generalObservations,
+      'providerSignature': providerSignature,
+      'clientSignature': clientSignature,
+      'providerSignerName': providerSignerName,
+      'clientSignerName': clientSignerName,
+      'sectionAssignments': sectionAssignments, // Firestore soporta Maps
+      'status': status,
+    };
+  }
+
+  factory ServiceReportModel.fromMap(Map<String, dynamic> map) {
+    return ServiceReportModel(
+      id: map['id'] ?? '',
+      policyId: map['policyId'] ?? '',
+      dateStr: map['dateStr'] ?? '',
+      serviceDate: (map['serviceDate'] as Timestamp).toDate(),
+      startTime: map['startTime'],
+      endTime: map['endTime'],
+      assignedTechnicianIds: List<String>.from(map['assignedTechnicianIds'] ?? []),
+      entries: List<ReportEntry>.from(
+        (map['entries'] as List? ?? []).map((x) => ReportEntry.fromMap(x)),
+      ),
+      generalObservations: map['generalObservations'] ?? '',
+      providerSignature: map['providerSignature'],
+      clientSignature: map['clientSignature'],
+      providerSignerName: map['providerSignerName'],
+      clientSignerName: map['clientSignerName'],
+      sectionAssignments: Map<String, List<String>>.from(
+        (map['sectionAssignments'] ?? {}).map(
+          (k, v) => MapEntry(k, List<String>.from(v)),
+        ),
+      ),
+      status: map['status'] ?? 'draft',
+    );
+  }
+}
+
+class ReportEntry {
+  final String instanceId;
+  final int deviceIndex;
+  final String customId; // "EXT-1"
+  final String area;
+  final Map<String, String?> results; // {activityId: 'OK'|'NOK'|'NA'|null}
+  final String observations;
+  final List<String> photos; // Base64 o URLs
+  final Map<String, ActivityData> activityData; // {activityId: {photos:[], obs:''}}
+
+  ReportEntry({
+    required this.instanceId,
+    required this.deviceIndex,
+    required this.customId,
+    this.area = '',
+    required this.results,
+    this.observations = '',
+    this.photos = const [],
+    this.activityData = const {},
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'instanceId': instanceId,
+      'deviceIndex': deviceIndex,
+      'customId': customId,
+      'area': area,
+      'results': results,
+      'observations': observations,
+      'photos': photos,
+      'activityData': activityData.map((k, v) => MapEntry(k, v.toMap())),
+    };
+  }
+
+  factory ReportEntry.fromMap(Map<String, dynamic> map) {
+    return ReportEntry(
+      instanceId: map['instanceId'] ?? '',
+      deviceIndex: map['deviceIndex'] ?? 0,
+      customId: map['customId'] ?? '',
+      area: map['area'] ?? '',
+      results: Map<String, String?>.from(map['results'] ?? {}),
+      observations: map['observations'] ?? '',
+      photos: List<String>.from(map['photos'] ?? []),
+      activityData: Map<String, ActivityData>.from(
+        (map['activityData'] ?? {}).map(
+          (k, v) => MapEntry(k, ActivityData.fromMap(v)),
+        ),
+      ),
+    );
+  }
+}
+
+class ActivityData {
+  final List<String> photos;
+  final String observations;
+
+  ActivityData({this.photos = const [], this.observations = ''});
+
+  Map<String, dynamic> toMap() => {'photos': photos, 'observations': observations};
+
+  factory ActivityData.fromMap(Map<String, dynamic> map) {
+    return ActivityData(
+      photos: List<String>.from(map['photos'] ?? []),
+      observations: map['observations'] ?? '',
+    );
+  }
+}
