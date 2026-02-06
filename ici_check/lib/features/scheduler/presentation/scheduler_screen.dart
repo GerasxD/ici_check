@@ -4,7 +4,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:ici_check/features/auth/data/users_repository.dart';
+import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/reports/presentation/service_report_screen.dart';
+import 'package:ici_check/features/reports/services/pdf_generator_service.dart';
+import 'package:ici_check/features/reports/services/schedule_pdf_service.dart';
+import 'package:ici_check/features/settings/data/settings_repository.dart';
 import 'package:intl/intl.dart';
 import 'package:ici_check/features/policies/data/policy_model.dart';
 import 'package:ici_check/features/policies/data/policies_repository.dart';
@@ -12,6 +16,7 @@ import 'package:ici_check/features/clients/data/client_model.dart';
 import 'package:ici_check/features/clients/data/clients_repository.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/devices/data/devices_repository.dart';
+import 'package:printing/printing.dart';
 
 class SchedulerScreen extends StatefulWidget {
   final String policyId;
@@ -25,6 +30,9 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   final PoliciesRepository _policiesRepo = PoliciesRepository();
   final ClientsRepository _clientsRepo = ClientsRepository();
   final DevicesRepository _devicesRepo = DevicesRepository();
+
+  final ScrollController _headerScrollCtrl = ScrollController();
+  final ScrollController _bodyScrollCtrl = ScrollController();
 
   bool _isLoading = true;
   bool _isEditing = false;
@@ -62,11 +70,18 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   @override
   void initState() {
     super.initState();
+    _bodyScrollCtrl.addListener(() {
+      if (_headerScrollCtrl.hasClients) {
+        _headerScrollCtrl.jumpTo(_bodyScrollCtrl.offset);
+      }
+    });
     _loadAllData();
   }
 
   @override
   void dispose() {
+    _headerScrollCtrl.dispose();
+    _bodyScrollCtrl.dispose();
     _reportsSub?.cancel(); // IMPORTANTE: Cancelar al salir
     super.dispose();
   }
@@ -631,11 +646,77 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     );
   }
 
-  void _handleHeaderDownloadClick(int index) {
-    // Lógica para descargar PDF
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Descargando PDF del periodo...")),
-    );
+  Future<void> _handleHeaderDownloadClick(int index) async {
+    try {
+      // Mostrar indicador de carga
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+
+      // Obtener el reporte
+      final report = _getReportForColumn(index);
+      if (report == null) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No hay reporte disponible para este periodo'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      // Convertir el Map a ServiceReportModel
+      final reportModel = ServiceReportModel.fromMap(report);
+
+      // Obtener configuración de empresa
+      final companySettings = await SettingsRepository().getSettings();
+
+      // Generar PDF
+      final pdfBytes = await PdfGeneratorService.generateServiceReport(
+        report: reportModel,
+        client: _client!,
+        companySettings: companySettings,
+        deviceDefinitions: _deviceDefinitions,
+        technicians: _allTechnicians,
+        policyDevices: _policy.devices,
+      );
+
+      // Cerrar indicador de carga
+      Navigator.pop(context);
+
+      // Guardar y compartir PDF
+      await Printing.sharePdf(
+        bytes: pdfBytes,
+        filename: 'Reporte_${_client!.name}_${reportModel.dateStr}.pdf',
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('PDF generado exitosamente'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      // Cerrar indicador de carga si está abierto
+      if (Navigator.canPop(context)) Navigator.pop(context);
+
+      debugPrint('Error generando PDF: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al generar PDF: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -692,6 +773,53 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         ],
       ),
       actions: [
+        // --- NUEVO BOTÓN DE DESCARGAR CRONOGRAMA ---
+      Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: IconButton(
+          icon: Icon(Icons.picture_as_pdf, color: _primaryDark),
+          tooltip: "Descargar Cronograma PDF",
+          onPressed: () async {
+            // 1. Mostrar carga
+            showDialog(
+              context: context,
+              barrierDismissible: false,
+              builder: (ctx) => const Center(child: CircularProgressIndicator()),
+            );
+
+            try {
+              // 2. Obtener configuración de empresa
+              final companySettings = await SettingsRepository().getSettings();
+
+              // 3. Generar el PDF usando el servicio
+              final pdfBytes = await SchedulePdfService.generateSchedule(
+                policy: _policy,
+                client: _client!,
+                deviceDefinitions: _deviceDefinitions,
+                reports: _reports, // <--- Pasamos la lista cruda de mapas, no modelos
+                viewMode: _viewMode, 
+                companySettings: companySettings, // Nuevo parámetro
+              );
+
+              // 4. Cerrar carga
+              if (mounted) Navigator.pop(context);
+
+              // 5. Compartir/Imprimir
+              await Printing.sharePdf(
+                bytes: pdfBytes,
+                filename: 'Cronograma_${_client?.name ?? "Cliente"}.pdf',
+              );
+            } catch (e) {
+              if (mounted) Navigator.pop(context); // Cerrar carga si falla
+              debugPrint("Error PDF Cronograma: $e");
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text("Error generando PDF: $e"), backgroundColor: Colors.red),
+              );
+            }
+          },
+        ),
+      ),
+        
         if (_hasChanges)
           Padding(
             padding: const EdgeInsets.only(right: 8),
@@ -729,6 +857,14 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
 
   Widget _buildHeaderInfo() {
     final dateFormat = DateFormat('dd MMM yyyy', 'es');
+
+    // 1. Calcular fecha final real (Inicio + Duración)
+    // DateTime maneja el desbordamiento de años automáticamente (mes 13 = enero sig año)
+    final endDate = DateTime(
+      _policy.startDate.year,
+      _policy.startDate.month + _policy.durationMonths,
+      _policy.startDate.day
+    ).subtract(const Duration(days: 1)); // Restamos 1 día para que sea exacto (ej: 1 Feb a 31 Ene)
     
     return Container(
       margin: const EdgeInsets.all(16),
@@ -754,33 +890,57 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                   children: [
                     Text("Vista del Cronograma", style: TextStyle(color: _textSecondary, fontSize: 12, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 8),
-                    SegmentedButton<String>(
-                      segments: const [
-                        ButtonSegment(value: 'monthly', label: Text("MENSUAL"), icon: Icon(Icons.calendar_view_month, size: 16)),
-                        ButtonSegment(value: 'weekly', label: Text("SEMANAL"), icon: Icon(Icons.view_week, size: 16)),
-                      ],
-                      selected: {_viewMode},
-                      onSelectionChanged: (val) => setState(() => _viewMode = val.first),
-                      style: ButtonStyle(
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        visualDensity: VisualDensity.compact,
-                        backgroundColor: WidgetStateProperty.resolveWith<Color>(
-                          (states) => states.contains(WidgetState.selected) ? _primaryBlue : Colors.transparent,
+                    
+                    // --- AQUÍ ESTÁ EL CAMBIO DE VISIBILIDAD ---
+                    // Si _policy.includeWeekly es false, mostramos solo texto o un botón deshabilitado.
+                    // Si es true, mostramos el selector.
+                    if (_policy.includeWeekly)
+                      SegmentedButton<String>(
+                        segments: const [
+                          ButtonSegment(value: 'monthly', label: Text("MENSUAL"), icon: Icon(Icons.calendar_view_month, size: 16)),
+                          ButtonSegment(value: 'weekly', label: Text("SEMANAL"), icon: Icon(Icons.view_week, size: 16)),
+                        ],
+                        selected: {_viewMode},
+                        onSelectionChanged: (val) => setState(() => _viewMode = val.first),
+                        style: ButtonStyle(
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          visualDensity: VisualDensity.compact,
+                          backgroundColor: WidgetStateProperty.resolveWith<Color>(
+                            (states) => states.contains(WidgetState.selected) ? _primaryBlue : Colors.transparent,
+                          ),
+                          foregroundColor: WidgetStateProperty.resolveWith<Color>(
+                            (states) => states.contains(WidgetState.selected) ? Colors.white : _textSecondary,
+                          ),
                         ),
-                        foregroundColor: WidgetStateProperty.resolveWith<Color>(
-                          (states) => states.contains(WidgetState.selected) ? Colors.white : _textSecondary,
+                      )
+                    else
+                      // Si no tiene semanal, mostramos un indicador estático de "Solo Mensual"
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: _primaryBlue.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: _primaryBlue.withOpacity(0.3))
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.calendar_view_month, size: 16, color: _primaryBlue),
+                            const SizedBox(width: 8),
+                            Text("VISTA MENSUAL (Fija)", style: TextStyle(color: _primaryBlue, fontWeight: FontWeight.bold, fontSize: 12)),
+                          ],
                         ),
                       ),
-                    ),
                   ],
                 ),
               ),
               Column(
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  Text("PERIODO", style: TextStyle(color: _primaryBlue, fontSize: 10, fontWeight: FontWeight.bold)),
+                  Text("PERIODO DE VIGENCIA", style: TextStyle(color: _primaryBlue, fontSize: 10, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 4),
                   Text(
-                    "${dateFormat.format(_policy.startDate)} - ${dateFormat.format(_policy.startDate.add(Duration(days: _policy.durationMonths * 30)))}",
+                    "${dateFormat.format(_policy.startDate)} - ${dateFormat.format(endDate)}",
                     style: TextStyle(color: _textPrimary, fontSize: 12, fontWeight: FontWeight.bold),
                   ),
                 ],
@@ -796,7 +956,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                 children: [
                   Icon(Icons.info_outline, size: 16, color: Colors.orange.shade800),
                   const SizedBox(width: 8),
-                  Text("Modo edición activado", style: TextStyle(color: Colors.orange.shade900, fontSize: 12)),
+                  Text("Modo edición activado: Toca las celdas para programar.", style: TextStyle(color: Colors.orange.shade900, fontSize: 12)),
                 ],
               ),
              ),
@@ -826,12 +986,14 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         borderRadius: BorderRadius.circular(16),
         child: Column(
           children: [
+            // --- ENCABEZADO (HEADER) ---
             Container(
               color: _primaryDark,
               child: SingleChildScrollView(
+                controller: _headerScrollCtrl, // <--- CONTROLADOR 1
                 scrollDirection: Axis.horizontal,
+                physics: const NeverScrollableScrollPhysics(), // Bloqueamos el touch directo en el header para obligar a usar el body (evita desincronización)
                 child: Table(
-                  // AUMENTÉ EL ANCHO A 100 PARA QUE QUEPAN LOS BOTONES
                   defaultColumnWidth: const FixedColumnWidth(100), 
                   columnWidths: const {0: FixedColumnWidth(280)},
                   children: [
@@ -853,16 +1015,27 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                 ),
               ),
             ),
+            
+            // --- CUERPO (BODY) ---
             Expanded(
               child: SingleChildScrollView(
                 scrollDirection: Axis.vertical,
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Table(
-                    defaultColumnWidth: const FixedColumnWidth(100), // AUMENTÉ EL ANCHO A 100
-                    columnWidths: const {0: FixedColumnWidth(280)},
-                    border: TableBorder.all(color: _borderLight, width: 1),
-                    children: _buildDataRows(),
+                child: Scrollbar( // <--- AQUÍ ESTÁ LA BARRA VISIBLE PARA WEB
+                  controller: _bodyScrollCtrl,
+                  thumbVisibility: true, // Siempre visible
+                  trackVisibility: true, // Fondo de la barra visible (mejor UX en web)
+                  thickness: 10, // Un poco más gruesa para que sea fácil de agarrar con el mouse
+                  radius: const Radius.circular(10),
+                  child: SingleChildScrollView(
+                    controller: _bodyScrollCtrl, // <--- CONTROLADOR 2
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.only(bottom: 12), // Espacio para que la barra no tape contenido
+                    child: Table(
+                      defaultColumnWidth: const FixedColumnWidth(100),
+                      columnWidths: const {0: FixedColumnWidth(280)},
+                      border: TableBorder.all(color: _borderLight, width: 1),
+                      children: _buildDataRows(),
+                    ),
                   ),
                 ),
               ),
@@ -874,15 +1047,15 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   }
 
   // --- MODIFICADO: AHORA INCLUYE LOS BOTONES DE ACCIÓN ---
-  Widget _buildTimeHeader(int index) {
+Widget _buildTimeHeader(int index) {
     DateTime date;
     
-    // 1. Calcular fecha exacta de la columna
+    // 1. Calcular fecha exacta de inicio de la columna
     if (_viewMode == 'monthly') {
       date = DateTime(
         _policy.startDate.year, 
         _policy.startDate.month + index, 
-        _policy.startDate.day // Mantiene el día original (ej: 5)
+        _policy.startDate.day 
       );
     } else {
       date = _policy.startDate.add(Duration(days: index * 7));
@@ -891,67 +1064,98 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     // 2. Buscar si hay Reporte Real
     final report = _getReportForColumn(index);
     
-    // 3. Determinar etiquetas
+    // 3. Determinar si mostramos la fecha real
+    // CONDICIÓN CLAVE: Solo mostramos la fecha real si hay técnicos asignados.
+    // Esto asume que si usaste "Programar", asignaste al menos a 1 técnico.
+    bool showRealDate = false;
+    DateTime? serviceDate;
+
+    if (report != null && report['serviceDate'] != null) {
+      // Verificamos si hay técnicos asignados
+      List<dynamic> assignedTechs = report['assignedTechnicianIds'] ?? [];
+      if (assignedTechs.isNotEmpty) {
+        showRealDate = true;
+        serviceDate = (report['serviceDate'] as Timestamp).toDate();
+      }
+    }
+    
     String labelMain = "";
     String labelSub = "";
-    bool hasScheduledDate = false;
 
     if (_viewMode == 'monthly') {
-      labelMain = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
+      // --- VISTA MENSUAL ---
+      labelMain = DateFormat('MMM yyyy', 'es').format(date).toUpperCase().replaceAll('.', '');
       
-      if (report != null && report['serviceDate'] != null) {
-        // CASO 1: YA HAY REPORTE -> Muestra fecha real (Ej: 12)
-        DateTime serviceDate = (report['serviceDate'] as Timestamp).toDate();
-        labelSub = DateFormat('d', 'es').format(serviceDate); 
-        hasScheduledDate = true;
+      if (showRealDate && serviceDate != null) {
+        labelSub = "Día ${DateFormat('d').format(serviceDate)}"; 
       } else {
-        // CASO 2: NO HAY REPORTE -> Muestra el día programado (Ej: 05)
-        // ANTES MOSTRABA EL AÑO: labelSub = "'${date.year.toString().substring(2)}"; 
-        labelSub = DateFormat('d', 'es').format(date); 
+        labelSub = "Día ${DateFormat('d').format(date)}"; 
       }
     } else {
-      // Lógica Semanal
-      labelMain = "S${index + 1}";
-      if (report != null && report['serviceDate'] != null) {
-        DateTime serviceDate = (report['serviceDate'] as Timestamp).toDate();
-        labelSub = DateFormat('d MMM', 'es').format(serviceDate);
-        hasScheduledDate = true;
+      // --- VISTA SEMANAL ---
+      labelMain = DateFormat('MMMM', 'es').format(date).toUpperCase();
+      
+      DateTime weekEnd = date.add(const Duration(days: 6));
+      String startDay = DateFormat('d').format(date);
+      String endDay = DateFormat('d').format(weekEnd);
+      int weekNumber = index + 1;
+
+      if (showRealDate && serviceDate != null) {
+        // Solo si fue programado explícitamente (tiene técnicos) mostramos "Real"
+        labelSub = "S$weekNumber ($startDay-$endDay) \nReal: ${DateFormat('d MMM').format(serviceDate)}";
       } else {
-        // Muestra rango o día inicial de la semana
-        labelSub = DateFormat('d', 'es').format(date);
+        // Si no, mostramos el rango estándar
+        labelSub = "S$weekNumber ($startDay-$endDay)";
       }
     }
 
+    // Color de fondo sutil para separar visualmente las semanas en el header
+    Color headerBgColor = _viewMode == 'monthly' ? Colors.transparent : Colors.white.withOpacity(0.05);
+
     return TableCell(
       child: Container(
+        color: headerBgColor,
         padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 2), 
         alignment: Alignment.center,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // ETIQUETA PRINCIPAL
             Text(
               labelMain,
-              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 11, color: Colors.white, letterSpacing: 0.5),
+              style: TextStyle(
+                fontWeight: FontWeight.w900, 
+                fontSize: _viewMode == 'monthly' ? 11 : 10, 
+                color: Colors.white, 
+                letterSpacing: 0.5
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
             ),
             const SizedBox(height: 2),
+            
+            // ETIQUETA SECUNDARIA
             Container(
-              padding: hasScheduledDate 
+              padding: showRealDate 
                   ? const EdgeInsets.symmetric(horizontal: 6, vertical: 2) 
                   : EdgeInsets.zero,
-              decoration: hasScheduledDate 
-                  ? BoxDecoration(color: _primaryBlue, borderRadius: BorderRadius.circular(4)) 
+              decoration: showRealDate 
+                  ? BoxDecoration(color: _successGreen, borderRadius: BorderRadius.circular(4)) 
                   : null,
               child: Text(
                 labelSub,
+                textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: hasScheduledDate ? Colors.white : Colors.white.withOpacity(0.7),
-                  fontSize: hasScheduledDate ? 10 : 9,
+                  color: showRealDate ? Colors.white : Colors.white.withOpacity(0.7),
+                  fontSize: 10,
                   fontWeight: FontWeight.w700,
                 ),
               ),
             ),
             const SizedBox(height: 6),
-            // ... (Tus botones de acción siguen igual aquí) ...
+            
+            // BOTONES DE ACCIÓN (Se mantienen igual)
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
@@ -991,7 +1195,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       final devInstance = _policy.devices[dIdx];
       final def = _deviceDefinitions.firstWhere((d) => d.id == devInstance.definitionId);
 
-      // Fila de dispositivo
+      // Fila de dispositivo (Encabezado gris) - SE QUEDA IGUAL
       rows.add(TableRow(
         decoration: BoxDecoration(
           color: _primaryDark.withOpacity(0.05),
@@ -1013,7 +1217,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                   ),
                   const SizedBox(width: 10),
                   Expanded(
-                    child: Column( // CAMBIO: Usamos Column para poner el contador abajo o Row para al lado
+                    child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -1022,7 +1226,6 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                           style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: _textPrimary),
                         ),
                         const SizedBox(height: 4),
-                        // --- AQUÍ ESTÁ EL CONTADOR DE UNIDADES ---
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                           decoration: BoxDecoration(
@@ -1031,12 +1234,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                             border: Border.all(color: _borderLight),
                           ),
                           child: Text(
-                            "${devInstance.quantity} UNIDADES", // Muestra la cantidad real
-                            style: TextStyle(
-                              fontSize: 9, 
-                              fontWeight: FontWeight.bold, 
-                              color: _textSecondary
-                            ),
+                            "${devInstance.quantity} UNIDADES",
+                            style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: _textSecondary),
                           ),
                         ),
                       ],
@@ -1057,11 +1256,11 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
 
         rows.add(TableRow(
           children: [
+            // Celda del Nombre de la Actividad (SE QUEDA IGUAL)
             TableCell(
               child: Container(
-                // Ajusté el padding para que se vea bien alineado
                 padding: const EdgeInsets.only(left: 48, top: 10, bottom: 10, right: 12),
-                child: Column( // CAMBIO: Usamos Column para poner el tipo debajo del nombre
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -1070,27 +1269,21 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                       style: TextStyle(fontSize: 12, color: _textPrimary, fontWeight: FontWeight.w600),
                     ),
                     const SizedBox(height: 4),
-                    // --- AQUÍ ESTÁ EL INDICADOR DE TIPO ---
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Container(
                           width: 6, height: 6,
                           decoration: BoxDecoration(
-                            color: _getActivityColor(activity.type), // Usa tu función de color existente
+                            color: _getActivityColor(activity.type),
                             shape: BoxShape.circle,
                           ),
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          // Convertimos el enum a texto bonito (Ej: ActivityType.INSPECCION -> "Inspección")
-                          activity.type.toString().split('.').last.substring(0, 1).toUpperCase() + 
-                          activity.type.toString().split('.').last.substring(1).toLowerCase(),
-                          style: TextStyle(
-                            fontSize: 10, 
-                            color: _textSecondary, 
-                            fontWeight: FontWeight.w500
-                          ),
+                          activity.type.toString().split('.').last.substring(0, 1).toUpperCase() +
+                              activity.type.toString().split('.').last.substring(1).toLowerCase(),
+                          style: TextStyle(fontSize: 10, color: _textSecondary, fontWeight: FontWeight.w500),
                         ),
                       ],
                     ),
@@ -1098,8 +1291,40 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                 ),
               ),
             ),
+            
+            // Celdas de Tiempo (Puntos)
             ...List.generate(colCount, (tIdx) {
               bool active = _isScheduled(devInstance, activity.id, tIdx);
+              
+              // --- LÓGICA DE ESTADO CORREGIDA ---
+              String status = 'empty'; // Por defecto: Vacío (Solo proyectado)
+              
+              if (active) {
+                final report = _getReportForColumn(tIdx);
+                
+                if (report != null && report['entries'] != null) {
+                  final entries = report['entries'] as List;
+                  // Buscamos si existe entrada para ESTE dispositivo
+                  final entry = entries.firstWhere(
+                    (e) => e['instanceId'] == devInstance.instanceId, 
+                    orElse: () => null
+                  );
+
+                  if (entry != null) {
+                    // AQUÍ ESTABA EL ERROR: Antes ponías status = 'partial' aquí.
+                    // Ahora SOLO cambiamos si hay un resultado explícito.
+                    
+                    if (entry['results'] != null) {
+                      final results = entry['results'] as Map;
+                      if (results[activity.id] != null) {
+                        status = 'full'; // Solo Full si hay respuesta (OK/NOK/NA)
+                      }
+                      // Si results[activity.id] es null, se queda en 'empty' (círculo vacío)
+                    }
+                  }
+                }
+              }
+
               return TableCell(
                 child: InkWell(
                   onTap: () => _handleCellClick(dIdx, activity.id, tIdx),
@@ -1111,7 +1336,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                       color: active ? _getActivityColor(activity.type).withOpacity(0.08) : Colors.transparent,
                     ),
                     child: active
-                        ? _buildStatusCircle(activity.type)
+                        ? _buildStatusCircle(activity.type, status) 
                         : (_isEditing ? Icon(Icons.add_circle_outline, size: 14, color: _textSecondary.withOpacity(0.3)) : null),
                   ),
                 ),
@@ -1132,16 +1357,50 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     }
   }
 
-  Widget _buildStatusCircle(ActivityType type) {
+  Widget _buildStatusCircle(ActivityType type, String status) {
     Color color = _getActivityColor(type);
+    
+    // Configuraciones visuales según el estado
+    Color fillColor;
+    Widget? internalWidget;
+
+    if (status == 'full') {
+      // COMPLETO: Relleno sólido del color de la actividad
+      fillColor = color; 
+    } else if (status == 'partial') {
+      // INCOMPLETO (Programado): Fondo blanco con "media luna" o relleno grisáceo
+      fillColor = Colors.white;
+      internalWidget = ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Row(
+          children: [
+            Expanded(child: Container(color: color.withOpacity(0.6))), // Mitad coloreada
+            Expanded(child: Container(color: Colors.transparent)),     // Mitad vacía
+          ],
+        ),
+      );
+    } else {
+      // VACÍO (Proyectado): Solo borde, fondo blanco
+      fillColor = Colors.white;
+    }
+
     return Container(
-      width: 16, height: 16,
+      width: 16, 
+      height: 16,
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: fillColor,
         shape: BoxShape.circle,
-        border: Border.all(color: color, width: 3),
-        boxShadow: [BoxShadow(color: color.withOpacity(0.3), blurRadius: 4, offset: const Offset(0, 2))],
+        // Si está lleno, no necesitamos borde grueso, si está vacío sí
+        border: Border.all(
+          color: color, 
+          width: status == 'full' ? 0 : 2
+        ),
+        boxShadow: [
+          if (status == 'full') // Sombra más fuerte si está completo
+            BoxShadow(color: color.withOpacity(0.4), blurRadius: 4, offset: const Offset(0, 2))
+        ],
       ),
+      child: internalWidget,
     );
   }
 

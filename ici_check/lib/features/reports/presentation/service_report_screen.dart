@@ -160,15 +160,25 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     int timeIndex = 0;
 
     if (!isWeekly) {
+      // Lógica Mensual (Esta suele estar bien, pero revisamos que coincida con el inicio de la póliza)
       DateTime pStart = DateTime(widget.policy.startDate.year, widget.policy.startDate.month, 1);
       try {
         DateTime rDate = DateFormat('yyyy-MM').parse(widget.dateStr);
+        // Calcula la diferencia en meses
         timeIndex = (rDate.year - pStart.year) * 12 + (rDate.month - pStart.month);
       } catch (e) {
         debugPrint("Error parsing date: $e");
       }
     } else {
-      timeIndex = int.tryParse(widget.dateStr.split('W').last) ?? 0;
+      // --- CORRECCIÓN AQUÍ ---
+      // El formato es "AAAA-WX" (ej: 2025-W1).
+      // El índice del array empieza en 0, pero la semana visual empieza en 1.
+      // Si recibimos "1", debemos convertirlo a índice 0.
+      int weekNumber = int.tryParse(widget.dateStr.split('W').last) ?? 1;
+      
+      // RESTAMOS 1 para alinear con el array de offsets (scheduleOffsets)
+      // Si weekNumber es 1, timeIndex será 0.
+      timeIndex = (weekNumber > 0) ? weekNumber - 1 : 0; 
     }
 
     final newReport = _repo.initializeReport(
@@ -176,10 +186,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       widget.dateStr,
       widget.devices,
       isWeekly,
-      timeIndex,
+      timeIndex, // Ahora enviamos el índice corregido
     );
 
+    // Guardamos el reporte inicializado en Firebase inmediatamente
     _repo.saveReport(newReport);
+    
     if (mounted) {
       setState(() {
         _report = newReport;
