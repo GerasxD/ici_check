@@ -123,15 +123,15 @@ class ServiceReportModel {
 }
 
 class ReportEntry {
-  final String? assignedUserId; // <--- AGREGAR ESTO
+  final String? assignedUserId; // <--- LO AGREGASTE AQUÍ
   final String instanceId;
   final int deviceIndex;
-  final String customId; // "EXT-1"
+  final String customId;
   final String area;
-  final Map<String, String?> results; // {activityId: 'OK'|'NOK'|'NA'|null}
+  final Map<String, String?> results;
   final String observations;
-  final List<String> photos; // Base64 o URLs
-  final Map<String, ActivityData> activityData; // {activityId: {photos:[], obs:''}}
+  final List<String> photos;
+  final Map<String, ActivityData> activityData;
 
   ReportEntry({
     required this.instanceId,
@@ -142,10 +142,9 @@ class ReportEntry {
     this.observations = '',
     this.photos = const [],
     this.activityData = const {},
-    this.assignedUserId,
+    this.assignedUserId, // Bien
   });
 
-  // --- NUEVO: Método copyWith ---
   ReportEntry copyWith({
     String? instanceId,
     int? deviceIndex,
@@ -155,6 +154,7 @@ class ReportEntry {
     String? observations,
     List<String>? photos,
     Map<String, ActivityData>? activityData,
+    String? assignedUserId, // <--- FALTABA AQUÍ
   }) {
     return ReportEntry(
       instanceId: instanceId ?? this.instanceId,
@@ -165,6 +165,7 @@ class ReportEntry {
       observations: observations ?? this.observations,
       photos: photos ?? this.photos,
       activityData: activityData ?? this.activityData,
+      assignedUserId: assignedUserId ?? this.assignedUserId, // <--- FALTABA AQUÍ
     );
   }
 
@@ -178,6 +179,7 @@ class ReportEntry {
       'observations': observations,
       'photos': photos,
       'activityData': activityData.map((k, v) => MapEntry(k, v.toMap())),
+      'assignedUserId': assignedUserId, // <--- FALTABA AQUÍ PARA GUARDAR EN FIREBASE
     };
   }
 
@@ -195,6 +197,7 @@ class ReportEntry {
           (k, v) => MapEntry(k, ActivityData.fromMap(v)),
         ),
       ),
+      assignedUserId: map['assignedUserId'], // <--- FALTABA AQUÍ PARA LEER DE FIREBASE
     );
   }
 }

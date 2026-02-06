@@ -1256,7 +1256,7 @@ Widget _buildTimeHeader(int index) {
 
         rows.add(TableRow(
           children: [
-            // Celda del Nombre de la Actividad (SE QUEDA IGUAL)
+            // Celda del Nombre de la Actividad
             TableCell(
               child: Container(
                 padding: const EdgeInsets.only(left: 48, top: 10, bottom: 10, right: 12),
@@ -1296,31 +1296,37 @@ Widget _buildTimeHeader(int index) {
             ...List.generate(colCount, (tIdx) {
               bool active = _isScheduled(devInstance, activity.id, tIdx);
               
-              // --- LÓGICA DE ESTADO CORREGIDA ---
-              String status = 'empty'; // Por defecto: Vacío (Solo proyectado)
+              String status = 'empty'; // Por defecto: Vacío
               
               if (active) {
                 final report = _getReportForColumn(tIdx);
                 
                 if (report != null && report['entries'] != null) {
                   final entries = report['entries'] as List;
-                  // Buscamos si existe entrada para ESTE dispositivo
                   final entry = entries.firstWhere(
                     (e) => e['instanceId'] == devInstance.instanceId, 
                     orElse: () => null
                   );
 
-                  if (entry != null) {
-                    // AQUÍ ESTABA EL ERROR: Antes ponías status = 'partial' aquí.
-                    // Ahora SOLO cambiamos si hay un resultado explícito.
-                    
-                    if (entry['results'] != null) {
-                      final results = entry['results'] as Map;
-                      if (results[activity.id] != null) {
-                        status = 'full'; // Solo Full si hay respuesta (OK/NOK/NA)
-                      }
-                      // Si results[activity.id] es null, se queda en 'empty' (círculo vacío)
+                  if (entry['results'] != null) {
+                    final results = entry['results'] as Map;
+                    final resValue = results[activity.id];
+
+                    // CASO 1: Ya se completó la actividad (Círculo Lleno)
+                    if (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA') {
+                      status = 'full';
+                    } 
+                    // CASO 2: Se marcó explícitamente como "No Realizado/Pendiente" (Media Luna)
+                    else if (resValue == 'NR') {
+                      status = 'partial';
                     }
+                    // CASO 3: Es null (Aún no se toca) -> Se queda como vacío
+                    else {
+                      status = 'empty'; 
+                    }
+                  } else {
+                    // Si no hay mapa de resultados, también es vacío
+                    status = 'empty';
                   }
                 }
               }

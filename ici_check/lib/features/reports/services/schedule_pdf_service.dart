@@ -528,32 +528,36 @@ class SchedulePdfService {
       String labelSub;
       String topLabel = '';
       String dateKey;
-      bool hasScheduledDay = false; // Agregado para coincidir con la clase _TimeColumnData
+      // ignore: unused_local_variable
+      bool hasScheduledDay = false; // (Mantenemos la variable por compatibilidad con tu clase)
 
       if (viewMode == 'monthly') {
+        // Lógica Mensual (Esta estaba bien, pero asegúrate que coincida con tu pantalla)
         date = DateTime(policy.startDate.year, policy.startDate.month + i, 1);
         labelMain = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
         labelSub = DateFormat('yy', 'es').format(date);
         dateKey = DateFormat('yyyy-MM').format(date);
       } else {
-        // Lógica Semanal
+        // --- LÓGICA SEMANAL CORREGIDA ---
         date = policy.startDate.add(Duration(days: i * 7));
         DateTime endDate = date.add(const Duration(days: 6));
         
-        // --- CAMBIO AQUÍ: Usamos la función manual en vez de DateFormat('w') ---
-        int weekNum = _getWeekNumber(date); 
+        // ERROR ANTERIOR: Usabas _getWeekNumber(date) y padLeft.
+        // CORRECCIÓN: Usar el índice 'i + 1' tal cual lo hace SchedulerScreen.
+        // Esto asegura que si guardaste el reporte de la primera columna como "2025-W1",
+        // aquí busquemos exactamente "2025-W1".
         
+        dateKey = "${date.year}-W${i + 1}"; 
+
+        // Etiquetas visuales
         topLabel = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
-        labelMain = "S$weekNum"; // Usamos el número calculado manualmente
+        labelMain = "S${i + 1}"; // Visualmente también mostramos Semana 1, 2... relativas
         
         if (date.month == endDate.month) {
            labelSub = "${date.day}-${endDate.day}";
         } else {
            labelSub = "${date.day}-${endDate.day}/${endDate.month}";
         }
-        
-        // Generar la key para buscar en Firebase (mantiene el padding de ceros)
-        dateKey = "${date.year}-W${weekNum.toString().padLeft(2, '0')}";
       }
       
       data.add(_TimeColumnData(labelMain, labelSub, topLabel, dateKey, hasScheduledDay));
@@ -590,21 +594,6 @@ class SchedulePdfService {
     }
   }
   // --- HELPER PARA CALCULAR SEMANA (Sin usar intl 'w') ---
-  static int _getWeekNumber(DateTime date) {
-    // Esta lógica replica la de tu React: Math.ceil((((d - onejan) / 86400000) + onejan.getDay() + 1) / 7);
-    final startOfYear = DateTime(date.year, 1, 1);
-    final firstMonday = startOfYear.weekday;
-    final daysInFirstWeek = 8 - firstMonday;
-    final diff = date.difference(startOfYear).inDays;
-    var week = ((diff - daysInFirstWeek) / 7).ceil();
-    
-    // Ajuste simple: si la semana es 0, es la 52/53 del año anterior, o la 1.
-    // Para cronogramas visuales, sumar 1 suele ser suficiente para alinear.
-    if (diff < daysInFirstWeek) {
-      return 1; 
-    }
-    return week + 1;
-  }
 }
 
 class _TimeColumnData {

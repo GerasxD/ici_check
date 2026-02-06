@@ -107,17 +107,16 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         );
       }
 
+      // Escuchamos el stream del reporte
       final stream = _repo.getReportStream(widget.policyId, widget.dateStr);
       stream.listen((existingReport) {
         if (existingReport != null) {
-          if (mounted) {
-            setState(() {
-              _report = existingReport;
-              _isLoading = false;
-              _loadSignatures();
-            });
-          }
+          // --- CAMBIO AQUÍ ---
+          // Ya NO hacemos setState directo. Llamamos a la sincronización 
+          // para que verifique si el cronograma cambió.
+          _syncAndLoadReport(existingReport); 
         } else {
+          // Si no existe, creamos uno nuevo (esto sigue igual)
           _initializeNewReport();
         }
       });
@@ -132,6 +131,112 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     } catch (e) {
       debugPrint('Error loading data: $e');
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _syncAndLoadReport(ServiceReportModel existingReport) {
+    // 1. Calcular el timeIndex actual (misma lógica que initializeReport)
+    bool isWeekly = widget.dateStr.contains('W');
+    int timeIndex = 0;
+
+    if (!isWeekly) {
+      DateTime pStart = DateTime(widget.policy.startDate.year, widget.policy.startDate.month, 1);
+      try {
+        DateTime rDate = DateFormat('yyyy-MM').parse(widget.dateStr);
+        timeIndex = (rDate.year - pStart.year) * 12 + (rDate.month - pStart.month);
+      } catch (e) { debugPrint("Error parsing date: $e"); }
+    } else {
+      int weekNumber = int.tryParse(widget.dateStr.split('W').last) ?? 1;
+      timeIndex = (weekNumber > 0) ? weekNumber - 1 : 0; 
+    }
+
+    // 2. Generar las entradas "IDEALES" según la configuración actual del Scheduler
+    // (Aquí usamos la función pública que agregamos al repositorio)
+    final idealEntries = _repo.generateEntriesForDate(
+      widget.policy, 
+      widget.dateStr, 
+      widget.devices, 
+      isWeekly, 
+      timeIndex
+    );
+
+    // 3. FUSIONAR (Merge)
+    List<ReportEntry> mergedEntries = [];
+    bool hasChanges = false;
+
+    // Mapa para búsqueda rápida de lo que ya existe guardado en Firebase
+    Map<String, ReportEntry> existingEntriesMap = {
+      for (var e in existingReport.entries) e.instanceId: e
+    };
+
+    for (var idealEntry in idealEntries) {
+      if (existingEntriesMap.containsKey(idealEntry.instanceId)) {
+        // A. El dispositivo ya existía: Combinamos resultados
+        var existingEntry = existingEntriesMap[idealEntry.instanceId]!;
+        Map<String, String?> mergedResults = Map.from(existingEntry.results);
+        bool entryChanged = false;
+
+        // -- Agregar actividades nuevas (que aparecieron al mover fechas)
+        idealEntry.results.forEach((actId, _) {
+          if (!mergedResults.containsKey(actId)) {
+            mergedResults[actId] = null; // Nueva actividad vacía
+            entryChanged = true;
+          }
+        });
+
+        // -- Eliminar actividades que ya no tocan (si están vacías)
+        List<String> toRemove = [];
+        mergedResults.keys.forEach((actId) {
+          // Si la actividad existe en el reporte pero NO en el ideal actual
+          if (!idealEntry.results.containsKey(actId)) {
+             // Solo borramos si no ha sido contestada (es null)
+             if (mergedResults[actId] == null) {
+               toRemove.add(actId);
+               entryChanged = true;
+             }
+          }
+        });
+        
+        toRemove.forEach(mergedResults.remove);
+
+        if (entryChanged) {
+          hasChanges = true;
+          mergedEntries.add(existingEntry.copyWith(results: mergedResults));
+        } else {
+          mergedEntries.add(existingEntry);
+        }
+        
+      } else {
+        // B. El dispositivo es nuevo (se agregó a la póliza recientemente)
+        mergedEntries.add(idealEntry);
+        hasChanges = true;
+      }
+    }
+
+    // 4. GUARDAR SI HUBO CAMBIOS O CARGAR NORMAL
+    if (hasChanges) {
+      debugPrint("🔄 Sincronizando reporte con cambios del Scheduler...");
+      final updatedReport = existingReport.copyWith(entries: mergedEntries);
+      
+      // Guardado silencioso para actualizar Firebase
+      _repo.saveReport(updatedReport);
+
+      if (mounted) {
+        setState(() {
+          _report = updatedReport;
+          _isLoading = false;
+          _loadSignatures();
+        });
+      }
+    } else {
+      // Sin cambios, cargamos lo que venía de Firebase
+      if (mounted) {
+        setState(() {
+          _report = existingReport;
+          _isLoading = false;
+          _loadSignatures();
+        });
+      }
     }
   }
 
@@ -430,23 +535,43 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   void _handleEndService() {
-    if (_report == null) return;
+    // 1. Validación básica de usuario (esto sí lo dejamos para que sepa quién cerró)
+    if (_report == null || _currentUserId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Debes seleccionar un usuario para registrar tiempos'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    // 2. Validación de Asignaciones (esto también es útil dejarlo)
+    if (!_areAllSectionsAssigned()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Asigna técnicos a todas las secciones antes de finalizar.'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+
+    // 3. FINALIZAR DIRECTAMENTE (Sin diálogos de bloqueo)
     final timeStr = DateFormat('HH:mm').format(DateTime.now());
-    final updatedReport = _report!.copyWith(endTime: timeStr);
     
+    // Si quieres, puedes forzar que forceNullEndTime sea false por seguridad
+    final updatedReport = _report!.copyWith(endTime: timeStr); 
+
     setState(() {
       _report = updatedReport;
     });
     _repo.saveReport(_report!);
+    
+    // Mensaje opcional
+    // ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Servicio finalizado'), backgroundColor: Colors.green));
   }
-  
+
   void _handleResumeService() {
-      // Lógica simple para reanudar si es necesario
-      // Podrías mostrar el diálogo de cambio de fecha aquí si lo deseas
       setState(() {
+        // Borramos el endTime para que el reporte quede "Abierto" de nuevo
         _report = _report!.copyWith(
           endTime: null, 
-          forceNullEndTime: true // <--- Agrega esto para forzar que sea null
+          forceNullEndTime: true 
         ); 
       });
       _repo.saveReport(_report!);
@@ -690,6 +815,16 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 onResumeService: _handleResumeService,
                 onDateChanged: (newDate) {
                   final updated = _report!.copyWith(serviceDate: newDate);
+                  setState(() => _report = updated);
+                  _repo.saveReport(_report!);
+                },
+                onStartTimeEdited: (newTime) {
+                  final updated = _report!.copyWith(startTime: newTime);
+                  setState(() => _report = updated);
+                  _repo.saveReport(_report!);
+                },
+                onEndTimeEdited: (newTime) {
+                  final updated = _report!.copyWith(endTime: newTime);
                   setState(() => _report = updated);
                   _repo.saveReport(_report!);
                 },

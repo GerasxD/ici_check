@@ -658,10 +658,21 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 const SizedBox(height: 32),
                 
                 // --- SECCIÓN 2: ACTIVIDADES ---
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 8.0, // Espacio horizontal entre elementos
+                  runSpacing: 4.0, // Espacio vertical si baja de línea
                   children: [
-                    Text('CONFIGURACIÓN DE MANTENIMIENTO', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: _textSlate, letterSpacing: 1.0)),
+                    Text(
+                      'CONFIGURACIÓN DE MANTENIMIENTO',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: _textSlate,
+                        letterSpacing: 1.0
+                      ),
+                    ),
                     TextButton.icon(
                       onPressed: _addActivity,
                       icon: const Icon(Icons.add_circle_outline, size: 18),
