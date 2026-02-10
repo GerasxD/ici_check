@@ -73,11 +73,20 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   @override
   void initState() {
     super.initState();
+    
+    // ✅ SINCRONIZACIÓN BIDIRECCIONAL
     _bodyScrollCtrl.addListener(() {
-      if (_headerScrollCtrl.hasClients) {
+      if (_headerScrollCtrl.hasClients && !_headerScrollCtrl.position.isScrollingNotifier.value) {
         _headerScrollCtrl.jumpTo(_bodyScrollCtrl.offset);
       }
     });
+    
+    _headerScrollCtrl.addListener(() {
+      if (_bodyScrollCtrl.hasClients && !_bodyScrollCtrl.position.isScrollingNotifier.value) {
+        _bodyScrollCtrl.jumpTo(_headerScrollCtrl.offset);
+      }
+    });
+    
     _loadAllData();
   }
 
@@ -755,12 +764,15 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     return Scaffold(
       backgroundColor: _bgLight,
       appBar: _buildAppBar(),
-      body: Column(
-        children: [
-          _buildHeaderInfo(),
-          Expanded(child: _buildGrid()),
-          _buildLegend(),
-        ],
+      body: SingleChildScrollView(
+        // ✅ SCROLL VERTICAL PRINCIPAL - Todo se mueve junto
+        child: Column(
+          children: [
+            _buildHeaderInfo(),
+            _buildGrid(),
+            _buildLegend(),
+          ],
+        ),
       ),
     );
   }
@@ -1003,6 +1015,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      // ✅ ALTURA FIJA para la tabla (ajusta según necesites)
+      height: 600, // Puedes ajustar este valor o hacerlo dinámico
       decoration: BoxDecoration(
         color: _cardWhite,
         borderRadius: BorderRadius.circular(16),
@@ -1021,52 +1035,66 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
             // --- ENCABEZADO (HEADER) ---
             Container(
               color: _primaryDark,
-              child: SingleChildScrollView(
-                controller: _headerScrollCtrl, // <--- CONTROLADOR 1
-                scrollDirection: Axis.horizontal,
-                physics: const NeverScrollableScrollPhysics(), // Bloqueamos el touch directo en el header para obligar a usar el body (evita desincronización)
-                child: Table(
-                  defaultColumnWidth: const FixedColumnWidth(100), 
-                  columnWidths: const {0: FixedColumnWidth(280)},
-                  children: [
-                    TableRow(
-                      children: [
-                        TableCell(
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                            child: const Text(
-                              "DISPOSITIVOS Y ACTIVIDADES",
-                              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.white),
+              child: Scrollbar(
+                controller: _headerScrollCtrl,
+                thumbVisibility: true,
+                trackVisibility: true,
+                thickness: 8,
+                child: SingleChildScrollView(
+                  controller: _headerScrollCtrl,
+                  scrollDirection: Axis.horizontal,
+                  physics: const ClampingScrollPhysics(),
+                  child: Table(
+                    defaultColumnWidth: const FixedColumnWidth(100),
+                    columnWidths: const {0: FixedColumnWidth(280)},
+                    children: [
+                      TableRow(
+                        children: [
+                          TableCell(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                              child: const Text(
+                                "DISPOSITIVOS Y ACTIVIDADES",
+                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.white),
+                              ),
                             ),
                           ),
-                        ),
-                        ...List.generate(colCount, (i) => _buildTimeHeader(i)),
-                      ],
-                    ),
-                  ],
+                          ...List.generate(colCount, (i) => _buildTimeHeader(i)),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-            
+
             // --- CUERPO (BODY) ---
             Expanded(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.vertical,
-                child: Scrollbar( // <--- AQUÍ ESTÁ LA BARRA VISIBLE PARA WEB
-                  controller: _bodyScrollCtrl,
-                  thumbVisibility: true, // Siempre visible
-                  trackVisibility: true, // Fondo de la barra visible (mejor UX en web)
-                  thickness: 10, // Un poco más gruesa para que sea fácil de agarrar con el mouse
-                  radius: const Radius.circular(10),
-                  child: SingleChildScrollView(
-                    controller: _bodyScrollCtrl, // <--- CONTROLADOR 2
-                    scrollDirection: Axis.horizontal,
-                    padding: const EdgeInsets.only(bottom: 12), // Espacio para que la barra no tape contenido
-                    child: Table(
-                      defaultColumnWidth: const FixedColumnWidth(100),
-                      columnWidths: const {0: FixedColumnWidth(280)},
-                      border: TableBorder.all(color: _borderLight, width: 1),
-                      children: _buildDataRows(),
+              child: Scrollbar(
+                controller: _bodyScrollCtrl,
+                thumbVisibility: true,
+                trackVisibility: true,
+                thickness: 10,
+                radius: const Radius.circular(10),
+                child: SingleChildScrollView(
+                  // ✅ SCROLL VERTICAL dentro de la tabla
+                  scrollDirection: Axis.vertical,
+                  child: Scrollbar(
+                    controller: _bodyScrollCtrl,
+                    thumbVisibility: true,
+                    trackVisibility: true,
+                    thickness: 8,
+                    notificationPredicate: (notification) => notification.depth == 1,
+                    child: SingleChildScrollView(
+                      controller: _bodyScrollCtrl,
+                      scrollDirection: Axis.horizontal,
+                      physics: const ClampingScrollPhysics(),
+                      child: Table(
+                        defaultColumnWidth: const FixedColumnWidth(100),
+                        columnWidths: const {0: FixedColumnWidth(280)},
+                        border: TableBorder.all(color: _borderLight, width: 1),
+                        children: _buildDataRows(),
+                      ),
                     ),
                   ),
                 ),
@@ -1079,7 +1107,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   }
 
   // --- MODIFICADO: AHORA INCLUYE LOS BOTONES DE ACCIÓN ---
-Widget _buildTimeHeader(int index) {
+  Widget _buildTimeHeader(int index) {
     DateTime date;
     
     // 1. Calcular fecha exacta de inicio de la columna
