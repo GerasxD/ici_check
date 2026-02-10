@@ -49,5 +49,7 @@
 	<string>Necesitamos acceso para importar archivos</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Necesitamos acceso a la cámara</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Necesitamos permiso para guardar las fotos tomadas en tu galería</string>
 </dict>
 </plist>

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:ici_check/features/policies/presentation/new_policy_screen.dart';
 import 'package:ici_check/features/scheduler/presentation/scheduler_screen.dart';
 import 'package:intl/date_symbol_data_local.dart';
-import 'package:intl/intl.dart'; // Para formatear fechas
+import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import 'package:ici_check/features/clients/data/client_model.dart';
 import 'package:ici_check/features/clients/data/clients_repository.dart';
@@ -56,7 +56,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
   }
 
   void _openPolicyEditor({PolicyModel? policy}) {
-    // CASO 1: EDITAR (Si recibimos una póliza, abrimos el Diálogo rápido)
     if (policy != null) {
       showDialog(
         context: context,
@@ -79,9 +78,7 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
           },
         ),
       );
-    } 
-    // CASO 2: CREAR NUEVA (Si policy es null, vamos al Wizard paso a paso)
-    else {
+    } else {
       Navigator.push(
         context, 
         MaterialPageRoute(builder: (context) => const NewPolicyScreen())
@@ -125,12 +122,10 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Detectamos si es móvil (< 700px)
         bool isMobile = constraints.maxWidth < 700;
 
         return Scaffold(
           backgroundColor: _bgLight,
-          // SOLUCIÓN 1: Botón Flotante en Móvil (Ya lo tienes bien aquí)
           floatingActionButton: isMobile
               ? FloatingActionButton(
                   onPressed: () => _openPolicyEditor(),
@@ -140,7 +135,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
               : null,
           body: Column(
             children: [
-              // HEADER RESPONSIVO
               Container(
                 padding: const EdgeInsets.all(24),
                 decoration: BoxDecoration(
@@ -152,7 +146,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    // Título Flexible
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -176,9 +169,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                         ],
                       ),
                     ),
-                    
-                    // SOLUCIÓN 2: Ocultar botón del Header en Móvil
-                    // Solo mostramos este bloque si NO es móvil
                     if (!isMobile) ...[
                       const SizedBox(width: 16),
                       ElevatedButton.icon(
@@ -201,8 +191,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                   ],
                 ),
               ),
-
-              // LISTA (El resto del código sigue igual)
               Expanded(
                 child: StreamBuilder<List<PolicyModel>>(
                   stream: _policiesRepo.getPoliciesStream(),
@@ -232,7 +220,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                     }
 
                     return ListView.separated(
-                      // Padding extra abajo en móvil para que el FAB no tape el último item
                       padding: EdgeInsets.only(
                         left: 24,
                         right: 24,
@@ -272,7 +259,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                               Row(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  // Icono Cliente
                                   Container(
                                     padding: const EdgeInsets.all(12),
                                     decoration: BoxDecoration(
@@ -285,7 +271,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                                     ),
                                   ),
                                   const SizedBox(width: 16),
-                                  // Info Principal
                                   Expanded(
                                     child: Column(
                                       crossAxisAlignment:
@@ -308,7 +293,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                                           ),
                                         ),
                                         const SizedBox(height: 8),
-                                        // Badges
                                         Wrap(
                                           spacing: 8,
                                           runSpacing: 4,
@@ -329,7 +313,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                                       ],
                                     ),
                                   ),
-                                  // Acciones
                                   PopupMenuButton(
                                     icon: Icon(
                                       Icons.more_vert,
@@ -377,7 +360,6 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                               ),
                               const SizedBox(height: 16),
                               const Divider(),
-                              // Botón Acción Principal
                               SizedBox(
                                 width: double.infinity,
                                 child: TextButton.icon(
@@ -463,7 +445,9 @@ class _Badge extends StatelessWidget {
   }
 }
 
-// --- DIALOGO DE EDICIÓN (MODAL AVANZADO) ---
+// ==========================================
+// DIALOGO MEJORADO CON BÚSQUEDA
+// ==========================================
 class _PolicyEditorDialog extends StatefulWidget {
   final PolicyModel? policyToEdit;
   final List<ClientModel> clients;
@@ -490,13 +474,13 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
   late bool _includeWeekly;
   late List<PolicyDevice> _devices;
 
-  String? _selectedDeviceDefId; // Para el dropdown de agregar
+  String? _selectedDeviceDefId;
+  final TextEditingController _searchController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     final p = widget.policyToEdit;
-    // Si editamos, usamos datos existentes. Si es nuevo, defaults.
     _clientId =
         p?.clientId ??
         (widget.clients.isNotEmpty ? widget.clients.first.id : '');
@@ -504,6 +488,12 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
     _durationMonths = p?.durationMonths ?? 12;
     _includeWeekly = p?.includeWeekly ?? false;
     _devices = p != null ? List.from(p.devices) : [];
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   void _addDevice() {
@@ -516,7 +506,8 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
           quantity: 1,
         ),
       );
-      _selectedDeviceDefId = null; // Reset dropdown
+      _selectedDeviceDefId = null;
+      _searchController.clear();
     });
   }
 
@@ -547,7 +538,6 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
         constraints: const BoxConstraints(maxWidth: 700, maxHeight: 800),
         child: Column(
           children: [
-            // Header Modal
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
@@ -573,14 +563,12 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
               ),
             ),
 
-            // Body Scrollable
             Expanded(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(24),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Cliente
                     _Label('Cliente Asociado'),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -607,7 +595,6 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                     ),
                     const SizedBox(height: 20),
 
-                    // Fechas
                     Row(
                       children: [
                         Expanded(
@@ -693,7 +680,6 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                     ),
 
                     const SizedBox(height: 20),
-                    // Checkbox Semanal
                     SwitchListTile(
                       title: const Text(
                         'Habilitar Frecuencia Semanal',
@@ -713,12 +699,10 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
 
                     const Divider(height: 40),
 
-                    // DISPOSITIVOS
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         _Label('Dispositivos en Póliza'),
-                        // Dropdown mini para agregar
                       ],
                     ),
                     const SizedBox(height: 8),
@@ -731,44 +715,93 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                       ),
                       child: Column(
                         children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white,
+                          // ============================================
+                          // NUEVO: AUTOCOMPLETE CON BÚSQUEDA
+                          // ============================================
+                          Autocomplete<DeviceModel>(
+                            optionsBuilder: (TextEditingValue textEditingValue) {
+                              if (textEditingValue.text.isEmpty) {
+                                return widget.deviceDefinitions;
+                              }
+                              return widget.deviceDefinitions.where((device) {
+                                return device.name.toLowerCase().contains(
+                                  textEditingValue.text.toLowerCase(),
+                                );
+                              });
+                            },
+                            displayStringForOption: (DeviceModel option) => option.name,
+                            fieldViewBuilder: (context, controller, focusNode, onSubmitted) {
+                              return TextField(
+                                controller: controller,
+                                focusNode: focusNode,
+                                decoration: InputDecoration(
+                                  hintText: '🔍 Buscar y agregar dispositivo...',
+                                  hintStyle: TextStyle(color: Colors.grey.shade400),
+                                  prefixIcon: Icon(Icons.search, color: Colors.grey.shade400),
+                                  filled: true,
+                                  fillColor: Colors.white,
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                  border: OutlineInputBorder(
                                     borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(
-                                      color: Colors.grey.shade300,
-                                    ),
+                                    borderSide: BorderSide(color: Colors.grey.shade300),
                                   ),
-                                  child: DropdownButtonHideUnderline(
-                                    child: DropdownButton<String>(
-                                      value: _selectedDeviceDefId,
-                                      hint: const Text('+ Agregar Dispositivo'),
-                                      isExpanded: true,
-                                      items: widget.deviceDefinitions
-                                          .map(
-                                            (d) => DropdownMenuItem(
-                                              value: d.id,
-                                              child: Text(d.name),
+                                  enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                    borderSide: BorderSide(color: Colors.grey.shade300),
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                    borderSide: const BorderSide(color: Color(0xFF2563EB), width: 2),
+                                  ),
+                                ),
+                              );
+                            },
+                            onSelected: (DeviceModel device) {
+                              setState(() => _selectedDeviceDefId = device.id);
+                              _addDevice();
+                            },
+                            optionsViewBuilder: (context, onSelected, options) {
+                              return Align(
+                                alignment: Alignment.topLeft,
+                                child: Material(
+                                  elevation: 8,
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: ConstrainedBox(
+                                    constraints: const BoxConstraints(maxHeight: 200, maxWidth: 400),
+                                    child: ListView.builder(
+                                      padding: EdgeInsets.zero,
+                                      shrinkWrap: true,
+                                      itemCount: options.length,
+                                      itemBuilder: (context, index) {
+                                        final device = options.elementAt(index);
+                                        return InkWell(
+                                          onTap: () => onSelected(device),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                            decoration: BoxDecoration(
+                                              border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
                                             ),
-                                          )
-                                          .toList(),
-                                      onChanged: (v) {
-                                        setState(
-                                          () => _selectedDeviceDefId = v,
+                                            child: Row(
+                                              children: [
+                                                Icon(Icons.devices_other, size: 18, color: Colors.grey.shade600),
+                                                const SizedBox(width: 12),
+                                                Expanded(
+                                                  child: Text(
+                                                    device.name,
+                                                    style: const TextStyle(fontSize: 14),
+                                                  ),
+                                                ),
+                                                Icon(Icons.add_circle_outline, size: 18, color: Colors.green.shade600),
+                                              ],
+                                            ),
+                                          ),
                                         );
-                                        _addDevice(); // Auto agregar al seleccionar
                                       },
                                     ),
                                   ),
                                 ),
-                              ),
-                            ],
+                              );
+                            },
                           ),
                           const SizedBox(height: 12),
                           if (_devices.isEmpty)
@@ -780,7 +813,6 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                               ),
                             ),
 
-                          // Lista de agregados
                           ..._devices.asMap().entries.map((entry) {
                             final index = entry.key;
                             final item = entry.value;
@@ -809,29 +841,62 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                                       def.name,
                                       style: const TextStyle(
                                         fontWeight: FontWeight.w600,
+                                        fontSize: 13,
                                       ),
                                     ),
                                   ),
+                                  const SizedBox(width: 8),
+                                  // NUEVO: Campo de texto editable para cantidad
                                   Container(
                                     decoration: BoxDecoration(
                                       color: Colors.grey.shade100,
-                                      borderRadius: BorderRadius.circular(4),
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(color: Colors.grey.shade300),
                                     ),
                                     child: Row(
+                                      mainAxisSize: MainAxisSize.min,
                                       children: [
                                         _QtyBtn(
                                           Icons.remove,
                                           () => _updateQuantity(index, -1),
                                         ),
-                                        Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 8,
-                                          ),
-                                          child: Text(
-                                            '${item.quantity}',
+                                        Container(
+                                          width: 50,
+                                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                                          child: TextField(
+                                            controller: TextEditingController(
+                                              text: '${item.quantity}',
+                                            )..selection = TextSelection.fromPosition(
+                                                TextPosition(offset: '${item.quantity}'.length),
+                                              ),
+                                            textAlign: TextAlign.center,
+                                            keyboardType: TextInputType.number,
                                             style: const TextStyle(
                                               fontWeight: FontWeight.bold,
+                                              fontSize: 14,
                                             ),
+                                            decoration: const InputDecoration(
+                                              isDense: true,
+                                              border: InputBorder.none,
+                                              contentPadding: EdgeInsets.symmetric(vertical: 8),
+                                            ),
+                                            onChanged: (value) {
+                                              final newQty = int.tryParse(value);
+                                              if (newQty != null && newQty > 0 && newQty <= 999) {
+                                                setState(() {
+                                                  _devices[index].quantity = newQty;
+                                                });
+                                              }
+                                            },
+                                            onSubmitted: (value) {
+                                              final newQty = int.tryParse(value);
+                                              if (newQty == null || newQty <= 0) {
+                                                // Si el valor es inválido, revertir a 1
+                                                setState(() {
+                                                  _devices[index].quantity = 1;
+                                                });
+                                              }
+                                            },
                                           ),
                                         ),
                                         _QtyBtn(
@@ -849,6 +914,11 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                                       color: Colors.red,
                                       size: 18,
                                     ),
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(
+                                      minWidth: 32,
+                                      minHeight: 32,
+                                    ),
                                   ),
                                 ],
                               ),
@@ -862,7 +932,6 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
               ),
             ),
 
-            // Footer
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(

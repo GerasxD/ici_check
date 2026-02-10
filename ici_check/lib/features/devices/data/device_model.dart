@@ -1,20 +1,21 @@
-// ENUMS (Tal cual tu código React)
+// ENUMS
 enum ActivityType { 
-  MANTENIMIENTO,      // MAINTENANCE
-  INSPECCION,         // INSPECTION
-  PRUEBA,           // REPLACEMENT
+  MANTENIMIENTO,
+  INSPECCION,
+  PRUEBA,
 }
 
 enum Frequency { 
-  DIARIO,            // DAILY
-  SEMANAL,           // WEEKLY
-  MENSUAL,           // MONTHLY
-  TRIMESTRAL,        // QUARTERLY
-  SEMESTRAL,         // BIANNUAL
-  ANUAL,              // ANNUAL
+  DIARIO,
+  SEMANAL,
+  MENSUAL,
+  TRIMESTRAL,
+  CUATRIMESTRAL, // <--- AGREGADO AQUÍ (4 Meses)
+  SEMESTRAL,
+  ANUAL,
 }
 
-// --- MODELO ACTIVIDAD (Hija) ---
+// --- MODELO ACTIVIDAD (Sin cambios necesarios, funciona automático) ---
 class ActivityConfig {
   String id;
   String name;
@@ -34,6 +35,7 @@ class ActivityConfig {
     return {
       'id': id,
       'name': name,
+      // Esto convertirá CUATRIMESTRAL a string automáticamente
       'type': type.toString().split('.').last,
       'frequency': frequency.toString().split('.').last,
       'expectedValue': expectedValue,
@@ -49,18 +51,19 @@ class ActivityConfig {
           orElse: () => ActivityType.MANTENIMIENTO),
       frequency: Frequency.values.firstWhere(
           (e) => e.toString().split('.').last == map['frequency'],
+          // Si encuentra 'CUATRIMESTRAL' en la base de datos, lo mapea correctamente aquí
           orElse: () => Frequency.MENSUAL),
       expectedValue: map['expectedValue'] ?? '',
     );
   }
 }
 
-// --- MODELO DISPOSITIVO (Padre) ---
+// --- MODELO DISPOSITIVO (Sin cambios) ---
 class DeviceModel {
   String id;
   String name;
   String description;
-  String viewMode; // 'table' or 'list'
+  String viewMode;
   List<ActivityConfig> activities;
 
   DeviceModel({
@@ -76,7 +79,6 @@ class DeviceModel {
       'name': name,
       'description': description,
       'viewMode': viewMode,
-      // Convertimos la lista de objetos a lista de Mapas para Firebase
       'activities': activities.map((x) => x.toMap()).toList(),
     };
   }

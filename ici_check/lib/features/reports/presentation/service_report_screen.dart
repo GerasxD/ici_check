@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
+import 'package:ici_check/features/reports/services/photo_storage_service.dart';
 import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
 import 'package:ici_check/features/reports/widgets/report_controls.dart';
 import 'package:ici_check/features/reports/widgets/report_header.dart';
@@ -10,8 +13,9 @@ import 'package:intl/intl.dart';
 import 'package:signature/signature.dart';
 import 'package:image_picker/image_picker.dart';
 
-// Imports de Modelos y Repositorios (Ajusta según tu estructura real)
+// Imports de Modelos y Repositorios
 import 'package:ici_check/features/policies/data/policy_model.dart';
+import 'package:ici_check/features/policies/data/policies_repository.dart'; // NUEVO
 import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:ici_check/features/clients/data/client_model.dart';
@@ -46,18 +50,26 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   // Repositorios y Servicios
   final ReportsRepository _repo = ReportsRepository();
   final SettingsRepository _settingsRepo = SettingsRepository();
+  final PoliciesRepository _policiesRepo = PoliciesRepository(); // NUEVO
   final ImagePicker _picker = ImagePicker();
   Timer? _autoSaveDebounce;
+  final PhotoStorageService _photoService = PhotoStorageService();
+  bool _isUploadingPhoto = false;
   
   // Estado del Reporte
   ServiceReportModel? _report;
   CompanySettingsModel? _companySettings;
+  PolicyModel? _currentPolicy; // NUEVO - Guardamos la póliza actual
   bool _isLoading = true;
   
   // Estado de la UI
   bool _adminOverride = false;
   String? _currentUserId;
   UserModel? _currentUser;
+  
+  // Suscripciones de streams
+  StreamSubscription? _policySubscription; // NUEVO
+  StreamSubscription? _reportSubscription; // NUEVO
   
   // Controladores de firma
   final SignatureController _providerSigController = SignatureController(
@@ -69,13 +81,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     penColor: Colors.black,
   );
 
-  // Estados para Modales (Observaciones y Fotos)
-  String? _activeObservationEntry; // Guardamos el índice como String para consistencia con tu código anterior
+  // Estados para Modales
+  String? _activeObservationEntry;
   String? _activeObservationActivityId;
   int? _photoContextEntryIdx;
   String? _photoContextActivityId;
 
-  // Colores (Para usarlos en los modales internos si es necesario)
+  // Colores
   final Color _bgLight = const Color(0xFFF8FAFC);
   final Color _primaryDark = const Color(0xFF0F172A);
 
@@ -91,11 +103,14 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   void dispose() {
     _providerSigController.dispose();
     _clientSigController.dispose();
+    _policySubscription?.cancel(); // NUEVO
+    _reportSubscription?.cancel(); // NUEVO
+    _autoSaveDebounce?.cancel();
     super.dispose();
   }
 
   // ==========================================
-  // CARGA DE DATOS E INICIALIZACIÓN
+  // CARGA DE DATOS E INICIALIZACIÓN (MEJORADO)
   // ==========================================
 
   Future<void> _loadData() async {
@@ -111,16 +126,42 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         );
       }
 
+      // ====================================================
+      // NUEVO: ESCUCHAR CAMBIOS EN LA PÓLIZA EN TIEMPO REAL
+      // ====================================================
+      _policySubscription = _policiesRepo.getPoliciesStream().listen((policies) {
+        try {
+          final updatedPolicy = policies.firstWhere((p) => p.id == widget.policyId);
+          
+          // Si detectamos cambios en la póliza, re-sincronizamos el reporte
+          if (_currentPolicy != null && _hasRelevantPolicyChanges(_currentPolicy!, updatedPolicy)) {
+            debugPrint("🔄 Detectados cambios en la póliza. Re-sincronizando reporte...");
+            setState(() {
+              _currentPolicy = updatedPolicy;
+            });
+            
+            // Solo re-sincronizamos si ya tenemos un reporte cargado
+            if (_report != null) {
+              _syncReportWithPolicy(updatedPolicy);
+            }
+          } else {
+            // Primera carga o sin cambios relevantes
+            if (mounted) {
+              setState(() {
+                _currentPolicy = updatedPolicy;
+              });
+            }
+          }
+        } catch (e) {
+          debugPrint("Error actualizando póliza: $e");
+        }
+      });
+
       // Escuchamos el stream del reporte
-      final stream = _repo.getReportStream(widget.policyId, widget.dateStr);
-      stream.listen((existingReport) {
+      _reportSubscription = _repo.getReportStream(widget.policyId, widget.dateStr).listen((existingReport) {
         if (existingReport != null) {
-          // --- CAMBIO AQUÍ ---
-          // Ya NO hacemos setState directo. Llamamos a la sincronización 
-          // para que verifique si el cronograma cambió.
-          _syncAndLoadReport(existingReport); 
+          _syncAndLoadReport(existingReport);
         } else {
-          // Si no existe, creamos uno nuevo (esto sigue igual)
           _initializeNewReport();
         }
       });
@@ -138,9 +179,71 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     }
   }
 
-  void _syncAndLoadReport(ServiceReportModel existingReport) {
-    // 1. Calcular el timeIndex actual (misma lógica que initializeReport)
+  // ====================================================
+  // NUEVO: DETECTAR SI HUBO CAMBIOS RELEVANTES EN LA PÓLIZA
+  // ====================================================
+  bool _hasRelevantPolicyChanges(PolicyModel old, PolicyModel updated) {
+    // Comparar si cambiaron los dispositivos (cantidad o tipo)
+    if (old.devices.length != updated.devices.length) return true;
+    
+    // Verificar si algún dispositivo cambió su definitionId o cantidad
+    for (int i = 0; i < old.devices.length; i++) {
+      if (i >= updated.devices.length) return true;
+      if (old.devices[i].definitionId != updated.devices[i].definitionId) return true;
+      if (old.devices[i].quantity != updated.devices[i].quantity) return true;
+    }
+    
+    // Verificar si cambió la frecuencia semanal (afecta qué actividades se muestran)
+    if (old.includeWeekly != updated.includeWeekly) return true;
+    
+    return false;
+  }
+
+  // ====================================================
+  // NUEVO: SINCRONIZAR REPORTE CUANDO LA PÓLIZA CAMBIA
+  // ====================================================
+  Future<void> _syncReportWithPolicy(PolicyModel updatedPolicy) async {
+    if (_report == null) return;
+
     bool isWeekly = widget.dateStr.contains('W');
+    int timeIndex = _calculateTimeIndex(isWeekly);
+
+    // Generar las entradas ideales con la póliza actualizada
+    final idealEntries = _repo.generateEntriesForDate(
+      updatedPolicy, // Usar la póliza actualizada
+      widget.dateStr,
+      widget.devices,
+      isWeekly,
+      timeIndex,
+    );
+
+    // Fusionar con datos existentes
+    final mergedEntries = _mergeEntries(_report!.entries, idealEntries);
+
+    // Guardar el reporte actualizado
+    final updatedReport = _report!.copyWith(entries: mergedEntries);
+    
+    await _repo.saveReport(updatedReport);
+    
+    if (mounted) {
+      setState(() {
+        _report = updatedReport;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Reporte actualizado con los cambios de la póliza'),
+          backgroundColor: Colors.blue,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  // ====================================================
+  // HELPER: CALCULAR ÍNDICE DE TIEMPO
+  // ====================================================
+  int _calculateTimeIndex(bool isWeekly) {
     int timeIndex = 0;
 
     if (!isWeekly) {
@@ -148,81 +251,84 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       try {
         DateTime rDate = DateFormat('yyyy-MM').parse(widget.dateStr);
         timeIndex = (rDate.year - pStart.year) * 12 + (rDate.month - pStart.month);
-      } catch (e) { debugPrint("Error parsing date: $e"); }
+      } catch (e) {
+        debugPrint("Error parsing date: $e");
+      }
     } else {
       int weekNumber = int.tryParse(widget.dateStr.split('W').last) ?? 1;
-      timeIndex = (weekNumber > 0) ? weekNumber - 1 : 0; 
+      timeIndex = (weekNumber > 0) ? weekNumber - 1 : 0;
     }
 
-    // 2. Generar las entradas "IDEALES" según la configuración actual del Scheduler
-    // (Aquí usamos la función pública que agregamos al repositorio)
-    final idealEntries = _repo.generateEntriesForDate(
-      widget.policy, 
-      widget.dateStr, 
-      widget.devices, 
-      isWeekly, 
-      timeIndex
-    );
+    return timeIndex;
+  }
 
-    // 3. FUSIONAR (Merge)
-    List<ReportEntry> mergedEntries = [];
-    bool hasChanges = false;
-
-    // Mapa para búsqueda rápida de lo que ya existe guardado en Firebase
-    Map<String, ReportEntry> existingEntriesMap = {
-      for (var e in existingReport.entries) e.instanceId: e
+  // ====================================================
+  // HELPER: FUSIONAR ENTRADAS (MANTENER DATOS EXISTENTES)
+  // ====================================================
+  List<ReportEntry> _mergeEntries(List<ReportEntry> existing, List<ReportEntry> ideal) {
+    List<ReportEntry> merged = [];
+    
+    // Mapa para búsqueda rápida
+    Map<String, ReportEntry> existingMap = {
+      for (var e in existing) e.instanceId: e
     };
 
-    for (var idealEntry in idealEntries) {
-      if (existingEntriesMap.containsKey(idealEntry.instanceId)) {
-        // A. El dispositivo ya existía: Combinamos resultados
-        var existingEntry = existingEntriesMap[idealEntry.instanceId]!;
+    for (var idealEntry in ideal) {
+      if (existingMap.containsKey(idealEntry.instanceId)) {
+        // El dispositivo ya existía: Combinamos resultados
+        var existingEntry = existingMap[idealEntry.instanceId]!;
         Map<String, String?> mergedResults = Map.from(existingEntry.results);
-        bool entryChanged = false;
-
-        // -- Agregar actividades nuevas (que aparecieron al mover fechas)
+        
+        // Agregar actividades nuevas
         idealEntry.results.forEach((actId, _) {
           if (!mergedResults.containsKey(actId)) {
-            mergedResults[actId] = null; // Nueva actividad vacía
-            entryChanged = true;
+            mergedResults[actId] = null;
           }
         });
 
-        // -- Eliminar actividades que ya no tocan (si están vacías)
+        // Eliminar actividades que ya no tocan (solo si están vacías)
         List<String> toRemove = [];
         mergedResults.keys.forEach((actId) {
-          // Si la actividad existe en el reporte pero NO en el ideal actual
           if (!idealEntry.results.containsKey(actId)) {
-             // Solo borramos si no ha sido contestada (es null)
-             if (mergedResults[actId] == null) {
-               toRemove.add(actId);
-               entryChanged = true;
-             }
+            if (mergedResults[actId] == null) {
+              toRemove.add(actId);
+            }
           }
         });
         
         toRemove.forEach(mergedResults.remove);
 
-        if (entryChanged) {
-          hasChanges = true;
-          mergedEntries.add(existingEntry.copyWith(results: mergedResults));
-        } else {
-          mergedEntries.add(existingEntry);
-        }
-        
+        merged.add(existingEntry.copyWith(results: mergedResults));
       } else {
-        // B. El dispositivo es nuevo (se agregó a la póliza recientemente)
-        mergedEntries.add(idealEntry);
-        hasChanges = true;
+        // Dispositivo nuevo
+        merged.add(idealEntry);
       }
     }
 
-    // 4. GUARDAR SI HUBO CAMBIOS O CARGAR NORMAL
+    return merged;
+  }
+
+  void _syncAndLoadReport(ServiceReportModel existingReport) {
+    bool isWeekly = widget.dateStr.contains('W');
+    int timeIndex = _calculateTimeIndex(isWeekly);
+
+    // Usamos la póliza actual (que puede haber cambiado)
+    final policyToUse = _currentPolicy ?? widget.policy;
+
+    final idealEntries = _repo.generateEntriesForDate(
+      policyToUse,
+      widget.dateStr,
+      widget.devices,
+      isWeekly,
+      timeIndex,
+    );
+
+    final mergedEntries = _mergeEntries(existingReport.entries, idealEntries);
+    bool hasChanges = mergedEntries.length != existingReport.entries.length;
+
     if (hasChanges) {
-      debugPrint("🔄 Sincronizando reporte con cambios del Scheduler...");
+      debugPrint("🔄 Sincronizando reporte con cambios...");
       final updatedReport = existingReport.copyWith(entries: mergedEntries);
-      
-      // Guardado silencioso para actualizar Firebase
       _repo.saveReport(updatedReport);
 
       if (mounted) {
@@ -233,7 +339,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         });
       }
     } else {
-      // Sin cambios, cargamos lo que venía de Firebase
       if (mounted) {
         setState(() {
           _report = existingReport;
@@ -245,24 +350,22 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   Future<String?> _getCurrentUserId() async {
-    // Aquí iría tu lógica real de sesión
-    // Por ahora retornamos el primer usuario de la lista si existe para probar
-    if (widget.users.isNotEmpty) return widget.users.first.id;
-    return null; 
+    try {
+      final currentUser = FirebaseAuth.instance.currentUser;
+      return currentUser?.uid;
+    } catch (e) {
+      debugPrint('Error getting current user ID: $e');
+      return null;
+    }
   }
 
-  // Método que detecta cambios en la firma
   void _onSignatureChanged() {
-    // Reiniciamos el timer cada vez que hay un trazo nuevo
     if (_autoSaveDebounce?.isActive ?? false) _autoSaveDebounce!.cancel();
-    
-    // Esperamos 2 segundos de inactividad para procesar y guardar la firma
     _autoSaveDebounce = Timer(const Duration(seconds: 2), () {
       _processAndSaveSignatures();
     });
   }
 
-  // Método específico para procesar imágenes de firmas y guardar
   Future<void> _processAndSaveSignatures() async {
     if (_report == null) return;
     
@@ -271,7 +374,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
     bool hasChanges = false;
 
-    // Procesar firma Proveedor
     if (_providerSigController.isNotEmpty) {
       final bytes = await _providerSigController.toPngBytes();
       if (bytes != null) {
@@ -283,7 +385,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       }
     }
 
-    // Procesar firma Cliente
     if (_clientSigController.isNotEmpty) {
       final bytes = await _clientSigController.toPngBytes();
       if (bytes != null) {
@@ -305,7 +406,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         setState(() {
           _report = updatedReport;
         });
-        // Guardado silencioso
         await _repo.saveReport(_report!);
         debugPrint("Firma auto-guardada");
       }
@@ -313,53 +413,23 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   void _loadSignatures() {
-    if (_report?.providerSignature != null && _report!.providerSignature!.isNotEmpty) {
-      try {
-         // Si necesitaras visualizar la firma guardada en el canvas, la lógica iría aquí.
-         // Nota: SignatureController no soporta cargar imagen base64 fácilmente para editar,
-         // normalmente se muestra una imagen estática si ya existe firma.
-      } catch (e) {
-        debugPrint('Error loading provider signature: $e');
-      }
-    }
-    // Idem para cliente
+    // Lógica de carga de firmas si es necesaria
   }
 
   void _initializeNewReport() {
     bool isWeekly = widget.dateStr.contains('W');
-    int timeIndex = 0;
+    int timeIndex = _calculateTimeIndex(isWeekly);
 
-    if (!isWeekly) {
-      // Lógica Mensual (Esta suele estar bien, pero revisamos que coincida con el inicio de la póliza)
-      DateTime pStart = DateTime(widget.policy.startDate.year, widget.policy.startDate.month, 1);
-      try {
-        DateTime rDate = DateFormat('yyyy-MM').parse(widget.dateStr);
-        // Calcula la diferencia en meses
-        timeIndex = (rDate.year - pStart.year) * 12 + (rDate.month - pStart.month);
-      } catch (e) {
-        debugPrint("Error parsing date: $e");
-      }
-    } else {
-      // --- CORRECCIÓN AQUÍ ---
-      // El formato es "AAAA-WX" (ej: 2025-W1).
-      // El índice del array empieza en 0, pero la semana visual empieza en 1.
-      // Si recibimos "1", debemos convertirlo a índice 0.
-      int weekNumber = int.tryParse(widget.dateStr.split('W').last) ?? 1;
-      
-      // RESTAMOS 1 para alinear con el array de offsets (scheduleOffsets)
-      // Si weekNumber es 1, timeIndex será 0.
-      timeIndex = (weekNumber > 0) ? weekNumber - 1 : 0; 
-    }
+    final policyToUse = _currentPolicy ?? widget.policy;
 
     final newReport = _repo.initializeReport(
-      widget.policy,
+      policyToUse,
       widget.dateStr,
       widget.devices,
       isWeekly,
-      timeIndex, // Ahora enviamos el índice corregido
+      timeIndex,
     );
 
-    // Guardamos el reporte inicializado en Firebase inmediatamente
     _repo.saveReport(newReport);
     
     if (mounted) {
@@ -371,17 +441,14 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   // ==========================================
-  // LÓGICA DE NEGOCIO (Guardar, Actualizar)
+  // LÓGICA DE NEGOCIO (Sin cambios)
   // ==========================================
-
-  
-
   void _updateEntry(int index, {
     String? customId,
     String? area,
     Map<String, String?>? results,
     String? observations,
-    List<String>? photos,
+    List<String>? photoUrls,
     Map<String, ActivityData>? activityData,
   }) {
     if (_report == null) return;
@@ -396,7 +463,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       area: area ?? entry.area,
       results: results ?? entry.results,
       observations: observations ?? entry.observations,
-      photos: photos ?? entry.photos,
+      photoUrls: photoUrls ?? entry.photoUrls,
       activityData: activityData ?? entry.activityData,
     );
 
@@ -418,7 +485,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     String? current = entry.results[activityId];
     String? next;
 
-    // Ciclo de estados: null -> OK -> NOK -> NA -> NR -> null
     if (current == null) next = 'OK';
     else if (current == 'OK') next = 'NOK';
     else if (current == 'NOK') next = 'NA';
@@ -446,23 +512,28 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     final newSectionAssignments = Map<String, List<String>>.from(_report!.sectionAssignments);
     newSectionAssignments[defId] = newAssignments;
 
-    final updatedReport = _report!.copyWith(sectionAssignments: newSectionAssignments);
+    final Set<String> allAssignedTechs = {};
+    for (var techList in newSectionAssignments.values) {
+      allAssignedTechs.addAll(techList);
+    }
+
+    final updatedReport = _report!.copyWith(
+      sectionAssignments: newSectionAssignments,
+      assignedTechnicianIds: allAssignedTechs.toList(),
+    );
+    
     setState(() {
       _report = updatedReport;
     });
     _repo.saveReport(_report!);
   }
 
-  // ==========================================
-  // CONTROL DE TIEMPOS Y PERMISOS
-  // ==========================================
-
   bool _canEditSection(String defId) {
     if (!_isEditable()) return false;
     if (_isUserCoordinator() && _adminOverride) return true;
     
     final assigned = _report?.sectionAssignments[defId] ?? [];
-    if (assigned.isEmpty) return true; 
+    if (assigned.isEmpty) return true;
     return _currentUserId != null && assigned.contains(_currentUserId);
   }
 
@@ -482,21 +553,15 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   bool _areAllSectionsAssigned() {
     if (_report == null) return false;
 
-    // 1. Identificar qué secciones (Definition IDs) tienen trabajo activo.
-    // Usamos un Set para evitar duplicados (solo queremos los IDs únicos de las secciones).
     final activeDefIds = <String>{};
 
     for (var entry in _report!.entries) {
-      // Solo consideramos una sección como "activa" si sus entradas tienen 
-      // actividades programadas (es decir, el mapa 'results' no está vacío).
-      // Si un dispositivo no tiene mantenimiento este mes, no obliga a asignar técnico.
       if (entry.results.isNotEmpty) {
         try {
-          // Buscamos la instancia del dispositivo en la póliza para obtener su definitionId
-          final deviceInstance = widget.policy.devices.firstWhere(
+          final policyToUse = _currentPolicy ?? widget.policy;
+          final deviceInstance = policyToUse.devices.firstWhere(
             (d) => d.instanceId == entry.instanceId,
           );
-          
           activeDefIds.add(deviceInstance.definitionId);
         } catch (e) {
           debugPrint('Advertencia: Dispositivo ${entry.instanceId} no encontrado en la póliza.');
@@ -504,22 +569,17 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       }
     }
 
-    // 2. Verificar en el mapa de asignaciones si esas secciones tienen gente.
     for (var defId in activeDefIds) {
       final assignedTechnicians = _report!.sectionAssignments[defId];
-      
-      // Si la lista es nula o está vacía, fallamos la validación.
       if (assignedTechnicians == null || assignedTechnicians.isEmpty) {
-        return false; 
+        return false;
       }
     }
 
-    // Si pasamos el ciclo sin retornar false, es que todo está asignado.
     return true;
   }
 
   void _handleStartService() {
-    // 1. Validación básica de estado y usuario
     if (_report == null || _currentUserId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -530,8 +590,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       return;
     }
 
-    // 2. NUEVA VALIDACIÓN: Verificar asignaciones
-    // Si NO (! negación) están todas las secciones asignadas, entramos al if
     if (!_areAllSectionsAssigned()) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -539,18 +597,19 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             'No se puede iniciar: Hay tipos de dispositivos sin responsable asignado.',
             style: TextStyle(fontWeight: FontWeight.bold),
           ),
-          backgroundColor: Colors.red, // Rojo para indicar error bloqueante
+          backgroundColor: Colors.red,
           duration: Duration(seconds: 3),
         ),
       );
-      return; // <--- IMPORTANTE: Detenemos la ejecución aquí.
+      return;
     }
 
-    // 3. Si pasó las validaciones, procedemos a guardar la hora
+    final now = DateTime.now(); // 1. Capturamos el momento exacto
     final timeStr = DateFormat('HH:mm').format(DateTime.now());
-    
-    // Usamos el copyWith que agregamos al modelo
-    final updatedReport = _report!.copyWith(startTime: timeStr);
+    final updatedReport = _report!.copyWith(
+      startTime: timeStr,      // 2. Guardamos la hora (esto activa la condición verde en el cronograma)
+      serviceDate: now,        // 3. IMPORTANTÍSIMO: Actualizamos la fecha del reporte al día real de hoy
+    );
 
     setState(() {
       _report = updatedReport;
@@ -560,7 +619,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   void _handleEndService() {
-    // 1. Validación básica de usuario (esto sí lo dejamos para que sepa quién cerró)
     if (_report == null || _currentUserId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Debes seleccionar un usuario para registrar tiempos'), backgroundColor: Colors.orange),
@@ -568,7 +626,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       return;
     }
 
-    // 2. Validación de Asignaciones (esto también es útil dejarlo)
     if (!_areAllSectionsAssigned()) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Asigna técnicos a todas las secciones antes de finalizar.'), backgroundColor: Colors.red),
@@ -576,35 +633,21 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       return;
     }
 
-    // 3. FINALIZAR DIRECTAMENTE (Sin diálogos de bloqueo)
     final timeStr = DateFormat('HH:mm').format(DateTime.now());
-    
-    // Si quieres, puedes forzar que forceNullEndTime sea false por seguridad
-    final updatedReport = _report!.copyWith(endTime: timeStr); 
+    final updatedReport = _report!.copyWith(endTime: timeStr);
 
     setState(() {
       _report = updatedReport;
     });
     _repo.saveReport(_report!);
-    
-    // Mensaje opcional
-    // ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Servicio finalizado'), backgroundColor: Colors.green));
   }
 
   void _handleResumeService() {
-      setState(() {
-        // Borramos el endTime para que el reporte quede "Abierto" de nuevo
-        _report = _report!.copyWith(
-          endTime: null, 
-          forceNullEndTime: true 
-        ); 
-      });
-      _repo.saveReport(_report!);
+    setState(() {
+      _report = _report!.copyWith(endTime: null, forceNullEndTime: true);
+    });
+    _repo.saveReport(_report!);
   }
-
-  // ==========================================
-  // MANEJO DE FOTOS
-  // ==========================================
 
   Future<void> _handleCameraClick(int entryIdx, {String? activityId}) async {
     if (_report == null) return;
@@ -613,26 +656,24 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     List<String> existingPhotos;
 
     if (activityId != null) {
-      existingPhotos = entry.activityData[activityId]?.photos ?? [];
+      existingPhotos = entry.activityData[activityId]?.photoUrls ?? [];
     } else {
-      existingPhotos = entry.photos;
+      existingPhotos = entry.photoUrls;
     }
 
-    if (existingPhotos.isNotEmpty) {
-      setState(() {
-        _photoContextEntryIdx = entryIdx;
-        _photoContextActivityId = activityId;
-      });
-    } else {
-      setState(() {
-        _photoContextEntryIdx = entryIdx;
-        _photoContextActivityId = activityId;
-      });
+    setState(() {
+      _photoContextEntryIdx = entryIdx;
+      _photoContextActivityId = activityId;
+    });
+
+    if (existingPhotos.isEmpty) {
       _pickImage();
     }
   }
 
   Future<void> _pickImage() async {
+    if (_isUploadingPhoto) return;
+
     try {
       final XFile? image = await _picker.pickImage(
         source: ImageSource.camera,
@@ -641,83 +682,172 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       );
 
       if (image != null && _photoContextEntryIdx != null && _report != null) {
-        final bytes = await image.readAsBytes();
-        final base64Image = base64Encode(bytes);
+        try {
+          // Verifica permisos primero (gal lo hace automático, pero es buena práctica)
+          // Guarda la imagen en la galería
+          await Gal.putImage(image.path, album: "ICI Check");
+          debugPrint("✅ Foto guardada en la galería con Gal");
+        } catch (e) {
+          debugPrint("⚠️ Error guardando en galería: $e");
+          // Si es un error de permisos, Gal lanza una excepción específica
+          if (e is GalException && e.type == GalExceptionType.accessDenied) {
+             debugPrint("El usuario denegó el acceso a las fotos");
+          }
+        }
+        setState(() => _isUploadingPhoto = true);
 
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                SizedBox(width: 20, height: 20, 
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                SizedBox(width: 12),
+                Text('Subiendo foto...'),
+              ],
+            ),
+            duration: Duration(minutes: 1),
+          ),
+        );
+
+        final bytes = await image.readAsBytes();
         final entryIdx = _photoContextEntryIdx!;
         final activityId = _photoContextActivityId;
+
+        // ✅ Subir a Firebase Storage
+        final photoUrl = await _photoService.uploadPhoto(
+          photoBytes: bytes,
+          reportId: '${widget.policyId}_${widget.dateStr}',
+          deviceInstanceId: _report!.entries[entryIdx].instanceId,
+          activityId: activityId,
+        );
+
         final entry = _report!.entries[entryIdx];
 
         if (activityId != null) {
-          final currentData = entry.activityData[activityId] ?? ActivityData(photos: [], observations: '');
-          final newPhotos = [...currentData.photos, base64Image];
+          final currentData = entry.activityData[activityId] ?? 
+              ActivityData(photoUrls: [], observations: '');
+          final newPhotoUrls = [...currentData.photoUrls, photoUrl];
           final newActivityData = Map<String, ActivityData>.from(entry.activityData);
           newActivityData[activityId] = ActivityData(
-            photos: newPhotos,
+            photoUrls: newPhotoUrls,
             observations: currentData.observations,
           );
           _updateEntry(entryIdx, activityData: newActivityData);
         } else {
-          final newPhotos = [...entry.photos, base64Image];
-          _updateEntry(entryIdx, photos: newPhotos);
+          final newPhotoUrls = [...entry.photoUrls, photoUrl];
+          _updateEntry(entryIdx, photoUrls: newPhotoUrls);
         }
+
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.white),
+                SizedBox(width: 12),
+                Text('Foto subida'),
+              ],
+            ),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
       }
     } catch (e) {
-      debugPrint('Error picking image: $e');
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      setState(() => _isUploadingPhoto = false);
     }
   }
 
-  void _confirmDeletePhoto(int photoIndex) {
+  Future<void> _confirmDeletePhoto(int photoIndex) async {
+    if (_photoContextEntryIdx == null || _report == null) return;
+
     final entryIdx = _photoContextEntryIdx!;
     final activityId = _photoContextActivityId;
     final entry = _report!.entries[entryIdx];
 
+    String? photoUrlToDelete;
+
     if (activityId != null) {
       final currentData = entry.activityData[activityId];
-      if (currentData != null) {
-        final newPhotos = List<String>.from(currentData.photos);
-        newPhotos.removeAt(photoIndex);
+      if (currentData != null && photoIndex < currentData.photoUrls.length) {
+        photoUrlToDelete = currentData.photoUrls[photoIndex];
+        
+        final newPhotoUrls = List<String>.from(currentData.photoUrls);
+        newPhotoUrls.removeAt(photoIndex);
+        
         final newActivityData = Map<String, ActivityData>.from(entry.activityData);
-        newActivityData[activityId] = ActivityData(photos: newPhotos, observations: currentData.observations);
+        newActivityData[activityId] = ActivityData(
+          photoUrls: newPhotoUrls,
+          observations: currentData.observations,
+        );
+        
         _updateEntry(entryIdx, activityData: newActivityData);
-        if (newPhotos.isEmpty) {
-          setState(() { _photoContextEntryIdx = null; _photoContextActivityId = null; });
+        
+        if (newPhotoUrls.isEmpty) {
+          setState(() {
+            _photoContextEntryIdx = null;
+            _photoContextActivityId = null;
+          });
         }
       }
     } else {
-      final newPhotos = List<String>.from(entry.photos);
-      newPhotos.removeAt(photoIndex);
-      _updateEntry(entryIdx, photos: newPhotos);
-      if (newPhotos.isEmpty) {
-        setState(() { _photoContextEntryIdx = null; _photoContextActivityId = null; });
+      if (photoIndex < entry.photoUrls.length) {
+        photoUrlToDelete = entry.photoUrls[photoIndex];
+        
+        final newPhotoUrls = List<String>.from(entry.photoUrls);
+        newPhotoUrls.removeAt(photoIndex);
+        
+        _updateEntry(entryIdx, photoUrls: newPhotoUrls);
+        
+        if (newPhotoUrls.isEmpty) {
+          setState(() {
+            _photoContextEntryIdx = null;
+            _photoContextActivityId = null;
+          });
+        }
+      }
+    }
+
+    // ✅ Eliminar de Storage
+    if (photoUrlToDelete != null) {
+      try {
+        await _photoService.deletePhoto(photoUrlToDelete);
+      } catch (e) {
+        debugPrint('Error eliminando foto: $e');
       }
     }
   }
 
-  // ==========================================
-  // HELPERS DE UI
-  // ==========================================
-
   Map<String, List<ReportEntry>> _groupEntries() {
     if (_report == null) return {};
     final grouped = <String, List<ReportEntry>>{};
+    final policyToUse = _currentPolicy ?? widget.policy;
+    
     for (var entry in _report!.entries) {
-      final deviceInstance = widget.policy.devices.firstWhere((d) => d.instanceId == entry.instanceId);
-      final defId = deviceInstance.definitionId;
-      if (!grouped.containsKey(defId)) grouped[defId] = [];
-      grouped[defId]!.add(entry);
+      try {
+        final deviceInstance = policyToUse.devices.firstWhere((d) => d.instanceId == entry.instanceId);
+        final defId = deviceInstance.definitionId;
+        if (!grouped.containsKey(defId)) grouped[defId] = [];
+        grouped[defId]!.add(entry);
+      } catch (e) {
+        debugPrint('Warning: Device ${entry.instanceId} not found in policy');
+      }
     }
     return grouped;
   }
 
   String _getFrequencies(Map<String, List<ReportEntry>> grouped) {
-    // Tu lógica original para obtener frecuencias
-    return "Mensual"; // Simplificado para el ejemplo
+    return "Mensual";
   }
-
-  // ==========================================
-  // BUILD PRINCIPAL
-  // ==========================================
 
   @override
   Widget build(BuildContext context) {
@@ -729,6 +859,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     }
 
     final groupedEntries = _groupEntries();
+    final groupedEntriesList = groupedEntries.entries.toList();
     final frequencies = _getFrequencies(groupedEntries);
 
     return Scaffold(
@@ -743,58 +874,26 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Reporte de Servicio',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF1E293B),
-                letterSpacing: -0.3,
-              ),
-            ),
+            const Text('Reporte de Servicio', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF1E293B), letterSpacing: -0.3)),
             Row(
               children: [
                 Icon(Icons.calendar_today, size: 11, color: Colors.grey.shade600),
                 const SizedBox(width: 4),
-                Text(
-                  widget.dateStr,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                Text(widget.dateStr, style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
                 if (_report!.startTime != null) ...[
                   const SizedBox(width: 8),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
-                      color: _report!.endTime == null
-                          ? const Color(0xFF10B981).withOpacity(0.1)
-                          : const Color(0xFF64748B).withOpacity(0.1),
+                      color: _report!.endTime == null ? const Color(0xFF10B981).withOpacity(0.1) : const Color(0xFF64748B).withOpacity(0.1),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(
-                          _report!.endTime == null ? Icons.play_circle : Icons.check_circle,
-                          size: 10,
-                          color: _report!.endTime == null
-                              ? const Color(0xFF10B981)
-                              : const Color(0xFF64748B),
-                        ),
+                        Icon(_report!.endTime == null ? Icons.play_circle : Icons.check_circle, size: 10, color: _report!.endTime == null ? const Color(0xFF10B981) : const Color(0xFF64748B)),
                         const SizedBox(width: 4),
-                        Text(
-                          _report!.endTime == null ? 'En curso' : 'Finalizado',
-                          style: TextStyle(
-                            fontSize: 9,
-                            fontWeight: FontWeight.bold,
-                            color: _report!.endTime == null
-                                ? const Color(0xFF10B981)
-                                : const Color(0xFF64748B),
-                          ),
-                        ),
+                        Text(_report!.endTime == null ? 'En curso' : 'Finalizado', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: _report!.endTime == null ? const Color(0xFF10B981) : const Color(0xFF64748B))),
                       ],
                     ),
                   ),
@@ -806,60 +905,61 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         actions: [
           if (_isUserCoordinator())
             IconButton(
-              icon: Icon(
-                _adminOverride ? Icons.admin_panel_settings : Icons.admin_panel_settings_outlined,
-                color: _adminOverride ? const Color(0xFFF59E0B) : const Color(0xFF94A3B8),
-                size: 22,
-              ),
+              icon: Icon(_adminOverride ? Icons.admin_panel_settings : Icons.admin_panel_settings_outlined, color: _adminOverride ? const Color(0xFFF59E0B) : const Color(0xFF94A3B8), size: 22),
               onPressed: () => setState(() => _adminOverride = !_adminOverride),
               tooltip: _adminOverride ? 'Modo Admin Activo' : 'Activar Modo Admin',
             ),
           const SizedBox(width: 8),
         ],
       ),
-        body: SingleChildScrollView(
-          child: Column(
-            children: [
-              // 1. CABECERA
-              ReportHeader(
-                companySettings: _companySettings!,
-                client: widget.client,
-                serviceDate: _report!.serviceDate,
-                dateStr: widget.dateStr,
-                frequencies: frequencies,
-              ),
 
-              // 2. CONTROLES (Iniciar/Fin/Asignación)
-              ReportControls(
-                report: _report!,
-                users: widget.users,
-                adminOverride: _adminOverride,
-                isUserDesignated: _report!.assignedTechnicianIds.contains(_currentUserId),
-                onStartService: _handleStartService,
-                onEndService: _handleEndService,
-                onResumeService: _handleResumeService,
-                onDateChanged: (newDate) {
-                  final updated = _report!.copyWith(serviceDate: newDate);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-                onStartTimeEdited: (newTime) {
-                  final updated = _report!.copyWith(startTime: newTime);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-                onEndTimeEdited: (newTime) {
-                  final updated = _report!.copyWith(endTime: newTime);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-              ),
+      body: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                ReportHeader(
+                  companySettings: _companySettings!,
+                  client: widget.client,
+                  serviceDate: _report!.serviceDate,
+                  dateStr: widget.dateStr,
+                  frequencies: frequencies,
+                ),
+                ReportControls(
+                  report: _report!,
+                  users: widget.users,
+                  adminOverride: _adminOverride,
+                  isUserDesignated: _report!.assignedTechnicianIds.contains(_currentUserId),
+                  onStartService: _handleStartService,
+                  onEndService: _handleEndService,
+                  onResumeService: _handleResumeService,
+                  onDateChanged: (newDate) {
+                    final updated = _report!.copyWith(serviceDate: newDate);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                  onStartTimeEdited: (newTime) {
+                    final updated = _report!.copyWith(startTime: newTime);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                  onEndTimeEdited: (newTime) {
+                    final updated = _report!.copyWith(endTime: newTime);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                ),
+              ],
+            ),
+          ),
 
-              // 3. SECCIONES DE DISPOSITIVOS (Tablas/Listas)
-              ...groupedEntries.entries.map((entryGroup) {
+          SliverList(
+            delegate: SliverChildBuilderDelegate(
+              (context, index) {
+                final entryGroup = groupedEntriesList[index];
                 final defId = entryGroup.key;
                 final sectionEntries = entryGroup.value;
-                
+
                 final deviceDef = widget.devices.firstWhere(
                   (d) => d.id == defId,
                   orElse: () => DeviceModel(id: defId, name: 'Desconocido', description: '', activities: []),
@@ -872,41 +972,34 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   users: widget.users,
                   sectionAssignments: _report!.sectionAssignments[defId] ?? [],
                   isEditable: _isEditable(),
-                  allowedToEdit: _isEditable(), // <--- CAMBIO AQUÍ: Permitir ver controles si el reporte está abierto
+                  allowedToEdit: _isEditable(),
                   isUserCoordinator: _isUserCoordinator(),
                   currentUserId: _currentUserId,
-                  
-                  // CALLBACKS IMPORTANTE: Mapeo de índices locales a globales
                   onToggleAssignment: (uid) => _toggleSectionAssignment(defId, uid),
-                  
                   onCustomIdChanged: (localIndex, val) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) _updateEntry(globalIndex, customId: val);
+                    if (globalIndex != -1) _updateEntry(globalIndex, customId: val);
                   },
-                  
                   onAreaChanged: (localIndex, val) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) _updateEntry(globalIndex, area: val);
+                    if (globalIndex != -1) _updateEntry(globalIndex, area: val);
                   },
-                  
                   onToggleStatus: (localIndex, activityId) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
+                    if (globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
                   },
-                  
                   onCameraClick: (localIndex, {activityId}) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
+                    if (globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
                   },
-                  
                   onObservationClick: (localIndex, {activityId}) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) {
+                    if (globalIndex != -1) {
                       setState(() {
                         _activeObservationEntry = globalIndex.toString();
                         _activeObservationActivityId = activityId;
@@ -914,40 +1007,46 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     }
                   },
                 );
-              }),
-
-              // 4. OBSERVACIONES GENERALES
-              _buildGeneralObservationsBox(),
-              ReportSummary(report: _report!),
-
-              // 5. FIRMAS
-              ReportSignatures(
-                providerController: _providerSigController,
-                clientController: _clientSigController,
-                providerName: _report!.providerSignerName,
-                clientName: _report!.clientSignerName,
-                providerSignatureData: _report!.providerSignature, // Base64 desde Firebase
-                clientSignatureData: _report!.clientSignature,
-                isEditable: _isEditable(),
-                onProviderNameChanged: (val) {
-                  final updated = _report!.copyWith(providerSignerName: val);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-                onClientNameChanged: (val) {
-                  final updated = _report!.copyWith(clientSignerName: val);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-              ),
-
-              const SizedBox(height: 80),
-            ],
+              },
+              childCount: groupedEntriesList.length,
+            ),
           ),
-        ),
+
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                _buildGeneralObservationsBox(),
+                ReportSummary(report: _report!),
+                ReportSignatures(
+                  providerController: _providerSigController,
+                  clientController: _clientSigController,
+                  providerName: _report!.providerSignerName,
+                  clientName: _report!.clientSignerName,
+                  providerSignatureData: _report!.providerSignature,
+                  clientSignatureData: _report!.clientSignature,
+                  isEditable: _isEditable(),
+                  onProviderNameChanged: (val) {
+                    final updated = _report!.copyWith(providerSignerName: val);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                  onClientNameChanged: (val) {
+                    final updated = _report!.copyWith(clientSignerName: val);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                ),
+                const SizedBox(height: 20),
+              ],
+            ),
+          ),
+        ],
+      ),
+
       floatingActionButton: null,
-      bottomSheet: _activeObservationEntry != null 
-          ? _buildObservationModal() 
+
+      bottomSheet: _activeObservationEntry != null
+          ? _buildObservationModal()
           : (_photoContextEntryIdx != null ? _buildPhotoModal() : null),
     );
   }
@@ -959,28 +1058,22 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     for (final entry in _report!.entries) {
       List<String> deviceFindingsTexts = [];
 
-      // 1. Revisar observación general del dispositivo
       if (entry.observations.trim().isNotEmpty) {
         deviceFindingsTexts.add(entry.observations.trim());
       }
 
-      // 2. Revisar observaciones de cada actividad dentro del dispositivo
       for (var actData in entry.activityData.values) {
         if (actData.observations.trim().isNotEmpty) {
-          // Opcional: Podrías prefijar el nombre de la actividad si lo tuvieras disponible aquí
           deviceFindingsTexts.add(actData.observations.trim());
         }
       }
 
-      // Si encontramos hallazgos para este dispositivo, los agregamos a la lista principal
       if (deviceFindingsTexts.isNotEmpty) {
-        // Usamos el customId (ej. EXT-1) o el índice si no tiene ID.
         String distinctId = entry.customId.isNotEmpty ? entry.customId : 'Dispositivo #${entry.deviceIndex}';
         
         findings.add({
           'id': distinctId,
-          // Si hay múltiples observaciones en un mismo equipo, las unimos con un salto de línea
-          'text': deviceFindingsTexts.join('\n—\n'), 
+          'text': deviceFindingsTexts.join('\n—\n'),
         });
       }
     }
@@ -988,13 +1081,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   Widget _buildGeneralObservationsBox() {
-    // Obtenemos los hallazgos dinámicamente
     final registeredFindings = _getRegisteredFindings();
     final hasFindings = registeredFindings.isNotEmpty;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 32),
-      // Eliminamos el padding interno general para manejarlo por secciones
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
@@ -1010,14 +1101,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ===================== SECCIÓN 1: OBSERVACIONES GENERALES (Editable) =====================
           _buildSectionHeader(Icons.notes, 'OBSERVACIONES GENERALES DEL SERVICIO'),
           
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: TextField(
               enabled: _isEditable(),
-              // Usamos TextEditingController.fromValue para evitar saltos de cursor al reconstruir
               controller: TextEditingController.fromValue(
                 TextEditingValue(
                   text: _report!.generalObservations,
@@ -1030,7 +1119,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 hintText: 'Comentarios globales sobre la visita, accesos, estado general de las instalaciones...',
                 hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 12),
                 filled: true,
-                fillColor: const Color(0xFFF8FAFC), // Slate-50 background
+                fillColor: const Color(0xFFF8FAFC),
                 contentPadding: const EdgeInsets.all(12),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
@@ -1046,15 +1135,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 ),
               ),
               onChanged: (val) {
-                // Actualizamos el estado local inmediatamente para que el usuario vea lo que escribe
                 setState(() {
                   _report = _report!.copyWith(generalObservations: val);
                 });
 
-                // Cancelamos timer anterior si existe
                 if (_autoSaveDebounce?.isActive ?? false) _autoSaveDebounce!.cancel();
 
-                // Guardamos en la BD solo cuando el usuario deje de escribir por 1.5 segundos
                 _autoSaveDebounce = Timer(const Duration(milliseconds: 1500), () {
                     _repo.saveReport(_report!);
                     debugPrint("Observaciones auto-guardadas");
@@ -1063,11 +1149,9 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             ),
           ),
 
-          // Divisor entre secciones
           Divider(height: 1, color: Colors.grey.shade200),
 
-          // ===================== SECCIÓN 2: HALLAZGOS REGISTRADOS (Lectura) =====================
-          _buildSectionHeader(Icons.find_in_page_outlined, 'HALLAZGOS REGISTRADOS EN DISPOSITIVOS', color: const Color(0xFFF59E0B)), // Color ámbar para resaltar
+          _buildSectionHeader(Icons.find_in_page_outlined, 'HALLAZGOS REGISTRADOS EN DISPOSITIVOS', color: const Color(0xFFF59E0B)),
 
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -1079,11 +1163,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // El "Badge" con el ID (ej. EXT-1:)
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                               decoration: BoxDecoration(
-                                color: const Color(0xFFE2E8F0), // Slate-200 (Gris claro como en la imagen)
+                                color: const Color(0xFFE2E8F0),
                                 borderRadius: BorderRadius.circular(6),
                               ),
                               child: Text(
@@ -1091,18 +1174,17 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                                 style: const TextStyle(
                                   fontSize: 11,
                                   fontWeight: FontWeight.w800,
-                                  color: Color(0xFF1E293B), // Slate-800
+                                  color: Color(0xFF1E293B),
                                 ),
                               ),
                             ),
                             const SizedBox(width: 10),
-                            // El texto del hallazgo
                             Expanded(
                               child: Text(
                                 finding['text']!,
                                 style: const TextStyle(
                                   fontSize: 12,
-                                  color: Color(0xFF334155), // Slate-700
+                                  color: Color(0xFF334155),
                                   height: 1.4,
                                 ),
                               ),
@@ -1121,25 +1203,21 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     border: Border.all(color: Colors.grey.shade100)
                   ),
                   child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start, // Agregado para alinear arriba si son 2 líneas
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Icon(Icons.check_circle_outline, size: 16, color: Colors.grey.shade400),
                       const SizedBox(width: 8),
-                      
-                      // --- AQUÍ ESTÁ LA SOLUCIÓN ---
-                      Expanded( 
+                      Expanded(
                         child: Text(
                           "No se registraron observaciones individuales en los equipos.",
                           style: TextStyle(
-                            fontSize: 12, 
-                            color: Colors.grey.shade500, 
+                            fontSize: 12,
+                            color: Colors.grey.shade500,
                             fontStyle: FontStyle.italic
                           ),
-                          // Opcional: para asegurar que no se corte, aunque Expanded ya fuerza el salto de línea
-                          overflow: TextOverflow.visible, 
+                          overflow: TextOverflow.visible,
                         ),
                       ),
-                      // -----------------------------
                     ],
                   ),
                 ),
@@ -1161,7 +1239,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             style: TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w800,
-              color: const Color(0xFF1E293B), // Slate-800
+              color: const Color(0xFF1E293B),
               letterSpacing: 0.5,
             ),
           ),
@@ -1170,9 +1248,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     );
   }
 
-  // ==========================================
-  // 2. MODAL DE OBSERVACIONES (Bottom Sheet)
-  // ==========================================
   Widget _buildObservationModal() {
     if (_activeObservationEntry == null) return const SizedBox();
     
@@ -1191,13 +1266,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       title = 'Observación de Actividad';
       subtitle = 'ID: ${entry.customId} • ${_activeObservationActivityId}';
       icon = Icons.assignment_outlined;
-      accentColor = const Color(0xFFF59E0B); // Ámbar para actividades
+      accentColor = const Color(0xFFF59E0B);
     } else {
       currentObservation = entry.observations;
       title = entry.customId.isNotEmpty ? entry.customId : 'Dispositivo #${entry.deviceIndex}';
       subtitle = entry.area.isNotEmpty ? entry.area : 'Sin ubicación especificada';
       icon = Icons.devices_other;
-      accentColor = const Color(0xFF3B82F6); // Azul para dispositivos
+      accentColor = const Color(0xFF3B82F6);
     }
 
     final textController = TextEditingController(text: currentObservation);
@@ -1217,28 +1292,26 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       ),
       padding: EdgeInsets.only(
         bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-        left: 24, 
-        right: 24, 
+        left: 24,
+        right: 24,
         top: 12
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Handle (drag indicator)
           Center(
             child: Container(
-              width: 36, 
-              height: 4, 
+              width: 36,
+              height: 4,
               margin: const EdgeInsets.only(bottom: 20),
               decoration: BoxDecoration(
-                color: Colors.grey.shade300, 
+                color: Colors.grey.shade300,
                 borderRadius: BorderRadius.circular(2)
               ),
             ),
           ),
 
-          // Header con gradiente sutil
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -1269,33 +1342,33 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        title, 
+                        title,
                         style: const TextStyle(
-                          fontWeight: FontWeight.w800, 
-                          fontSize: 15, 
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
                           color: Color(0xFF1E293B),
                           letterSpacing: -0.3,
                         )
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        subtitle, 
+                        subtitle,
                         style: const TextStyle(
-                          color: Color(0xFF64748B), 
+                          color: Color(0xFF64748B),
                           fontSize: 12,
                           fontWeight: FontWeight.w500,
                         ),
-                        maxLines: 1, 
+                        maxLines: 1,
                         overflow: TextOverflow.ellipsis
                       ),
                     ],
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8), size: 22), 
-                  onPressed: () => setState(() { 
-                    _activeObservationEntry = null; 
-                    _activeObservationActivityId = null; 
+                  icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8), size: 22),
+                  onPressed: () => setState(() {
+                    _activeObservationEntry = null;
+                    _activeObservationActivityId = null;
                   }),
                   style: IconButton.styleFrom(
                     backgroundColor: Colors.white,
@@ -1308,7 +1381,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           
           const SizedBox(height: 24),
           
-          // Label del campo
           const Row(
             children: [
               Icon(Icons.edit_note, size: 16, color: Color(0xFF64748B)),
@@ -1327,7 +1399,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           
           const SizedBox(height: 12),
           
-          // Input de Texto con contador
           Stack(
             children: [
               TextField(
@@ -1354,11 +1425,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     borderSide: BorderSide(color: accentColor, width: 2),
                   ),
                   contentPadding: const EdgeInsets.all(16),
-                  counterText: '', // Ocultar contador por defecto
+                  counterText: '',
                 ),
                 onChanged: (value) => characterCount.value = value.length,
               ),
-              // Contador custom en la esquina
               Positioned(
                 bottom: 8,
                 right: 12,
@@ -1391,14 +1461,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           
           const SizedBox(height: 24),
           
-          // Botones de Acción
           Row(
             children: [
               Expanded(
                 child: OutlinedButton(
-                  onPressed: () => setState(() { 
-                    _activeObservationEntry = null; 
-                    _activeObservationActivityId = null; 
+                  onPressed: () => setState(() {
+                    _activeObservationEntry = null;
+                    _activeObservationActivityId = null;
                   }),
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 14),
@@ -1425,20 +1494,20 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   ),
                   onPressed: () {
                     if (_activeObservationActivityId != null) {
-                      final currentData = entry.activityData[_activeObservationActivityId!] ?? 
-                          ActivityData(photos: [], observations: '');
+                      final currentData = entry.activityData[_activeObservationActivityId!] ??
+                          ActivityData(photoUrls: [], observations: '');
                       final newActivityData = Map<String, ActivityData>.from(entry.activityData);
                       newActivityData[_activeObservationActivityId!] = ActivityData(
-                        photos: currentData.photos, 
+                        photoUrls: currentData.photoUrls,
                         observations: textController.text
                       );
                       _updateEntry(entryIdx, activityData: newActivityData);
                     } else {
                       _updateEntry(entryIdx, observations: textController.text);
                     }
-                    setState(() { 
-                      _activeObservationEntry = null; 
-                      _activeObservationActivityId = null; 
+                    setState(() {
+                      _activeObservationEntry = null;
+                      _activeObservationActivityId = null;
                     });
                   },
                 ),
@@ -1450,7 +1519,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     );
   }
 
-  // Modal de Fotos
   Widget _buildPhotoModal() {
     if (_photoContextEntryIdx == null) return const SizedBox();
     final entry = _report!.entries[_photoContextEntryIdx!];
@@ -1459,10 +1527,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     String contextTitle;
     
     if (_photoContextActivityId != null) {
-      photos = entry.activityData[_photoContextActivityId]?.photos ?? [];
+      photos = entry.activityData[_photoContextActivityId]?.photoUrls ?? [];
       contextTitle = 'Fotos de Actividad • ${entry.customId}';
     } else {
-      photos = entry.photos;
+      photos = entry.photoUrls;
       contextTitle = 'Fotos del Dispositivo • ${entry.customId}';
     }
 
@@ -1481,7 +1549,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       ),
       child: Column(
         children: [
-          // Handle
           Center(
             child: Container(
               width: 36,
@@ -1494,7 +1561,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             ),
           ),
           
-          // Header
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
             child: Row(
@@ -1549,7 +1615,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           
           const Divider(height: 1),
           
-          // Grid de fotos
           Expanded(
             child: photos.isEmpty
                 ? _buildEmptyPhotoState()
@@ -1572,7 +1637,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   ),
           ),
           
-          // Botón de acción flotante (si hay fotos)
           if (photos.isEmpty)
             Padding(
               padding: const EdgeInsets.all(24),
@@ -1673,7 +1737,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     );
   }
 
-  Widget _buildPhotoThumbnail(String base64Photo, int index) {
+  Widget _buildPhotoThumbnail(String photoUrls, int index) {
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
@@ -1690,11 +1754,44 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Image.memory(
-              base64Decode(base64Photo),
+            // ✅ Imagen desde red
+            Image.network(
+              photoUrls,
               fit: BoxFit.cover,
+              loadingBuilder: (context, child, loadingProgress) {
+                if (loadingProgress == null) return child;
+                return Container(
+                  color: const Color(0xFFF1F5F9),
+                  child: Center(
+                    child: CircularProgressIndicator(
+                      value: loadingProgress.expectedTotalBytes != null
+                          ? loadingProgress.cumulativeBytesLoaded /
+                              loadingProgress.expectedTotalBytes!
+                          : null,
+                      strokeWidth: 2,
+                      color: const Color(0xFF3B82F6),
+                    ),
+                  ),
+                );
+              },
+              errorBuilder: (context, error, stackTrace) {
+                return Container(
+                  color: const Color(0xFFFEE2E2),
+                  child: const Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.error_outline, color: Color(0xFFEF4444), size: 24),
+                        SizedBox(height: 4),
+                        Text('Error', style: TextStyle(fontSize: 10, color: Color(0xFFEF4444))),
+                      ],
+                    ),
+                  ),
+                );
+              },
             ),
-            // Overlay con botón de eliminar
+            
+            // Botón eliminar
             Positioned(
               top: 6,
               right: 6,
@@ -1711,7 +1808,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 ),
               ),
             ),
-            // Indicador de número
+            
+            // Badge número
             Positioned(
               bottom: 6,
               left: 6,

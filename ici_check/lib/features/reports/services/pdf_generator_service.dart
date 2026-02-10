@@ -39,21 +39,32 @@ class PdfGeneratorService {
     pw.MemoryImage? providerSignature;
     pw.MemoryImage? clientSignature;
 
-    try {
-      if (companySettings.logoUrl.isNotEmpty &&
-          !companySettings.logoUrl.startsWith('http')) {
-        companyLogo = pw.MemoryImage(base64Decode(companySettings.logoUrl));
+    // --- REEMPLAZAR LA LÓGICA DE CARGA DE LOGOS CON ESTO ---
+    
+    // 1. Logo Empresa (Proveedor)
+    if (companySettings.logoUrl.isNotEmpty) {
+      try {
+        if (companySettings.logoUrl.startsWith('http')) {
+          companyLogo = (await networkImage(companySettings.logoUrl)) as pw.MemoryImage?;
+        } else {
+          companyLogo = pw.MemoryImage(base64Decode(companySettings.logoUrl));
+        }
+      } catch (e) {
+        print('Error loading company logo: $e');
       }
-    } catch (e) {
-      print('Error loading company logo: $e');
     }
 
-    try {
-      if (client.logoUrl.isNotEmpty && !client.logoUrl.startsWith('http')) {
-        clientLogo = pw.MemoryImage(base64Decode(client.logoUrl));
+    // 2. Logo Cliente
+    if (client.logoUrl.isNotEmpty) {
+      try {
+        if (client.logoUrl.startsWith('http')) {
+          clientLogo = (await networkImage(client.logoUrl)) as pw.MemoryImage?;
+        } else {
+          clientLogo = pw.MemoryImage(base64Decode(client.logoUrl));
+        }
+      } catch (e) {
+        print('Error loading client logo: $e');
       }
-    } catch (e) {
-      print('Error loading client logo: $e');
     }
 
     try {
@@ -204,61 +215,35 @@ class PdfGeneratorService {
             child: pw.Row(
               crossAxisAlignment: pw.CrossAxisAlignment.start,
               children: [
-                // PROVEEDOR (28%)
+                // --- CAMBIAR EL PRIMER EXPANDED (PROVEEDOR) POR ESTO ---
                 pw.Expanded(
                   flex: 28,
                   child: pw.Container(
                     padding: const pw.EdgeInsets.all(8),
                     decoration: const pw.BoxDecoration(
-                      border: pw.Border(
-                        right: pw.BorderSide(color: PdfColors.grey400),
-                      ),
+                      border: pw.Border(right: pw.BorderSide(color: PdfColors.grey400)),
                     ),
                     child: pw.Row(
                       crossAxisAlignment: pw.CrossAxisAlignment.start,
                       children: [
+                        // AQUI ESTA EL LOGO DE LA EMPRESA
                         if (companyLogo != null)
                           pw.Container(
                             width: 35,
                             height: 35,
-                            child: pw.Image(
-                              companyLogo,
-                              fit: pw.BoxFit.contain,
-                            ),
+                            margin: const pw.EdgeInsets.only(right: 6),
+                            child: pw.Image(companyLogo, fit: pw.BoxFit.contain),
                           ),
-                        pw.SizedBox(width: 4),
+                        
                         pw.Expanded(
                           child: pw.Column(
                             crossAxisAlignment: pw.CrossAxisAlignment.start,
                             children: [
-                              pw.Text(
-                                companySettings.name,
-                                style: pw.TextStyle(
-                                  font: fontBold,
-                                  fontSize: 7,
-                                  color: PdfColors.black,
-                                ),
-                              ),
+                              pw.Text(companySettings.name, style: pw.TextStyle(font: fontBold, fontSize: 7)),
                               pw.SizedBox(height: 1),
-                              pw.Text(
-                                companySettings.legalName,
-                                style: pw.TextStyle(font: font, fontSize: 6),
-                              ),
-                              pw.Text(
-                                companySettings.address,
-                                style: pw.TextStyle(
-                                  font: font,
-                                  fontSize: 6,
-                                  color: PdfColors.grey700,
-                                ),
-                              ),
-                              pw.Text(
-                                companySettings.phone,
-                                style: pw.TextStyle(
-                                  font: fontBold,
-                                  fontSize: 6,
-                                ),
-                              ),
+                              pw.Text(companySettings.legalName, style: pw.TextStyle(font: font, fontSize: 6)),
+                              pw.Text(companySettings.address, style: pw.TextStyle(font: font, fontSize: 6, color: PdfColors.grey700)),
+                              pw.Text(companySettings.phone, style: pw.TextStyle(font: fontBold, fontSize: 6)),
                             ],
                           ),
                         ),
@@ -674,7 +659,7 @@ class PdfGeneratorService {
                       style: pw.TextStyle(font: font, fontSize: 6),
                     ),
                     // Aquí inyectamos las fotos del dispositivo
-                    _buildPhotoGallery(entry.photos),
+                    _buildPhotoGallery(entry.photoUrls),
                   ],
                 ),
               ),
@@ -740,10 +725,10 @@ class PdfGeneratorService {
               ),
 
               // --- CAMBIO AQUÍ: FOTOS DE EVIDENCIA EN LISTA ---
-              if (entry.photos.isNotEmpty)
+              if (entry.photoUrls.isNotEmpty)
                 pw.Padding(
                   padding: const pw.EdgeInsets.all(4),
-                  child: _buildPhotoGallery(entry.photos),
+                  child: _buildPhotoGallery(entry.photoUrls),
                 ),
 
               // Actividades
@@ -752,7 +737,7 @@ class PdfGeneratorService {
                 if (status == null) return pw.SizedBox();
 
                 final actData = entry.activityData[act.id];
-                final actPhotos = actData?.photos ?? [];
+                final actPhotos = actData?.photoUrls ?? [];
                 final actObs = actData?.observations ?? '';
 
                 String statusText = '';

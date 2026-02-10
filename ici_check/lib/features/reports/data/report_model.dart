@@ -35,7 +35,6 @@ class ServiceReportModel {
     this.status = 'draft',
   });
 
-  // --- NUEVO: Método copyWith para actualizaciones inmutables ---
   ServiceReportModel copyWith({
     String? id,
     String? policyId,
@@ -52,8 +51,7 @@ class ServiceReportModel {
     String? clientSignerName,
     Map<String, List<String>>? sectionAssignments,
     String? status,
-    // Parámetro especial para permitir limpiar el endTime (ponerlo en null)
-    bool forceNullEndTime = false, 
+    bool forceNullEndTime = false,
   }) {
     return ServiceReportModel(
       id: id ?? this.id,
@@ -61,7 +59,6 @@ class ServiceReportModel {
       dateStr: dateStr ?? this.dateStr,
       serviceDate: serviceDate ?? this.serviceDate,
       startTime: startTime ?? this.startTime,
-      // Lógica para permitir 'null' en endTime si se requiere reiniciar (ej. reanudar servicio)
       endTime: forceNullEndTime ? null : (endTime ?? this.endTime),
       assignedTechnicianIds: assignedTechnicianIds ?? this.assignedTechnicianIds,
       entries: entries ?? this.entries,
@@ -123,14 +120,14 @@ class ServiceReportModel {
 }
 
 class ReportEntry {
-  final String? assignedUserId; // <--- LO AGREGASTE AQUÍ
+  final String? assignedUserId;
   final String instanceId;
   final int deviceIndex;
   final String customId;
   final String area;
   final Map<String, String?> results;
   final String observations;
-  final List<String> photos;
+  final List<String> photoUrls; // ✅ CAMBIO: photos → photoUrls
   final Map<String, ActivityData> activityData;
 
   ReportEntry({
@@ -140,9 +137,9 @@ class ReportEntry {
     this.area = '',
     required this.results,
     this.observations = '',
-    this.photos = const [],
+    this.photoUrls = const [], // ✅ CAMBIO
     this.activityData = const {},
-    this.assignedUserId, // Bien
+    this.assignedUserId,
   });
 
   ReportEntry copyWith({
@@ -152,9 +149,9 @@ class ReportEntry {
     String? area,
     Map<String, String?>? results,
     String? observations,
-    List<String>? photos,
+    List<String>? photoUrls, // ✅ CAMBIO
     Map<String, ActivityData>? activityData,
-    String? assignedUserId, // <--- FALTABA AQUÍ
+    String? assignedUserId,
   }) {
     return ReportEntry(
       instanceId: instanceId ?? this.instanceId,
@@ -163,9 +160,9 @@ class ReportEntry {
       area: area ?? this.area,
       results: results ?? this.results,
       observations: observations ?? this.observations,
-      photos: photos ?? this.photos,
+      photoUrls: photoUrls ?? this.photoUrls, // ✅ CAMBIO
       activityData: activityData ?? this.activityData,
-      assignedUserId: assignedUserId ?? this.assignedUserId, // <--- FALTABA AQUÍ
+      assignedUserId: assignedUserId ?? this.assignedUserId,
     );
   }
 
@@ -177,9 +174,9 @@ class ReportEntry {
       'area': area,
       'results': results,
       'observations': observations,
-      'photos': photos,
+      'photoUrls': photoUrls, // ✅ CAMBIO: Guardamos URLs
       'activityData': activityData.map((k, v) => MapEntry(k, v.toMap())),
-      'assignedUserId': assignedUserId, // <--- FALTABA AQUÍ PARA GUARDAR EN FIREBASE
+      'assignedUserId': assignedUserId,
     };
   }
 
@@ -191,39 +188,50 @@ class ReportEntry {
       area: map['area'] ?? '',
       results: Map<String, String?>.from(map['results'] ?? {}),
       observations: map['observations'] ?? '',
-      photos: List<String>.from(map['photos'] ?? []),
+      // ✅ MIGRACIÓN AUTOMÁTICA: Intenta cargar photoUrls, si no existe usa photos (retrocompatibilidad)
+      photoUrls: (map['photoUrls'] as List<dynamic>?)?.cast<String>() ?? 
+                 (map['photos'] as List<dynamic>?)?.cast<String>() ?? 
+                 [],
       activityData: Map<String, ActivityData>.from(
         (map['activityData'] ?? {}).map(
           (k, v) => MapEntry(k, ActivityData.fromMap(v)),
         ),
       ),
-      assignedUserId: map['assignedUserId'], // <--- FALTABA AQUÍ PARA LEER DE FIREBASE
+      assignedUserId: map['assignedUserId'],
     );
   }
 }
 
 class ActivityData {
-  final List<String> photos;
+  final List<String> photoUrls; // ✅ CAMBIO: photos → photoUrls
   final String observations;
 
-  ActivityData({this.photos = const [], this.observations = ''});
+  ActivityData({
+    this.photoUrls = const [], // ✅ CAMBIO
+    this.observations = '',
+  });
 
-  // --- NUEVO: Método copyWith ---
   ActivityData copyWith({
-    List<String>? photos,
+    List<String>? photoUrls, // ✅ CAMBIO
     String? observations,
   }) {
     return ActivityData(
-      photos: photos ?? this.photos,
+      photoUrls: photoUrls ?? this.photoUrls, // ✅ CAMBIO
       observations: observations ?? this.observations,
     );
   }
 
-  Map<String, dynamic> toMap() => {'photos': photos, 'observations': observations};
+  Map<String, dynamic> toMap() => {
+    'photoUrls': photoUrls, // ✅ CAMBIO
+    'observations': observations,
+  };
 
   factory ActivityData.fromMap(Map<String, dynamic> map) {
     return ActivityData(
-      photos: List<String>.from(map['photos'] ?? []),
+      // ✅ MIGRACIÓN AUTOMÁTICA: Intenta cargar photoUrls, si no existe usa photos
+      photoUrls: (map['photoUrls'] as List<dynamic>?)?.cast<String>() ?? 
+                 (map['photos'] as List<dynamic>?)?.cast<String>() ?? 
+                 [],
       observations: map['observations'] ?? '',
     );
   }

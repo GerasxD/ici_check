@@ -41,23 +41,44 @@ class DeviceSectionImproved extends StatelessWidget {
     required this.onObservationClick,
   });
 
-  /// Determina si el usuario actual puede editar los campos de respuesta.
-  /// Se mantiene la restricción aquí: Solo puedes escribir si estás en modo edición Y (no hay asignaciones O estás asignado).
   bool get _canEdit {
     if (!isEditable || !allowedToEdit) return false;
     
-    // Si hay personas asignadas específicamente a esta sección
     if (sectionAssignments.isNotEmpty) {
-      // El usuario actual debe estar en esa lista para poder editar
       return currentUserId != null && sectionAssignments.contains(currentUserId);
     }
     
-    // Si no hay nadie asignado específicamente, todos los autorizados pueden editar
     return true;
   }
 
+  // ✅ NUEVO: Calcular progreso de la sección
+  Map<String, dynamic> _calculateProgress() {
+    int totalActivities = 0;
+    int completedActivities = 0;
+
+    for (var entry in entries) {
+      for (var activityId in entry.results.keys) {
+        totalActivities++;
+        final value = entry.results[activityId];
+        // Consideramos completo si tiene OK, NOK o NA (respuestas válidas)
+        if (value == 'OK' || value == 'NOK' || value == 'NA') {
+          completedActivities++;
+        }
+      }
+    }
+
+    double percentage = totalActivities > 0 
+        ? (completedActivities / totalActivities) * 100 
+        : 0.0;
+
+    return {
+      'total': totalActivities,
+      'completed': completedActivities,
+      'percentage': percentage,
+    };
+  }
+
   void _showAssignmentDialog(BuildContext context) {
-    // Usamos un Set local para visualización optimista
     final Set<String> localAssignments = Set.from(sectionAssignments);
 
     showDialog(
@@ -70,7 +91,6 @@ class DeviceSectionImproved extends StatelessWidget {
               surfaceTintColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               child: Container(
-                // Limitamos la altura para que no ocupe toda la pantalla en listas largas
                 constraints: BoxConstraints(
                   maxHeight: MediaQuery.of(context).size.height * 0.7,
                   maxWidth: 400,
@@ -78,7 +98,6 @@ class DeviceSectionImproved extends StatelessWidget {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // --- 1. HEADER ---
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                       decoration: const BoxDecoration(
@@ -90,7 +109,7 @@ class DeviceSectionImproved extends StatelessWidget {
                           const Text(
                             'Asignar Responsables',
                             style: TextStyle(
-                              color: Color(0xFF1E293B), // Slate-800
+                              color: Color(0xFF1E293B),
                               fontWeight: FontWeight.w800,
                               fontSize: 16,
                             ),
@@ -107,7 +126,6 @@ class DeviceSectionImproved extends StatelessWidget {
                       ),
                     ),
 
-                    // --- 2. LISTA DE USUARIOS ---
                     Flexible(
                       child: users.isEmpty
                           ? Padding(
@@ -139,10 +157,9 @@ class DeviceSectionImproved extends StatelessWidget {
                                   child: CheckboxListTile(
                                     contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                                     dense: true,
-                                    activeColor: const Color(0xFF3B82F6), // Blue-500
+                                    activeColor: const Color(0xFF3B82F6),
                                     checkboxShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                                     
-                                    // Avatar del usuario
                                     secondary: CircleAvatar(
                                       backgroundColor: isAssigned ? const Color(0xFFEFF6FF) : const Color(0xFFF1F5F9),
                                       foregroundColor: isAssigned ? const Color(0xFF3B82F6) : const Color(0xFF64748B),
@@ -166,9 +183,7 @@ class DeviceSectionImproved extends StatelessWidget {
                                     ),
                                     value: isAssigned,
                                     onChanged: (val) {
-                                      // Actualizar lógica padre
                                       onToggleAssignment(user.id);
-                                      // Actualizar UI local
                                       setModalState(() {
                                         if (isAssigned) {
                                           localAssignments.remove(user.id);
@@ -183,7 +198,6 @@ class DeviceSectionImproved extends StatelessWidget {
                             ),
                     ),
 
-                    // --- 3. FOOTER (BOTÓN LISTO) ---
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: const BoxDecoration(
@@ -194,7 +208,7 @@ class DeviceSectionImproved extends StatelessWidget {
                         child: ElevatedButton(
                           onPressed: () => Navigator.pop(ctx),
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF0F172A), // Slate-900
+                            backgroundColor: const Color(0xFF0F172A),
                             foregroundColor: Colors.white,
                             padding: const EdgeInsets.symmetric(vertical: 14),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -227,7 +241,7 @@ class DeviceSectionImproved extends StatelessWidget {
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       decoration: BoxDecoration(
         color: Colors.white,
-        border: Border.all(color: const Color(0xFF1E293B), width: 2), // Borde oscuro elegante
+        border: Border.all(color: const Color(0xFF1E293B), width: 2),
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
@@ -241,15 +255,14 @@ class DeviceSectionImproved extends StatelessWidget {
         children: [
           _buildHeader(context),
           deviceDef.viewMode == 'table'
-              ? _buildTableView(relevantActivities)
-              : _buildListView(context,relevantActivities),
+              ? _buildTableViewOptimized(context, relevantActivities)
+              : _buildListViewOptimized(context, relevantActivities),
         ],
       ),
     );
   }
 
   Widget _buildHeader(BuildContext context) {
-    // Obtenemos los objetos User completos de los IDs asignados
     final assignedUsersList = sectionAssignments.map((uid) {
       return users.firstWhere(
         (u) => u.id == uid,
@@ -257,64 +270,198 @@ class DeviceSectionImproved extends StatelessWidget {
       );
     }).toList();
 
-    // Detección de pantalla pequeña (Móvil vs Tablet/PC)
     final isSmallScreen = MediaQuery.of(context).size.width < 600;
+    
+    // ✅ CALCULAR PROGRESO
+    final progress = _calculateProgress();
 
     return Container(
-      width: double.infinity, // Asegurar que ocupe todo el ancho
+      width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: const BoxDecoration(
-        color: Color(0xFF1E293B), // Fondo oscuro
+        color: Color(0xFF1E293B),
         borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
       ),
-      child: isSmallScreen 
-        ? Column( // DISEÑO MÓVIL (Vertical)
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Fila Superior: Título y Contador
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      child: Column(
+        children: [
+          // Primera fila: Nombre y badge de cantidad
+          isSmallScreen 
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Flexible(
-                    child: Text(
-                      deviceDef.name.toUpperCase(),
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14),
-                      overflow: TextOverflow.ellipsis,
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          deviceDef.name.toUpperCase(),
+                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      _buildCountBadge(entries.length),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  _buildResponsiblesRow(context, assignedUsersList, isSmall: true),
+                ],
+              )
+            : Row(
+                children: [
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            deviceDef.name.toUpperCase(),
+                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        _buildCountBadge(entries.length),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  _buildCountBadge(entries.length),
+                  _buildResponsiblesRow(context, assignedUsersList, isSmall: false),
                 ],
               ),
-              const SizedBox(height: 12),
-              // Fila Inferior: Responsables (Con scroll si son muchos)
-              _buildResponsiblesRow(context, assignedUsersList, isSmall: true),
-            ],
-          )
-        : Row( // DISEÑO TABLET/PC (Horizontal)
-            children: [
-              Expanded(
-                child: Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        deviceDef.name.toUpperCase(),
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    _buildCountBadge(entries.length),
-                  ],
-                ),
-              ),
-              _buildResponsiblesRow(context, assignedUsersList, isSmall: false),
-            ],
-          ),
+          
+          // ✅ NUEVA SEGUNDA FILA: BARRA DE PROGRESO
+          const SizedBox(height: 12),
+          _buildProgressBar(progress),
+        ],
+      ),
     );
   }
 
-  // Helper para el badge de "X UNIDADES"
+  // ✅ NUEVO WIDGET: Barra de progreso
+  Widget _buildProgressBar(Map<String, dynamic> progress) {
+    final percentage = progress['percentage'] as double;
+    final completed = progress['completed'] as int;
+    final total = progress['total'] as int;
+    
+    // Determinar color según el progreso
+    Color progressColor;
+    if (percentage == 0) {
+      progressColor = const Color(0xFF64748B); // Gris - Sin iniciar
+    } else if (percentage < 50) {
+      progressColor = const Color(0xFFEF4444); // Rojo - Bajo
+    } else if (percentage < 80) {
+      progressColor = const Color(0xFFF59E0B); // Amarillo - Medio
+    } else if (percentage < 100) {
+      progressColor = const Color(0xFF3B82F6); // Azul - Alto
+    } else {
+      progressColor = const Color(0xFF10B981); // Verde - Completo
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.trending_up, size: 12, color: Color(0xFF94A3B8)),
+            const SizedBox(width: 6),
+            const Text(
+              'PROGRESO:',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF64748B),
+                letterSpacing: 0.5,
+              ),
+            ),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: progressColor.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: progressColor.withOpacity(0.3)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    percentage == 100 ? Icons.check_circle : Icons.schedule,
+                    size: 11,
+                    color: progressColor,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    '$completed/$total',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w900,
+                      color: progressColor,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: Container(
+                height: 8,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF334155),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: Stack(
+                    children: [
+                      // Barra de fondo (vacía)
+                      Container(color: const Color(0xFF334155)),
+                      
+                      // Barra de progreso (relleno)
+                      FractionallySizedBox(
+                        widthFactor: percentage / 100,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                progressColor,
+                                progressColor.withOpacity(0.8),
+                              ],
+                              begin: Alignment.centerLeft,
+                              end: Alignment.centerRight,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                '${percentage.toStringAsFixed(0)}%',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   Widget _buildCountBadge(int count) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -330,12 +477,11 @@ class DeviceSectionImproved extends StatelessWidget {
     );
   }
 
-  // Helper para la fila de responsables (Reutilizable)
   Widget _buildResponsiblesRow(BuildContext context, List<UserModel> assignedUsersList, {required bool isSmall}) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (!isSmall) // En móvil ocultamos la etiqueta "RESPONSABLES:" para ahorrar espacio
+        if (!isSmall)
           const Padding(
             padding: EdgeInsets.only(right: 8.0),
             child: Text(
@@ -344,16 +490,15 @@ class DeviceSectionImproved extends StatelessWidget {
             ),
           ),
         
-        // Usamos Flexible o Expanded en móvil para permitir scroll si se desborda
         Flexible(
-          fit: isSmall ? FlexFit.loose : FlexFit.tight, // En PC tight para empujar, en móvil loose
-          flex: isSmall ? 1 : 0, // En PC no queremos que crezca infinitamente
+          fit: isSmall ? FlexFit.loose : FlexFit.tight,
+          flex: isSmall ? 1 : 0,
           child: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ...assignedUsersList.take(3).map((user) => _buildUserChip(user)), // Mostrar hasta 3
+                ...assignedUsersList.take(3).map((user) => _buildUserChip(user)),
                 
                 if (assignedUsersList.length > 3)
                   Padding(
@@ -368,7 +513,6 @@ class DeviceSectionImproved extends StatelessWidget {
           ),
         ),
 
-        // Botón de Editar (Siempre al final)
         const SizedBox(width: 4),
         InkWell(
           onTap: () => _showAssignmentDialog(context),
@@ -394,10 +538,10 @@ class DeviceSectionImproved extends StatelessWidget {
   Widget _buildUserChip(UserModel user) {
     return Container(
       margin: const EdgeInsets.only(right: 6),
-      padding: const EdgeInsets.fromLTRB(4, 4, 10, 4), // Padding asimétrico para el avatar
+      padding: const EdgeInsets.fromLTRB(4, 4, 10, 4),
       decoration: BoxDecoration(
-        color: const Color(0xFF2563EB), // Azul brillante (blue-600)
-        borderRadius: BorderRadius.circular(20), // Borde muy redondeado
+        color: const Color(0xFF2563EB),
+        borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -412,7 +556,7 @@ class DeviceSectionImproved extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           Text(
-            user.name.split(' ').first, // Solo primer nombre para ahorrar espacio
+            user.name.split(' ').first,
             style: const TextStyle(
               color: Colors.white,
               fontSize: 11,
@@ -424,410 +568,231 @@ class DeviceSectionImproved extends StatelessWidget {
     );
   }
 
-  Widget _buildTableView(List<ActivityConfig> activities) {
+  Widget _buildTableViewOptimized(BuildContext context, List<ActivityConfig> activities) {
+    // Ajustamos el ancho total para dar un poco más de aire si es necesario
+    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0; // +10px extra al final
+
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
-      child: DataTable(
-        headingRowHeight: 50,
-        headingRowColor: WidgetStateProperty.all(const Color(0xFFF1F5F9)),
-        dataRowMinHeight: 48,
-        dataRowMaxHeight: 48,
-        columnSpacing: 12,
-        horizontalMargin: 16,
-        dividerThickness: 1,
-        border: TableBorder(
-          horizontalInside: BorderSide(color: Colors.grey.shade200),
-          verticalInside: BorderSide(color: Colors.grey.shade200),
-        ),
-        columns: [
-          DataColumn(
-            label: Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: const Text(
-                'ID',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w900,
-                  color: Color(0xFF1E293B),
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-          ),
-          DataColumn(
-            label: Container(
-              constraints: const BoxConstraints(minWidth: 150),
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: const Text(
-                'UBICACIÓN',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w900,
-                  color: Color(0xFF1E293B),
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-          ),
-          ...activities.map((act) => DataColumn(
-            label: Container(
-              constraints: const BoxConstraints(minWidth: 80, maxWidth: 100),
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
+      child: SizedBox(
+        width: totalWidth,
+        child: Column(
+          children: [
+            // ... (El Container del Header se queda igual) ...
+            Container(
+              height: 48,
+              color: const Color(0xFFF1F5F9),
+              child: Row(
                 children: [
-                  Text(
-                    act.name,
-                    style: const TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF1E293B),
-                      height: 1.2,
-                    ),
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  // ... (Resto de tu lógica de columnas se mantiene igual)
+                  _buildHeaderCell('ID', 80),
+                  _buildHeaderCell('UBICACIÓN', 150),
+                  ...activities.map((act) => _buildHeaderCell(act.name, 100)),
+                  _buildHeaderCell('FOTO/OBS', 110), // Aumentamos un poco el ancho aquí
                 ],
               ),
             ),
-          )),
-          const DataColumn(
-            label: Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Icon(Icons.camera_alt, size: 16, color: Color(0xFF64748B)),
-            ),
-          ),
-          const DataColumn(
-            label: Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Icon(Icons.comment, size: 16, color: Color(0xFF64748B)),
-            ),
-          ),
-        ],
-        rows: entries.asMap().entries.map((entryMap) {
-          final index = entryMap.key;
-          final entry = entryMap.value;
-          
-          return DataRow(
-            color: WidgetStateProperty.resolveWith<Color>((states) {
-              if (states.contains(WidgetState.hovered)) {
-                return const Color(0xFFF8FAFC);
-              }
-              return Colors.white;
-            }),
-            cells: [
-              DataCell(
-                SizedBox(
-                  width: 80,
-                  child: TextFormField(
-                    initialValue: entry.customId,
-                    enabled: _canEdit,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF1E293B),
-                    ),
-                    textAlign: TextAlign.center,
-                    decoration: InputDecoration(
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(6),
-                        borderSide: BorderSide.none,
-                      ),
-                      filled: true,
-                      fillColor: const Color(0xFFF8FAFC),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(6),
-                        borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 2),
-                      ),
-                    ),
-                    onChanged: (val) => onCustomIdChanged(index, val),
+
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: entries.length,
+              itemBuilder: (context, index) {
+                final entry = entries[index];
+                return Container(
+                  height: 52,
+                  decoration: const BoxDecoration(
+                    border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
                   ),
-                ),
-              ),
-              DataCell(
-                SizedBox(
-                  width: 150,
-                  child: TextFormField(
-                    initialValue: entry.area,
-                    enabled: _canEdit,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF475569),
-                    ),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                      hintText: '...',
-                      hintStyle: const TextStyle(color: Color(0xFFCBD5E1)),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(6),
-                        borderSide: BorderSide.none,
+                  child: Row(
+                    children: [
+                      SizedBox(width: 80, child: Center(child: _buildInputCell(index, entry.customId, 'id', 60, onCustomIdChanged))),
+                      SizedBox(width: 150, child: Center(child: _buildInputCell(index, entry.area, 'area', 130, onAreaChanged, hint: '...'))),
+                      
+                      // Celdas de estado (OK/NOK)
+                      ...activities.map((act) {
+                        if (!entry.results.containsKey(act.id)) return const SizedBox(width: 100);
+                        return SizedBox(
+                          width: 100,
+                          child: Center(
+                            child: InkWell(
+                              onTap: _canEdit ? () => onToggleStatus(index, act.id) : null,
+                              borderRadius: BorderRadius.circular(12),
+                              child: _buildStatusBadge(entry.results[act.id]),
+                            ),
+                          ),
+                        );
+                      }),
+
+                      // --- AQUÍ ESTÁ LA CORRECCIÓN DEL OVERFLOW ---
+                      SizedBox(
+                        width: 110, // Un poco más de espacio
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            // Usamos el widget compacto en lugar de IconButton
+                            _buildCompactActionIcon(
+                              icon: entry.photoUrls.isNotEmpty ? Icons.camera_alt : Icons.camera_alt_outlined,
+                              isActive: entry.photoUrls.isNotEmpty,
+                              activeColor: const Color(0xFF3B82F6),
+                              onTap: _canEdit ? () => onCameraClick(index) : null,
+                            ),
+                            
+                            const SizedBox(width: 8), // Reducimos espacio de 12 a 8
+                            
+                            // Icono de Observaciones
+                            _buildCompactActionIcon(
+                              icon: entry.observations.isNotEmpty ? Icons.comment : Icons.comment_outlined,
+                              isActive: entry.observations.isNotEmpty,
+                              activeColor: const Color(0xFFF59E0B), // Color ámbar para resaltar si hay obs
+                              onTap: _canEdit ? () => onObservationClick(index) : null,
+                            ),
+                          ],
+                        ),
                       ),
-                      filled: true,
-                      fillColor: const Color(0xFFF8FAFC),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(6),
-                        borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 2),
-                      ),
-                    ),
-                    onChanged: (val) => onAreaChanged(index, val),
-                  ),
-                ),
-              ),
-              ...activities.map((act) {
-                if (!entry.results.containsKey(act.id)) {
-                  return const DataCell(SizedBox());
-                }
-                return DataCell(
-                  Center(
-                    child: InkWell(
-                      onTap: _canEdit
-                          ? () => onToggleStatus(index, act.id)
-                          : null,
-                      borderRadius: BorderRadius.circular(12),
-                      child: _buildStatusBadge(entry.results[act.id]),
-                    ),
+                    ],
                   ),
                 );
-              }),
-              DataCell(
-                Center(
-                  child: IconButton(
-                    icon: Icon(
-                      entry.photos.isNotEmpty ? Icons.camera_alt : Icons.camera_alt_outlined,
-                      size: 18,
-                      color: entry.photos.isNotEmpty
-                          ? const Color(0xFF3B82F6)
-                          : const Color(0xFF94A3B8),
-                    ),
-                    onPressed: _canEdit
-                        ? () => onCameraClick(index)
-                        : null,
-                  ),
-                ),
-              ),
-              DataCell(
-                Center(
-                  child: IconButton(
-                    icon: Icon(
-                      entry.observations.isNotEmpty ? Icons.comment : Icons.comment_outlined,
-                      size: 18,
-                      color: entry.observations.isNotEmpty
-                          ? const Color(0xFFF59E0B)
-                          : const Color(0xFF94A3B8),
-                    ),
-                    onPressed: _canEdit
-                        ? () => onObservationClick(index)
-                        : null,
-                  ),
-                ),
-              ),
-            ],
-          );
-        }).toList(),
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _buildListView(BuildContext context, List<ActivityConfig> activities) {
+  Widget _buildHeaderCell(String text, double width) {
+    return SizedBox(
+      width: width,
+      child: Center(
+        child: Text(
+          text,
+          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Color(0xFF1E293B)),
+          textAlign: TextAlign.center,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInputCell(int index, String? value, String keyPrefix, double width, Function(int, String) onChanged, {String? hint}) {
+    return SizedBox(
+      width: width,
+      height: 32,
+      child: TextFormField(
+        key: ValueKey('${keyPrefix}_$index'), 
+        initialValue: value,
+        enabled: _canEdit,
+        textAlign: TextAlign.center,
+        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
+        decoration: InputDecoration(
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+          hintText: hint,
+          hintStyle: const TextStyle(color: Color(0xFFCBD5E1)),
+          filled: true,
+          fillColor: const Color(0xFFF8FAFC),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5)),
+        ),
+        onChanged: (val) => onChanged(index, val),
+      ),
+    );
+  }
+
+  Widget _buildListViewOptimized(BuildContext context, List<ActivityConfig> activities) {
     return Padding(
       padding: const EdgeInsets.all(16),
-      child: Align(
-        alignment: Alignment.topLeft, // ← FORZAR ALINEACIÓN A LA IZQUIERDA
-        child: Wrap(
-          spacing: 12,
-          runSpacing: 12,
-          alignment: WrapAlignment.start,
-          runAlignment: WrapAlignment.start,
-          crossAxisAlignment: WrapCrossAlignment.start,
-          children: entries.asMap().entries.map((entryMap) {
-            final index = entryMap.key;
-            final entry = entryMap.value;
-            
-            // ANCHO MÁXIMO FIJO para las cards (no calculado por pantalla)
-            const double maxCardWidth = 380; // Ancho máximo de cada card
-            
-            return ConstrainedBox(
-              constraints: const BoxConstraints(
-                maxWidth: maxCardWidth, // Ancho máximo
-                minWidth: 300, // Ancho mínimo para móviles
-              ),
-              child: Container(
-                width: double.infinity, // Ocupa todo el ancho disponible hasta maxWidth
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.03),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    )
+      child: GridView.builder(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+          maxCrossAxisExtent: 400,
+          mainAxisExtent: 130,
+          crossAxisSpacing: 12,
+          mainAxisSpacing: 12,
+        ),
+        itemCount: entries.length,
+        itemBuilder: (context, index) {
+          final entry = entries[index];
+          
+          return Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    SizedBox(width: 70, child: _buildInputCell(index, entry.customId, 'grid_id', 70, onCustomIdChanged, hint: 'ID')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _buildInputCell(index, entry.area, 'grid_area', 100, onAreaChanged, hint: 'Ubicación...')),
                   ],
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // --- HEADER: ID Y UBICACIÓN ---
-                    Row(
-                      children: [
-                        // ID (Caja compacta estilo "EXT-1")
-                        SizedBox(
-                          width: 70,
-                          height: 32,
-                          child: TextFormField(
-                            initialValue: entry.customId,
-                            enabled: _canEdit,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w800,
-                              color: Color(0xFF1E293B),
-                            ),
-                            decoration: InputDecoration(
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
-                              hintText: 'ID',
-                              isDense: true,
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(6),
-                                borderSide: const BorderSide(color: Color(0xFFCBD5E1)),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(6),
-                                borderSide: const BorderSide(color: Color(0xFFCBD5E1)),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(6),
-                                borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
-                              ),
-                              filled: true,
-                              fillColor: Colors.white,
-                            ),
-                            onChanged: (val) => onCustomIdChanged(index, val),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        // Ubicación (solo texto, sin caja visible)
-                        Expanded(
-                          child: TextFormField(
-                            initialValue: entry.area,
-                            enabled: _canEdit,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: Color(0xFF64748B),
-                              fontWeight: FontWeight.w500,
-                            ),
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              contentPadding: EdgeInsets.zero,
-                              hintText: 'Ubicación...',
-                              hintStyle: TextStyle(color: Color(0xFFCBD5E1), fontSize: 11),
-                              border: InputBorder.none,
-                            ),
-                            onChanged: (val) => onAreaChanged(index, val),
-                          ),
-                        ),
-                      ],
-                    ),
-                    
-                    const SizedBox(height: 12),
-
-                    // --- LISTA DE ACTIVIDADES (Horizontal y Compacta) ---
-                    ...activities.where((act) => entry.results.containsKey(act.id)).map((act) {
-                      final status = entry.results[act.id];
-                      final hasPhotos = (entry.activityData[act.id]?.photos.length ?? 0) > 0;
-                      final hasObs = (entry.activityData[act.id]?.observations ?? '').isNotEmpty;
-                      
+                const SizedBox(height: 8),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      children: activities.where((act) => entry.results.containsKey(act.id)).map((act) {
+                        final status = entry.results[act.id];
+                        final hasPhotos = (entry.activityData[act.id]?.photoUrls.length ?? 0) > 0;
+                        final hasObs = (entry.activityData[act.id]?.observations ?? '').isNotEmpty;
                       return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.only(bottom: 6),
                         child: Row(
                           children: [
-                            // 1. Nombre de la actividad y frecuencia
+                            // El Expanded obliga al texto a encogerse si no hay espacio
                             Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    act.name,
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
-                                      color: Color(0xFF1E293B),
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  const SizedBox(height: 2),
-                                  // Badge de frecuencia
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFF1F5F9),
-                                      borderRadius: BorderRadius.circular(3),
-                                      border: Border.all(color: const Color(0xFFE2E8F0), width: 0.5),
-                                    ),
-                                    child: Text(
-                                      act.frequency.toString().split('.').last.length > 3
-                                          ? act.frequency.toString().split('.').last.substring(0, 3)
-                                          : act.frequency.toString().split('.').last,
-                                      style: const TextStyle(
-                                        fontSize: 8,
-                                        color: Color(0xFF64748B),
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
-                                ],
+                              child: Text(
+                                act.name, 
+                                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF334155)), 
+                                maxLines: 1, 
+                                overflow: TextOverflow.ellipsis
                               ),
                             ),
+                            const SizedBox(width: 4), // Pequeño espacio seguro
                             
-                            const SizedBox(width: 8),
-
-                            // 2. Iconos de Foto y Observaciones
+                            // Iconos compactos
                             _buildCompactActionIcon(
                               icon: hasPhotos ? Icons.camera_alt : Icons.camera_alt_outlined,
                               isActive: hasPhotos,
                               activeColor: const Color(0xFF3B82F6),
                               onTap: _canEdit ? () => onCameraClick(index, activityId: act.id) : null,
                             ),
-                            const SizedBox(width: 4),
+                            
+                            // Sin SizedBox extra o muy pequeño entre iconos
                             _buildCompactActionIcon(
                               icon: hasObs ? Icons.comment : Icons.comment_outlined,
                               isActive: hasObs,
                               activeColor: const Color(0xFFF59E0B),
                               onTap: _canEdit ? () => onObservationClick(index, activityId: act.id) : null,
                             ),
-
-                            const SizedBox(width: 8),
-
-                            // 3. Badge de Estado (círculo)
+                            
+                            const SizedBox(width: 4),
+                            
                             InkWell(
                               onTap: _canEdit ? () => onToggleStatus(index, act.id) : null,
-                              borderRadius: BorderRadius.circular(16),
                               child: _buildCompactStatusBadge(status),
                             ),
                           ],
                         ),
                       );
-                    }),
-                  ],
+                      }).toList(),
+                    ),
+                  ),
                 ),
-              ),
-            );
-          }).toList(),
-        ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
 
-  // Helper para íconos compactos
   Widget _buildCompactActionIcon({
     required IconData icon,
     required bool isActive,
@@ -836,19 +801,21 @@ class DeviceSectionImproved extends StatelessWidget {
   }) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(3),
-      child: Padding(
-        padding: const EdgeInsets.all(4),
+      borderRadius: BorderRadius.circular(6), // Borde un poco más redondeado
+      child: Container(
+        // Agregamos un contenedor invisible para garantizar área de toque mínima sin padding excesivo
+        width: 32, 
+        height: 32,
+        alignment: Alignment.center,
         child: Icon(
           icon,
-          size: 16,
-          color: isActive ? activeColor : const Color(0xFFCBD5E1),
+          size: 18, // Tamaño controlado
+          color: isActive ? activeColor : const Color(0xFF94A3B8), // Color gris más suave si está inactivo
         ),
       ),
     );
   }
 
-  // Helper para badge de estado compacto
   Widget _buildCompactStatusBadge(String? status) {
     Color color;
     Widget child;
@@ -856,7 +823,6 @@ class DeviceSectionImproved extends StatelessWidget {
     switch (status) {
       case 'OK':
         color = const Color(0xFF1E293B);
-        // CAMBIO AQUÍ: Reemplazamos el Icono de Check por el círculo blanco
         child = Container(
           width: 8,
           height: 8,

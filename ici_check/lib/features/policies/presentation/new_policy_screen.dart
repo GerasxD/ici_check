@@ -41,6 +41,7 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
 
   // State de Dispositivos (Paso 2)
   final Map<String, _SelectedDeviceItem> _selectedDevices = {};
+  final Map<String, TextEditingController> _controllers = {};
 
   // State de Personal (Paso 3)
   String? _selectedUserId;
@@ -94,8 +95,11 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
     setState(() {
       if (_selectedDevices.containsKey(def.id)) {
         _selectedDevices.remove(def.id);
+        _controllers.remove(def.id); // Limpiamos el controlador
       } else {
         _selectedDevices[def.id] = _SelectedDeviceItem(def: def, qty: 1);
+        // Creamos el controlador inicializado en "1"
+        _controllers[def.id] = TextEditingController(text: '1');
       }
     });
   }
@@ -106,8 +110,28 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
       final item = _selectedDevices[defId]!;
       int newQty = item.qty + delta;
       if (newQty < 1) newQty = 1;
+      
       _selectedDevices[defId] = _SelectedDeviceItem(def: item.def, qty: newQty);
+      
+      // Actualizamos el texto visualmente para que coincida con el botón
+      if (_controllers.containsKey(defId)) {
+        _controllers[defId]!.text = newQty.toString();
+      }
     });
+  }
+
+  // Función para manejar la escritura manual del número
+  void _setManualQty(String defId, String value) {
+    if (!_selectedDevices.containsKey(defId)) return;
+    
+    int? newQty = int.tryParse(value);
+    
+    if (newQty != null && newQty > 0) {
+      // IMPORTANTE: Aquí NO llamamos a setState para evitar que 
+      // el teclado se cierre mientras escribes. Solo actualizamos el valor lógico.
+      final item = _selectedDevices[defId]!;
+      _selectedDevices[defId] = _SelectedDeviceItem(def: item.def, qty: newQty);
+    }
   }
 
   Future<void> _createPolicy() async {
@@ -1094,6 +1118,7 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
+                                        // Botón Menos (-)
                                         IconButton(
                                           onPressed: () => _updateQty(item.def.id, -1),
                                           icon: const Icon(Icons.remove, size: 18),
@@ -1101,16 +1126,33 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                                           constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                                           color: _textSlate,
                                         ),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                                          child: Text(
-                                            '${item.qty}',
+                                        // CAMBIO PRINCIPAL: Campo de texto en lugar de Text
+                                        SizedBox(
+                                          width: 50,
+                                          child: TextFormField(
+                                            // USAMOS EL CONTROLADOR
+                                            controller: _controllers[item.def.id],
+                                            
+                                            // IMPORTANTE: Key estática (solo ID) para que no pierda el foco al escribir
+                                            key: ValueKey(item.def.id), 
+                                            
+                                            keyboardType: TextInputType.number,
+                                            textAlign: TextAlign.center,
                                             style: const TextStyle(
                                               fontWeight: FontWeight.w700,
                                               fontSize: 15,
                                             ),
+                                            decoration: const InputDecoration(
+                                              isDense: true,
+                                              contentPadding: EdgeInsets.symmetric(vertical: 8),
+                                              border: InputBorder.none,
+                                              focusedBorder: InputBorder.none,
+                                            ),
+                                            // AHORA SE GUARDA MIENTRAS ESCRIBES
+                                            onChanged: (val) => _setManualQty(item.def.id, val),
                                           ),
-                                        ),
+                                        ),                                    
+                                        // Botón Más (+)
                                         IconButton(
                                           onPressed: () => _updateQty(item.def.id, 1),
                                           icon: const Icon(Icons.add, size: 18),

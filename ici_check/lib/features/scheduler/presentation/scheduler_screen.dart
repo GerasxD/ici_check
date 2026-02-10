@@ -1,6 +1,7 @@
 import 'dart:async';
-
+import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:ici_check/features/auth/data/users_repository.dart';
@@ -16,6 +17,8 @@ import 'package:ici_check/features/clients/data/client_model.dart';
 import 'package:ici_check/features/clients/data/clients_repository.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/devices/data/devices_repository.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:printing/printing.dart';
 
 class SchedulerScreen extends StatefulWidget {
@@ -140,13 +143,15 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   double _getFrequencyMonths(Frequency freq) {
     switch (freq) {
       case Frequency.DIARIO:
-        return 0; // Diario no se suele graficar en este tipo de cronogramas
+        return 0;
       case Frequency.SEMANAL:
-        return 0.25; // <--- LA CLAVE: 1 semana es 0.25 meses
+        return 0.25;
       case Frequency.MENSUAL:
         return 1.0;
       case Frequency.TRIMESTRAL:
         return 3.0;
+      case Frequency.CUATRIMESTRAL: // <--- AGREGA ESTO
+        return 4.0;                   // <--- 4.0 Meses
       case Frequency.SEMESTRAL:
         return 6.0;
       case Frequency.ANUAL:
@@ -689,11 +694,28 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       // Cerrar indicador de carga
       Navigator.pop(context);
 
-      // Guardar y compartir PDF
-      await Printing.sharePdf(
-        bytes: pdfBytes,
-        filename: 'Reporte_${_client!.name}_${reportModel.dateStr}.pdf',
-      );
+      // 2. Obtener directorio temporal
+        if (kIsWeb) {
+        // 🟢 OPCIÓN WEB: Usamos Printing.sharePdf (El navegador maneja la descarga)
+        await Printing.sharePdf(
+          bytes: pdfBytes,
+          filename: 'Reporte_${_client!.name}_${reportModel.dateStr}.pdf',
+        );
+      } else {
+        // 📱 OPCIÓN MÓVIL: Guardamos y abrimos directo
+        final output = await getTemporaryDirectory();
+        final fileName = 'Reporte_${_client!.name}_${reportModel.dateStr}.pdf';
+        final file = File("${output.path}/$fileName");
+
+        await file.writeAsBytes(pdfBytes);
+        
+        // Abrimos el archivo
+        final result = await OpenFilex.open(file.path);
+        if (result.type != ResultType.done) {
+          throw "No se pudo abrir: ${result.message}";
+        }
+      }
+      // --------------------------------------
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -804,11 +826,21 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
               // 4. Cerrar carga
               if (mounted) Navigator.pop(context);
 
-              // 5. Compartir/Imprimir
-              await Printing.sharePdf(
-                bytes: pdfBytes,
-                filename: 'Cronograma_${_client?.name ?? "Cliente"}.pdf',
-              );
+              if (kIsWeb) {
+                // 🟢 WEB
+                await Printing.sharePdf(
+                  bytes: pdfBytes,
+                  filename: 'Cronograma_${_client?.name ?? "Cliente"}.pdf',
+                );
+              } else {
+                // 📱 MÓVIL
+                final output = await getTemporaryDirectory();
+                final fileName = 'Cronograma_${_client?.name ?? "Cliente"}.pdf';
+                final file = File("${output.path}/$fileName");
+
+                await file.writeAsBytes(pdfBytes);
+                await OpenFilex.open(file.path);
+              }
             } catch (e) {
               if (mounted) Navigator.pop(context); // Cerrar carga si falla
               debugPrint("Error PDF Cronograma: $e");
@@ -1065,15 +1097,15 @@ Widget _buildTimeHeader(int index) {
     final report = _getReportForColumn(index);
     
     // 3. Determinar si mostramos la fecha real
-    // CONDICIÓN CLAVE: Solo mostramos la fecha real si hay técnicos asignados.
-    // Esto asume que si usaste "Programar", asignaste al menos a 1 técnico.
+    // CONDICIÓN CLAVE: Solo mostramos la fecha real si el servicio fue REALMENTE INICIADO.
+    // Esto se verifica si el reporte tiene una hora de inicio (startTime).
     bool showRealDate = false;
     DateTime? serviceDate;
 
     if (report != null && report['serviceDate'] != null) {
-      // Verificamos si hay técnicos asignados
-      List<dynamic> assignedTechs = report['assignedTechnicianIds'] ?? [];
-      if (assignedTechs.isNotEmpty) {
+      // Verificamos si el reporte fue iniciado (tiene startTime)
+      String? startTime = report['startTime'];
+      if (startTime != null && startTime.isNotEmpty) {
         showRealDate = true;
         serviceDate = (report['serviceDate'] as Timestamp).toDate();
       }
@@ -1296,37 +1328,65 @@ Widget _buildTimeHeader(int index) {
             ...List.generate(colCount, (tIdx) {
               bool active = _isScheduled(devInstance, activity.id, tIdx);
               
-              String status = 'empty'; // Por defecto: Vacío
+              String status = 'empty'; // Por defecto: Vacío (no programado)
               
               if (active) {
                 final report = _getReportForColumn(tIdx);
                 
-                if (report != null && report['entries'] != null) {
-                  final entries = report['entries'] as List;
-                  final entry = entries.firstWhere(
-                    (e) => e['instanceId'] == devInstance.instanceId, 
-                    orElse: () => null
-                  );
+                // ✅ PASO 1: Verificar SI EL SERVICIO FUE INICIADO (tiene startTime)
+                final String? startTime = report?['startTime'];
+                final bool serviceInitiated = startTime != null && startTime.isNotEmpty;
+                
+                // Si el servicio NO fue iniciado, siempre mostrar EMPTY
+                if (!serviceInitiated) {
+                  status = 'empty';
+                } else {
+                  // ✅ PASO 2: El servicio SÍ fue iniciado, verificar respuestas de ESTA actividad específica
+                  if (report != null && report['entries'] != null) {
+                    final entries = report['entries'] as List;
+                    
+                    // Buscar la entrada correspondiente a este dispositivo
+                    final entryList = entries.where(
+                      (e) => e['instanceId'] == devInstance.instanceId
+                    ).toList();
+                    
+                    if (entryList.isNotEmpty) {
+                      final entry = entryList.first;
+                      
+                      // ✅ PASO 3: Verificar si existe el mapa de resultados
+                      if (entry['results'] != null && entry['results'] is Map) {
+                        final results = entry['results'] as Map;
+                        
+                        // ✅ PASO 4: Verificar si esta actividad específica tiene respuesta
+                        if (results.containsKey(activity.id)) {
+                          final resValue = results[activity.id];
 
-                  if (entry['results'] != null) {
-                    final results = entry['results'] as Map;
-                    final resValue = results[activity.id];
-
-                    // CASO 1: Ya se completó la actividad (Círculo Lleno)
-                    if (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA') {
-                      status = 'full';
-                    } 
-                    // CASO 2: Se marcó explícitamente como "No Realizado/Pendiente" (Media Luna)
-                    else if (resValue == 'NR') {
+                          // ✅ LÓGICA CORREGIDA:
+                          // - Si la respuesta es null o 'NR' → INCOMPLETO (partial)
+                          // - Si la respuesta es OK/NOK/NA → COMPLETO (full)
+                          if (resValue == null || resValue == 'NR') {
+                            status = 'partial'; // Incompleto (sin respuesta o no registrado)
+                          } else if (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA') {
+                            status = 'full'; // Completo (tiene respuesta válida)
+                          } else {
+                            // Cualquier otro valor extraño → Incompleto por seguridad
+                            status = 'partial';
+                          }
+                        } else {
+                          // La actividad no está en el mapa de resultados → Incompleto
+                          status = 'partial';
+                        }
+                      } else {
+                        // Sin mapa de resultados válido → Incompleto
+                        status = 'partial';
+                      }
+                    } else {
+                      // No hay entrada para este dispositivo → Incompleto
                       status = 'partial';
                     }
-                    // CASO 3: Es null (Aún no se toca) -> Se queda como vacío
-                    else {
-                      status = 'empty'; 
-                    }
                   } else {
-                    // Si no hay mapa de resultados, también es vacío
-                    status = 'empty';
+                    // Sin entries en el reporte pero servicio iniciado → Incompleto
+                    status = 'partial';
                   }
                 }
               }

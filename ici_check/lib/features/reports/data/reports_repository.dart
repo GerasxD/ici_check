@@ -30,8 +30,6 @@ class ReportsRepository {
   }
 
   // --- NUEVA FUNCIÓN PÚBLICA (EXTRAÍDA) ---
-  // Esta es la clave para resolver tu problema. Nos permite calcular 
-  // qué actividades tocan hoy sin necesidad de crear un reporte nuevo.
   List<ReportEntry> generateEntriesForDate(
     PolicyModel policy,
     String dateStr,
