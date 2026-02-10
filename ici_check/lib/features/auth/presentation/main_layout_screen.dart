@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart'; // Necesario para consultar el rol
 import 'package:ici_check/features/clients/presentation/clients_screen.dart';
+import 'package:ici_check/features/dashboard/presentation/dashboard_screen.dart';
 import 'package:ici_check/features/devices/presentation/devices_screen.dart';
 import 'package:ici_check/features/policies/presentation/policies_screen.dart';
 import 'package:ici_check/features/settings/presentation/settings_screen.dart';
@@ -71,7 +72,9 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
       
       // Index 0: Inicio
       tempMenu.add({'title': 'Inicio', 'icon': Icons.dashboard_outlined});
-      tempPages.add(const Center(child: Text('Dashboard Content')));
+     tempPages.add(DashboardScreen(
+        onTabChange: onItemTapped, // <--- AQUÍ ESTÁ LA MAGIA
+      ));
 
       // Index 1: Clientes (Digamos que todos ven clientes)
       tempMenu.add({'title': 'Clientes', 'icon': Icons.people_outline});
@@ -116,13 +119,10 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
     }
   }
 
-  void _onItemTapped(int index) {
+  void onItemTapped(int index) {  // <- Público (sin _)
     setState(() {
       _selectedIndex = index;
     });
-    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
-      Navigator.pop(context);
-    }
   }
 
   void _handleLogout() async {
@@ -269,7 +269,7 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                   color: Colors.transparent,
                   child: InkWell(
                     onTap: () {
-                      _onItemTapped(index);
+                      onItemTapped(index);
                       if (!isDesktop) Navigator.pop(context);
                     },
                     borderRadius: BorderRadius.circular(12),

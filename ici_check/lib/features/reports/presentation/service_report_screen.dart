@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
@@ -46,6 +47,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   final ReportsRepository _repo = ReportsRepository();
   final SettingsRepository _settingsRepo = SettingsRepository();
   final ImagePicker _picker = ImagePicker();
+  Timer? _autoSaveDebounce;
   
   // Estado del Reporte
   ServiceReportModel? _report;
@@ -81,6 +83,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   void initState() {
     super.initState();
     _loadData();
+    _providerSigController.addListener(_onSignatureChanged);
+    _clientSigController.addListener(_onSignatureChanged);
   }
 
   @override
@@ -247,6 +251,67 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     return null; 
   }
 
+  // Método que detecta cambios en la firma
+  void _onSignatureChanged() {
+    // Reiniciamos el timer cada vez que hay un trazo nuevo
+    if (_autoSaveDebounce?.isActive ?? false) _autoSaveDebounce!.cancel();
+    
+    // Esperamos 2 segundos de inactividad para procesar y guardar la firma
+    _autoSaveDebounce = Timer(const Duration(seconds: 2), () {
+      _processAndSaveSignatures();
+    });
+  }
+
+  // Método específico para procesar imágenes de firmas y guardar
+  Future<void> _processAndSaveSignatures() async {
+    if (_report == null) return;
+    
+    String? providerSigBase64 = _report!.providerSignature;
+    String? clientSigBase64 = _report!.clientSignature;
+
+    bool hasChanges = false;
+
+    // Procesar firma Proveedor
+    if (_providerSigController.isNotEmpty) {
+      final bytes = await _providerSigController.toPngBytes();
+      if (bytes != null) {
+        final newSig = base64Encode(bytes);
+        if (newSig != providerSigBase64) {
+          providerSigBase64 = newSig;
+          hasChanges = true;
+        }
+      }
+    }
+
+    // Procesar firma Cliente
+    if (_clientSigController.isNotEmpty) {
+      final bytes = await _clientSigController.toPngBytes();
+      if (bytes != null) {
+        final newSig = base64Encode(bytes);
+        if (newSig != clientSigBase64) {
+          clientSigBase64 = newSig;
+          hasChanges = true;
+        }
+      }
+    }
+
+    if (hasChanges) {
+      final updatedReport = _report!.copyWith(
+        providerSignature: providerSigBase64,
+        clientSignature: clientSigBase64,
+      );
+
+      if (mounted) {
+        setState(() {
+          _report = updatedReport;
+        });
+        // Guardado silencioso
+        await _repo.saveReport(_report!);
+        debugPrint("Firma auto-guardada");
+      }
+    }
+  }
+
   void _loadSignatures() {
     if (_report?.providerSignature != null && _report!.providerSignature!.isNotEmpty) {
       try {
@@ -309,47 +374,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   // LÓGICA DE NEGOCIO (Guardar, Actualizar)
   // ==========================================
 
-  Future<void> _saveReport() async {
-    if (_report == null) return;
-
-    try {
-      String? providerSigBase64 = _report!.providerSignature;
-      String? clientSigBase64 = _report!.clientSignature;
-
-      if (_providerSigController.isNotEmpty) {
-        final bytes = await _providerSigController.toPngBytes();
-        if (bytes != null) providerSigBase64 = base64Encode(bytes);
-      }
-
-      if (_clientSigController.isNotEmpty) {
-        final bytes = await _clientSigController.toPngBytes();
-        if (bytes != null) clientSigBase64 = base64Encode(bytes);
-      }
-
-      final updatedReport = _report!.copyWith(
-        providerSignature: providerSigBase64,
-        clientSignature: clientSigBase64,
-      );
-
-      setState(() {
-        _report = updatedReport;
-      });
-
-      await _repo.saveReport(_report!);
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Reporte guardado exitosamente'), backgroundColor: Colors.green),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error al guardar: $e'), backgroundColor: Colors.red),
-        );
-      }
-    }
-  }
+  
 
   void _updateEntry(int index, {
     String? customId,
@@ -920,24 +945,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             ],
           ),
         ),
-        
-        // BOTÓN FLOTANTE
-        floatingActionButton: (_activeObservationEntry == null && 
-          _photoContextEntryIdx == null && 
-          _isEditable() && 
-          (_report!.assignedTechnicianIds.contains(_currentUserId) || _adminOverride))
-          ? FloatingActionButton.extended(
-              onPressed: _saveReport,
-              backgroundColor: const Color(0xFF10B981),
-              elevation: 4,
-              icon: const Icon(Icons.save_rounded, size: 20),
-              label: const Text(
-                'Guardar Cambios',
-                style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3),
-              ),
-            )
-          : null,
-      
+      floatingActionButton: null,
       bottomSheet: _activeObservationEntry != null 
           ? _buildObservationModal() 
           : (_photoContextEntryIdx != null ? _buildPhotoModal() : null),
@@ -1038,8 +1046,19 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 ),
               ),
               onChanged: (val) {
-                _report = _report!.copyWith(generalObservations: val);
-                _repo.saveReport(_report!);
+                // Actualizamos el estado local inmediatamente para que el usuario vea lo que escribe
+                setState(() {
+                  _report = _report!.copyWith(generalObservations: val);
+                });
+
+                // Cancelamos timer anterior si existe
+                if (_autoSaveDebounce?.isActive ?? false) _autoSaveDebounce!.cancel();
+
+                // Guardamos en la BD solo cuando el usuario deje de escribir por 1.5 segundos
+                _autoSaveDebounce = Timer(const Duration(milliseconds: 1500), () {
+                    _repo.saveReport(_report!);
+                    debugPrint("Observaciones auto-guardadas");
+                });
               },
             ),
           ),
@@ -1094,24 +1113,36 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     }).toList(),
                   )
                 : Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8FAFC),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.grey.shade100)
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.check_circle_outline, size: 16, color: Colors.grey.shade400),
-                        const SizedBox(width: 8),
-                        Text(
-                          "No se registraron observaciones individuales en los equipos.",
-                          style: TextStyle(fontSize: 12, color: Colors.grey.shade500, fontStyle: FontStyle.italic),
-                        ),
-                      ],
-                    ),
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.grey.shade100)
                   ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start, // Agregado para alinear arriba si son 2 líneas
+                    children: [
+                      Icon(Icons.check_circle_outline, size: 16, color: Colors.grey.shade400),
+                      const SizedBox(width: 8),
+                      
+                      // --- AQUÍ ESTÁ LA SOLUCIÓN ---
+                      Expanded( 
+                        child: Text(
+                          "No se registraron observaciones individuales en los equipos.",
+                          style: TextStyle(
+                            fontSize: 12, 
+                            color: Colors.grey.shade500, 
+                            fontStyle: FontStyle.italic
+                          ),
+                          // Opcional: para asegurar que no se corte, aunque Expanded ya fuerza el salto de línea
+                          overflow: TextOverflow.visible, 
+                        ),
+                      ),
+                      // -----------------------------
+                    ],
+                  ),
+                ),
           ),
         ],
       ),
