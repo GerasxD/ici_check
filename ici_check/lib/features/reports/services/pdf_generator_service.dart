@@ -18,7 +18,6 @@ class PdfGeneratorService {
     required CompanySettingsModel companySettings,
     required List<DeviceModel> deviceDefinitions,
     required List<UserModel> technicians,
-    // 1. NUEVO PARÁMETRO REQUERIDO:
     required List<PolicyDevice> policyDevices,
   }) async {
     final pdf = pw.Document();
@@ -29,19 +28,15 @@ class PdfGeneratorService {
       policyDevices,
     );
 
-    // Cargar fuente personalizada (opcional, pero recomendado para mejor calidad)
     final font = await PdfGoogleFonts.robotoRegular();
     final fontBold = await PdfGoogleFonts.robotoBold();
 
-    // Convertir logos de base64 a imagen si existen
     pw.MemoryImage? companyLogo;
     pw.MemoryImage? clientLogo;
     pw.MemoryImage? providerSignature;
     pw.MemoryImage? clientSignature;
 
-    // --- REEMPLAZAR LA LÓGICA DE CARGA DE LOGOS CON ESTO ---
-    
-    // 1. Logo Empresa (Proveedor)
+    // Cargar logos (tu código existente está bien)
     if (companySettings.logoUrl.isNotEmpty) {
       try {
         if (companySettings.logoUrl.startsWith('http')) {
@@ -54,7 +49,6 @@ class PdfGeneratorService {
       }
     }
 
-    // 2. Logo Cliente
     if (client.logoUrl.isNotEmpty) {
       try {
         if (client.logoUrl.startsWith('http')) {
@@ -68,43 +62,57 @@ class PdfGeneratorService {
     }
 
     try {
-      if (report.providerSignature != null &&
-          report.providerSignature!.isNotEmpty) {
-        providerSignature = pw.MemoryImage(
-          base64Decode(report.providerSignature!),
-        );
+      if (report.providerSignature != null && report.providerSignature!.isNotEmpty) {
+        providerSignature = pw.MemoryImage(base64Decode(report.providerSignature!));
       }
     } catch (e) {
       print('Error loading provider signature: $e');
     }
 
     try {
-      if (report.clientSignature != null &&
-          report.clientSignature!.isNotEmpty) {
+      if (report.clientSignature != null && report.clientSignature!.isNotEmpty) {
         clientSignature = pw.MemoryImage(base64Decode(report.clientSignature!));
       }
     } catch (e) {
       print('Error loading client signature: $e');
     }
 
-    // Obtener etiqueta del periodo
     String periodLabel = _getPeriodLabel(report.dateStr);
-
-    // Obtener frecuencias involucradas
     String frequencies = _getInvolvedFrequencies(report, deviceDefinitions);
-
-    // Calcular estadísticas
     Map<String, int> stats = _calculateStats(report);
 
-    // Agrupar entradas por dispositivo
-    _groupEntries(report, deviceDefinitions, policyDevices);
+    // ✅ GENERAR SECCIONES DE DISPOSITIVOS DE FORMA ASÍNCRONA
+    final List<pw.Widget> deviceSections = [];
+    for (var entry in groupedEntries.entries) {
+      final defId = entry.key;
+      final entries = entry.value;
+      final deviceDef = deviceDefinitions.firstWhere(
+        (d) => d.id == defId,
+        orElse: () => DeviceModel(
+          id: defId,
+          name: 'Desconocido',
+          description: '',
+          activities: [],
+        ),
+      );
+
+      final section = await _buildDeviceSection(
+        deviceDef: deviceDef,
+        entries: entries,
+        report: report,
+        technicians: technicians,
+        font: font,
+        fontBold: fontBold,
+      );
+      
+      deviceSections.add(section);
+    }
 
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.letter,
-        margin: const pw.EdgeInsets.all(14.4), // ~0.2cm
+        margin: const pw.EdgeInsets.all(14.4),
         build: (context) => [
-          // HEADER
           _buildHeader(
             companySettings: companySettings,
             client: client,
@@ -116,56 +124,28 @@ class PdfGeneratorService {
             fontBold: fontBold,
             font: font,
           ),
-
           pw.SizedBox(height: 8),
-
-          // INFO FECHA Y PERSONAL
           _buildInfoBar(
             report: report,
             technicians: technicians,
             font: font,
             fontBold: fontBold,
           ),
-
           pw.SizedBox(height: 8),
+          
+          // ✅ INSERTAR SECCIONES PRE-GENERADAS
+          ...deviceSections,
 
-          // SECCIONES DE DISPOSITIVOS
-          ...groupedEntries.entries.map((entry) {
-            final defId = entry.key;
-            final entries = entry.value;
-            final deviceDef = deviceDefinitions.firstWhere(
-              (d) => d.id == defId,
-              orElse: () => DeviceModel(
-                id: defId,
-                name: 'Desconocido',
-                description: '',
-                activities: [],
-              ),
-            );
-
-            return _buildDeviceSection(
-              deviceDef: deviceDef,
-              entries: entries,
-              report: report,
-              technicians: technicians,
-              font: font,
-              fontBold: fontBold,
-            );
-          }),
-
-          // HALLAZGOS GENERALES (si hay)
           if (_hasGeneralFindings(report))
             _buildGeneralFindings(report, font: font, fontBold: fontBold),
-
-          // OBSERVACIONES Y RESUMEN
+          
           _buildObservationsAndSummary(
             report: report,
             stats: stats,
             font: font,
             fontBold: fontBold,
           ),
-
-          // FIRMAS
+          
           _buildSignatures(
             report: report,
             providerSignature: providerSignature,
@@ -443,30 +423,23 @@ class PdfGeneratorService {
     );
   }
 
-  static pw.Widget _buildDeviceSection({
+  static Future<pw.Widget> _buildDeviceSection({
     required DeviceModel deviceDef,
     required List<ReportEntry> entries,
     required ServiceReportModel report,
     required List<UserModel> technicians,
     required pw.Font font,
     required pw.Font fontBold,
-  }) {
+  }) async {
     final sectionTechIds = report.sectionAssignments[deviceDef.id] ?? [];
     final sectionTechNames = sectionTechIds
-        .map(
-          (id) => technicians
-              .firstWhere(
-                (u) => u.id == id,
-                orElse: () => UserModel(id: id, name: id, email: ''),
-              )
-              .name,
-        )
+        .map((id) => technicians.firstWhere(
+              (u) => u.id == id,
+              orElse: () => UserModel(id: id, name: id, email: ''),
+            ).name)
         .join(', ');
 
-    final scheduledActivityIds = entries
-        .expand((e) => e.results.keys)
-        .toSet()
-        .toList();
+    final scheduledActivityIds = entries.expand((e) => e.results.keys).toSet().toList();
     final relevantActivities = deviceDef.activities
         .where((a) => scheduledActivityIds.contains(a.id))
         .toList();
@@ -475,25 +448,19 @@ class PdfGeneratorService {
 
     final isListView = deviceDef.viewMode == 'list';
 
-    // --- CAMBIO IMPORTANTE: ---
-    // Usamos Column en lugar de Container con borde.
-    // Esto permite que el contenido interno (la Tabla) se rompa entre páginas.
     return pw.Column(
       children: [
-        // 1. CABECERA DE LA SECCIÓN (Estilo oscuro)
+        // CABECERA
         pw.Container(
-          width: double.infinity, // Asegura que llene el ancho
+          width: double.infinity,
           padding: const pw.EdgeInsets.symmetric(horizontal: 5, vertical: 2),
           decoration: pw.BoxDecoration(
             color: PdfColors.grey800,
-            // Ponemos borde superior, izquierdo y derecho aquí para simular la caja
             border: const pw.Border(
               top: pw.BorderSide(color: PdfColors.black),
               left: pw.BorderSide(color: PdfColors.black),
               right: pw.BorderSide(color: PdfColors.black),
-              bottom: pw.BorderSide(
-                color: PdfColors.black,
-              ), // Borde abajo también para separar visualmente
+              bottom: pw.BorderSide(color: PdfColors.black),
             ),
           ),
           child: pw.Row(
@@ -503,85 +470,68 @@ class PdfGeneratorService {
                 children: [
                   pw.Text(
                     deviceDef.name.toUpperCase(),
-                    style: pw.TextStyle(
-                      font: fontBold,
-                      fontSize: 7,
-                      color: PdfColors.white,
-                    ),
+                    style: pw.TextStyle(font: fontBold, fontSize: 7, color: PdfColors.white),
                   ),
                   pw.SizedBox(width: 5),
                   pw.Text(
                     '(${entries.length} U.)',
-                    style: pw.TextStyle(
-                      font: font,
-                      fontSize: 6,
-                      color: PdfColors.grey400,
-                    ),
+                    style: pw.TextStyle(font: font, fontSize: 6, color: PdfColors.grey400),
                   ),
                 ],
               ),
               pw.Text(
                 'RESPONSABLES: ${sectionTechNames.isEmpty ? "General" : sectionTechNames}',
-                style: pw.TextStyle(
-                  font: font,
-                  fontSize: 5,
-                  color: PdfColors.white,
-                ),
+                style: pw.TextStyle(font: font, fontSize: 5, color: PdfColors.white),
               ),
             ],
           ),
         ),
 
-        // 2. CONTENIDO (Tabla o Lista)
-        // La tabla tiene sus propios bordes, por lo que se verá conectada a la cabecera
+        // ✅ CONTENIDO ASÍNCRONO
         if (!isListView)
-          _buildTableView(
+          await _buildTableView(
             entries: entries,
             activities: relevantActivities,
             font: font,
             fontBold: fontBold,
           )
         else
-          _buildListView(
+          await _buildListView(
             entries: entries,
             activities: relevantActivities,
             font: font,
             fontBold: fontBold,
           ),
 
-        // Espacio al final de cada sección para separar del siguiente grupo
         pw.SizedBox(height: 12),
       ],
     );
   }
 
-  static pw.Widget _buildTableView({
+  static Future<pw.Widget> _buildTableView({
     required List<ReportEntry> entries,
     required List<ActivityConfig> activities,
     required pw.Font font,
     required pw.Font fontBold,
-  }) {
-    // Calculamos anchos dinámicos para evitar que sobresalga
-    // Si hay muchas actividades, reducimos el ancho de columna
+  }) async {
     final double activityColWidth = activities.length > 8 ? 25.0 : 38.0;
 
+    // ✅ DESCARGAR FOTOS DE TODAS LAS ENTRADAS
+    final Map<int, pw.Widget> photoGalleries = {};
+    for (int i = 0; i < entries.length; i++) {
+      photoGalleries[i] = await _buildPhotoGallery(entries[i].photoUrls);
+    }
+
     return pw.Table(
-      // --- CAMBIO: repeatHeaderRows ---
-      // Esto hace que si la tabla se corta a la siguiente página, se repita el encabezado (fila 0)
-      // Nota: TableBorder.all dibuja el borde alrededor de toda la tabla y celdas
       border: pw.TableBorder.all(color: PdfColors.black, width: 0.5),
       defaultVerticalAlignment: pw.TableCellVerticalAlignment.middle,
       columnWidths: {
-        0: const pw.FixedColumnWidth(30), // ID
-        1: const pw.FlexColumnWidth(
-          2,
-        ), // Ubicación (flexible para usar espacio sobrante)
+        0: const pw.FixedColumnWidth(30),
+        1: const pw.FlexColumnWidth(2),
         ...Map.fromIterable(
           List.generate(activities.length, (i) => i + 2),
           key: (i) => i,
-          value: (_) => pw.FixedColumnWidth(
-            activityColWidth,
-          ), // Ancho fijo o dinámico para actividades
+          value: (_) => pw.FixedColumnWidth(activityColWidth),
         ),
       },
       children: [
@@ -599,33 +549,19 @@ class PdfGeneratorService {
                     pw.Text(
                       act.name,
                       textAlign: pw.TextAlign.center,
-                      style: pw.TextStyle(
-                        font: fontBold,
-                        fontSize: 5,
-                      ), // Fuente un poco más chica si hay muchos
+                      style: pw.TextStyle(font: fontBold, fontSize: 5),
                       maxLines: 2,
                       overflow: pw.TextOverflow.clip,
                     ),
-                    // ... (resto del header de actividad igual)
                     pw.Container(
                       margin: const pw.EdgeInsets.only(top: 1),
-                      padding: const pw.EdgeInsets.symmetric(
-                        horizontal: 2,
-                        vertical: 1,
-                      ),
+                      padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 1),
                       decoration: pw.BoxDecoration(
                         border: pw.Border.all(color: PdfColors.grey400),
                         borderRadius: pw.BorderRadius.circular(2),
                       ),
                       child: pw.Text(
-                        act.frequency
-                            .toString()
-                            .split('.')
-                            .last
-                            .substring(
-                              0,
-                              1,
-                            ), // Solo inicial (M, T, S) para ahorrar espacio
+                        act.frequency.toString().split('.').last.substring(0, 1),
                         style: pw.TextStyle(font: font, fontSize: 4),
                       ),
                     ),
@@ -637,34 +573,26 @@ class PdfGeneratorService {
         ),
 
         // DATA ROWS
-        ...entries.map((entry) {
+        ...entries.asMap().entries.map((entryMap) {
+          final index = entryMap.key;
+          final entry = entryMap.value;
+          
           return pw.TableRow(
             children: [
-              // ID
-              _tableCell(
-                entry.customId,
-                fontBold,
-                6,
-                align: pw.Alignment.center,
-              ),
-
-              // --- CAMBIO AQUÍ: UBICACIÓN + FOTOS DE EVIDENCIA ---
+              _tableCell(entry.customId, fontBold, 6, align: pw.Alignment.center),
+              
+              // ✅ UBICACIÓN + FOTOS
               pw.Container(
                 padding: const pw.EdgeInsets.all(3),
                 child: pw.Column(
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   children: [
-                    pw.Text(
-                      entry.area,
-                      style: pw.TextStyle(font: font, fontSize: 6),
-                    ),
-                    // Aquí inyectamos las fotos del dispositivo
-                    _buildPhotoGallery(entry.photoUrls),
+                    pw.Text(entry.area, style: pw.TextStyle(font: font, fontSize: 6)),
+                    photoGalleries[index] ?? pw.SizedBox(),
                   ],
                 ),
               ),
 
-              // ACTIVIDADES (Se queda igual)
               ...activities.map((act) {
                 final status = entry.results[act.id];
                 return _buildStatusCell(status, font);
@@ -676,12 +604,25 @@ class PdfGeneratorService {
     );
   }
 
-  static pw.Widget _buildListView({
-    required List<ReportEntry> entries,
-    required List<ActivityConfig> activities,
-    required pw.Font font,
-    required pw.Font fontBold,
-  }) {
+  static Future<pw.Widget> _buildListView({
+  required List<ReportEntry> entries,
+  required List<ActivityConfig> activities,
+  required pw.Font font,
+  required pw.Font fontBold,
+}) async {
+    final Map<String, Map<String, pw.Widget>> activityPhotoGalleries = {};
+  
+  for (var entry in entries) {
+    for (var act in activities) {
+      final actData = entry.activityData[act.id];
+      if (actData != null && actData.photoUrls.isNotEmpty) {
+        final key = '${entry.instanceId}_${act.id}';
+        activityPhotoGalleries[key] = {
+          'gallery': await _buildPhotoGallery(actData.photoUrls)
+        };
+      }
+    }
+  }
     return pw.Wrap(
       spacing: 0,
       runSpacing: 0,
@@ -723,13 +664,6 @@ class PdfGeneratorService {
                   ],
                 ),
               ),
-
-              // --- CAMBIO AQUÍ: FOTOS DE EVIDENCIA EN LISTA ---
-              if (entry.photoUrls.isNotEmpty)
-                pw.Padding(
-                  padding: const pw.EdgeInsets.all(4),
-                  child: _buildPhotoGallery(entry.photoUrls),
-                ),
 
               // Actividades
               ...activities.map((act) {
@@ -1210,42 +1144,79 @@ class PdfGeneratorService {
   }
 
   // Nuevo Helper para mostrar minigalería de fotos
-  static pw.Widget _buildPhotoGallery(List<String> photos) {
+  // ==================== NUEVO HELPER PARA DESCARGAR FOTOS ====================
+static Future<pw.MemoryImage?> _downloadPhoto(String photoUrl) async {
+  try {
+    if (photoUrl.startsWith('http')) {
+      // Es una URL de Firebase - descargar desde la red
+      return await networkImage(photoUrl) as pw.MemoryImage?;
+    } else if (photoUrl.contains('base64,')) {
+      // Es un data URI base64
+      final base64String = photoUrl.split('base64,').last;
+      return pw.MemoryImage(base64Decode(base64String));
+    } else {
+      // Es base64 puro
+      return pw.MemoryImage(base64Decode(photoUrl));
+    }
+  } catch (e) {
+    print('❌ Error descargando foto: $e');
+    return null;
+  }
+}
+
+  static Future<pw.Widget> _buildPhotoGallery(List<String> photos) async {
     if (photos.isEmpty) return pw.SizedBox();
+
+    // ✅ DESCARGAR TODAS LAS FOTOS PRIMERO
+    final List<pw.MemoryImage?> downloadedPhotos = [];
+    
+    for (final photoUrl in photos) {
+      final image = await _downloadPhoto(photoUrl);
+      downloadedPhotos.add(image);
+    }
 
     return pw.Container(
       margin: const pw.EdgeInsets.only(top: 2),
       child: pw.Wrap(
         spacing: 2,
         runSpacing: 2,
-        children: photos.map((photoBase64) {
-          try {
-            return pw.Container(
-              width: 25, // Tamaño miniatura
-              height: 25,
-              decoration: pw.BoxDecoration(
-                border: pw.Border.all(color: PdfColors.grey300),
-                borderRadius: pw.BorderRadius.circular(2),
-              ),
-              child: pw.ClipRRect(
-                horizontalRadius: 2,
-                verticalRadius: 2,
-                child: pw.Image(
-                  pw.MemoryImage(base64Decode(photoBase64)),
-                  fit: pw.BoxFit.cover,
-                ),
-              ),
-            );
-          } catch (e) {
+        children: downloadedPhotos.asMap().entries.map((entry) {
+          // ignore: unused_local_variable
+          final index = entry.key;
+          final photoImage = entry.value;
+          
+          if (photoImage == null) {
+            // ⚠️ Foto no se pudo descargar
             return pw.Container(
               width: 25,
               height: 25,
-              color: PdfColors.grey200,
+              decoration: pw.BoxDecoration(
+                color: PdfColors.grey200,
+                border: pw.Border.all(color: PdfColors.grey400),
+                borderRadius: pw.BorderRadius.circular(2),
+              ),
               child: pw.Center(
-                child: pw.Text('!', style: const pw.TextStyle(fontSize: 5)),
+                child: pw.Text('!', style: const pw.TextStyle(fontSize: 8, color: PdfColors.red)),
               ),
             );
           }
+
+          return pw.Container(
+            width: 25,
+            height: 25,
+            decoration: pw.BoxDecoration(
+              border: pw.Border.all(color: PdfColors.grey300),
+              borderRadius: pw.BorderRadius.circular(2),
+            ),
+            child: pw.ClipRRect(
+              horizontalRadius: 2,
+              verticalRadius: 2,
+              child: pw.Image(
+                photoImage,
+                fit: pw.BoxFit.cover,
+              ),
+            ),
+          );
         }).toList(),
       ),
     );
