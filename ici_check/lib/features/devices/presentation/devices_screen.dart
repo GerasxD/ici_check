@@ -135,6 +135,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
       if (result != null) {
         setState(() => _isLoading = true);
         
+        // 1. Lectura del archivo (Igual que antes)
         Uint8List? fileBytes = result.files.single.bytes;
         if (fileBytes == null && !kIsWeb && result.files.single.path != null) {
           fileBytes = await File(result.files.single.path!).readAsBytes();
@@ -145,6 +146,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
         var decoder = SpreadsheetDecoder.decodeBytes(fileBytes);
         Map<String, DeviceModel> importedMap = {};
 
+        // 2. Parseo del Excel a Objetos en Memoria (Igual que antes)
         for (var table in decoder.tables.keys) {
           var sheet = decoder.tables[table];
           if (sheet == null) continue;
@@ -160,10 +162,13 @@ class _DevicesScreenState extends State<DevicesScreen> {
             String devName = getCell(0);
             if (devName.trim().isEmpty) continue;
 
-            if (!importedMap.containsKey(devName)) {
-              importedMap[devName] = DeviceModel(
-                id: _uuid.v4(),
-                name: devName,
+            // Normalizamos el nombre (trim) para evitar duplicados en el mapa local
+            String devNameKey = devName.trim();
+
+            if (!importedMap.containsKey(devNameKey)) {
+              importedMap[devNameKey] = DeviceModel(
+                id: _uuid.v4(), // ID temporal, se corregirá abajo si ya existe en Firebase
+                name: devNameKey,
                 description: getCell(1),
                 viewMode: getCell(2).toLowerCase().contains('list') ? 'list' : 'table',
                 activities: []
@@ -172,7 +177,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
             String actName = getCell(3);
             if (actName.isNotEmpty) {
-              importedMap[devName]!.activities.add(ActivityConfig(
+              importedMap[devNameKey]!.activities.add(ActivityConfig(
                 id: _uuid.v4(),
                 name: actName,
                 type: _parseActivityType(getCell(4)),
@@ -183,13 +188,48 @@ class _DevicesScreenState extends State<DevicesScreen> {
           }
         }
 
+        // --- AQUI EMPIEZA LA LÓGICA ANTI-DUPLICADOS ---
+
+        final collection = FirebaseFirestore.instance.collection('devices');
+        
+        // 3. Obtener todos los dispositivos actuales de Firebase
+        // Esto es necesario para saber qué IDs ya existen.
+        QuerySnapshot existingSnapshot = await collection.get();
+        
+        // 4. Crear un mapa de "Nombre Normalizado" -> "ID de Firebase"
+        Map<String, String> existingDevicesMap = {};
+        for (var doc in existingSnapshot.docs) {
+          final data = doc.data() as Map<String, dynamic>;
+          if (data['name'] != null) {
+            // Guardamos el nombre en minúsculas y sin espacios para comparar mejor
+            existingDevicesMap[data['name'].toString().trim().toLowerCase()] = doc.id;
+          }
+        }
+
         WriteBatch batch = FirebaseFirestore.instance.batch();
         int opCount = 0;
-        final collection = FirebaseFirestore.instance.collection('devices');
 
         for (var dev in importedMap.values) {
-          var docRef = collection.doc();
-          dev.id = docRef.id;
+          DocumentReference docRef;
+          
+          // Nombre del dispositivo del Excel normalizado para comparar
+          String excelNameKey = dev.name.trim().toLowerCase();
+
+          // 5. Verificamos: ¿Ya existe este nombre en Firebase?
+          if (existingDevicesMap.containsKey(excelNameKey)) {
+            // SI EXISTE: Usamos el ID viejo para ACTUALIZAR
+            String existingId = existingDevicesMap[excelNameKey]!;
+            docRef = collection.doc(existingId);
+            dev.id = existingId; // Actualizamos el ID del objeto local para que coincida
+          } else {
+            // NO EXISTE: Creamos un ID nuevo (Documento nuevo)
+            docRef = collection.doc();
+            dev.id = docRef.id; 
+          }
+
+          // 'set' sobrescribirá los datos. Si querías fusionar actividades (merge), 
+          // la lógica sería más compleja, pero esto actualiza el equipo 
+          // con lo que venga en el Excel.
           batch.set(docRef, dev.toMap());
           opCount++;
 
@@ -201,11 +241,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
         }
         if (opCount > 0) await batch.commit();
 
-        if(mounted) _showSnack('Importación exitosa: ${importedMap.length} equipos.', Colors.green);
+        if(mounted) _showSnack('Proceso completado. Equipos procesados: ${importedMap.length}.', Colors.green);
       }
     } catch (e) {
       debugPrint("Error Import: $e");
-      if(mounted) _showSnack('Error al importar. Verifica el formato.', Colors.red);
+      if(mounted) _showSnack('Error al importar: $e', Colors.red);
     } finally {
       if(mounted) setState(() => _isLoading = false);
     }

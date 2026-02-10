@@ -24,6 +24,8 @@ dependencies:
   pdf: ^3.10.0
   path_provider: ^2.1.1
   printing: ^5.11.0
+  firebase_storage: ^13.0.6  # Agrega esta línea si no la tienes
+
 
   
 dev_dependencies:

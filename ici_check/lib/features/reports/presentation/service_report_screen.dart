@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
 import 'package:ici_check/features/reports/widgets/report_controls.dart';
@@ -241,10 +242,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   Future<String?> _getCurrentUserId() async {
-    // Aquí iría tu lógica real de sesión
-    // Por ahora retornamos el primer usuario de la lista si existe para probar
-    if (widget.users.isNotEmpty) return widget.users.first.id;
-    return null; 
+    try {
+      final currentUser = FirebaseAuth.instance.currentUser;
+      return currentUser?.uid;
+    } catch (e) {
+      debugPrint('Error getting current user ID: $e');
+      return null;
+    }
   }
 
   void _loadSignatures() {
@@ -421,7 +425,18 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     final newSectionAssignments = Map<String, List<String>>.from(_report!.sectionAssignments);
     newSectionAssignments[defId] = newAssignments;
 
-    final updatedReport = _report!.copyWith(sectionAssignments: newSectionAssignments);
+    // ====== AGREGADO: Calcular la lista global de técnicos asignados ======
+    final Set<String> allAssignedTechs = {};
+    for (var techList in newSectionAssignments.values) {
+      allAssignedTechs.addAll(techList);
+    }
+    // =====================================================================
+
+    final updatedReport = _report!.copyWith(
+      sectionAssignments: newSectionAssignments,
+      assignedTechnicianIds: allAssignedTechs.toList(), // ← AGREGADO
+    );
+    
     setState(() {
       _report = updatedReport;
     });
@@ -704,11 +719,14 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     }
 
     final groupedEntries = _groupEntries();
+    // Convertimos el mapa a una lista para poder usarla en el SliverList por índice
+    final groupedEntriesList = groupedEntries.entries.toList(); 
     final frequencies = _getFrequencies(groupedEntries);
 
     return Scaffold(
       backgroundColor: _bgLight,
       appBar: AppBar(
+        // ... (Tu código del AppBar se queda IGUAL) ...
         backgroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
@@ -718,58 +736,26 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Reporte de Servicio',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF1E293B),
-                letterSpacing: -0.3,
-              ),
-            ),
+            const Text('Reporte de Servicio', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF1E293B), letterSpacing: -0.3)),
             Row(
               children: [
                 Icon(Icons.calendar_today, size: 11, color: Colors.grey.shade600),
                 const SizedBox(width: 4),
-                Text(
-                  widget.dateStr,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                Text(widget.dateStr, style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
                 if (_report!.startTime != null) ...[
                   const SizedBox(width: 8),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
-                      color: _report!.endTime == null
-                          ? const Color(0xFF10B981).withOpacity(0.1)
-                          : const Color(0xFF64748B).withOpacity(0.1),
+                      color: _report!.endTime == null ? const Color(0xFF10B981).withOpacity(0.1) : const Color(0xFF64748B).withOpacity(0.1),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(
-                          _report!.endTime == null ? Icons.play_circle : Icons.check_circle,
-                          size: 10,
-                          color: _report!.endTime == null
-                              ? const Color(0xFF10B981)
-                              : const Color(0xFF64748B),
-                        ),
+                        Icon(_report!.endTime == null ? Icons.play_circle : Icons.check_circle, size: 10, color: _report!.endTime == null ? const Color(0xFF10B981) : const Color(0xFF64748B)),
                         const SizedBox(width: 4),
-                        Text(
-                          _report!.endTime == null ? 'En curso' : 'Finalizado',
-                          style: TextStyle(
-                            fontSize: 9,
-                            fontWeight: FontWeight.bold,
-                            color: _report!.endTime == null
-                                ? const Color(0xFF10B981)
-                                : const Color(0xFF64748B),
-                          ),
-                        ),
+                        Text(_report!.endTime == null ? 'En curso' : 'Finalizado', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: _report!.endTime == null ? const Color(0xFF10B981) : const Color(0xFF64748B))),
                       ],
                     ),
                   ),
@@ -781,60 +767,64 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         actions: [
           if (_isUserCoordinator())
             IconButton(
-              icon: Icon(
-                _adminOverride ? Icons.admin_panel_settings : Icons.admin_panel_settings_outlined,
-                color: _adminOverride ? const Color(0xFFF59E0B) : const Color(0xFF94A3B8),
-                size: 22,
-              ),
+              icon: Icon(_adminOverride ? Icons.admin_panel_settings : Icons.admin_panel_settings_outlined, color: _adminOverride ? const Color(0xFFF59E0B) : const Color(0xFF94A3B8), size: 22),
               onPressed: () => setState(() => _adminOverride = !_adminOverride),
               tooltip: _adminOverride ? 'Modo Admin Activo' : 'Activar Modo Admin',
             ),
           const SizedBox(width: 8),
         ],
       ),
-        body: SingleChildScrollView(
-          child: Column(
-            children: [
-              // 1. CABECERA
-              ReportHeader(
-                companySettings: _companySettings!,
-                client: widget.client,
-                serviceDate: _report!.serviceDate,
-                dateStr: widget.dateStr,
-                frequencies: frequencies,
-              ),
+      
+      // --- CAMBIO PRINCIPAL: CustomScrollView en lugar de SingleChildScrollView ---
+      body: CustomScrollView(
+        slivers: [
+          // 1. CABECERA Y CONTROLES (SliverToBoxAdapter para widgets estáticos)
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                ReportHeader(
+                  companySettings: _companySettings!,
+                  client: widget.client,
+                  serviceDate: _report!.serviceDate,
+                  dateStr: widget.dateStr,
+                  frequencies: frequencies,
+                ),
+                ReportControls(
+                  report: _report!,
+                  users: widget.users,
+                  adminOverride: _adminOverride,
+                  isUserDesignated: _report!.assignedTechnicianIds.contains(_currentUserId),
+                  onStartService: _handleStartService,
+                  onEndService: _handleEndService,
+                  onResumeService: _handleResumeService,
+                  onDateChanged: (newDate) {
+                    final updated = _report!.copyWith(serviceDate: newDate);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                  onStartTimeEdited: (newTime) {
+                    final updated = _report!.copyWith(startTime: newTime);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                  onEndTimeEdited: (newTime) {
+                    final updated = _report!.copyWith(endTime: newTime);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                ),
+              ],
+            ),
+          ),
 
-              // 2. CONTROLES (Iniciar/Fin/Asignación)
-              ReportControls(
-                report: _report!,
-                users: widget.users,
-                adminOverride: _adminOverride,
-                isUserDesignated: _report!.assignedTechnicianIds.contains(_currentUserId),
-                onStartService: _handleStartService,
-                onEndService: _handleEndService,
-                onResumeService: _handleResumeService,
-                onDateChanged: (newDate) {
-                  final updated = _report!.copyWith(serviceDate: newDate);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-                onStartTimeEdited: (newTime) {
-                  final updated = _report!.copyWith(startTime: newTime);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-                onEndTimeEdited: (newTime) {
-                  final updated = _report!.copyWith(endTime: newTime);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-              ),
-
-              // 3. SECCIONES DE DISPOSITIVOS (Tablas/Listas)
-              ...groupedEntries.entries.map((entryGroup) {
+          // 2. SECCIONES DE DISPOSITIVOS (SliverList para Lazy Loading real)
+          SliverList(
+            delegate: SliverChildBuilderDelegate(
+              (context, index) {
+                final entryGroup = groupedEntriesList[index];
                 final defId = entryGroup.key;
                 final sectionEntries = entryGroup.value;
-                
+
                 final deviceDef = widget.devices.firstWhere(
                   (d) => d.id == defId,
                   orElse: () => DeviceModel(id: defId, name: 'Desconocido', description: '', activities: []),
@@ -847,41 +837,34 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   users: widget.users,
                   sectionAssignments: _report!.sectionAssignments[defId] ?? [],
                   isEditable: _isEditable(),
-                  allowedToEdit: _isEditable(), // <--- CAMBIO AQUÍ: Permitir ver controles si el reporte está abierto
+                  allowedToEdit: _isEditable(),
                   isUserCoordinator: _isUserCoordinator(),
                   currentUserId: _currentUserId,
-                  
-                  // CALLBACKS IMPORTANTE: Mapeo de índices locales a globales
                   onToggleAssignment: (uid) => _toggleSectionAssignment(defId, uid),
-                  
                   onCustomIdChanged: (localIndex, val) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) _updateEntry(globalIndex, customId: val);
+                    if (globalIndex != -1) _updateEntry(globalIndex, customId: val);
                   },
-                  
                   onAreaChanged: (localIndex, val) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) _updateEntry(globalIndex, area: val);
+                    if (globalIndex != -1) _updateEntry(globalIndex, area: val);
                   },
-                  
                   onToggleStatus: (localIndex, activityId) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
+                    if (globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
                   },
-                  
                   onCameraClick: (localIndex, {activityId}) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
+                    if (globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
                   },
-                  
                   onObservationClick: (localIndex, {activityId}) {
                     final entry = sectionEntries[localIndex];
                     final globalIndex = _report!.entries.indexOf(entry);
-                    if(globalIndex != -1) {
+                    if (globalIndex != -1) {
                       setState(() {
                         _activeObservationEntry = globalIndex.toString();
                         _activeObservationActivityId = activityId;
@@ -889,57 +872,59 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     }
                   },
                 );
-              }),
-
-              // 4. OBSERVACIONES GENERALES
-              _buildGeneralObservationsBox(),
-              ReportSummary(report: _report!),
-
-              // 5. FIRMAS
-              ReportSignatures(
-                providerController: _providerSigController,
-                clientController: _clientSigController,
-                providerName: _report!.providerSignerName,
-                clientName: _report!.clientSignerName,
-                providerSignatureData: _report!.providerSignature, // Base64 desde Firebase
-                clientSignatureData: _report!.clientSignature,
-                isEditable: _isEditable(),
-                onProviderNameChanged: (val) {
-                  final updated = _report!.copyWith(providerSignerName: val);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-                onClientNameChanged: (val) {
-                  final updated = _report!.copyWith(clientSignerName: val);
-                  setState(() => _report = updated);
-                  _repo.saveReport(_report!);
-                },
-              ),
-
-              const SizedBox(height: 80),
-            ],
+              },
+              childCount: groupedEntriesList.length, // Cantidad de secciones (Tipos de equipos)
+            ),
           ),
-        ),
-        
-        // BOTÓN FLOTANTE
-        floatingActionButton: (_activeObservationEntry == null && 
-          _photoContextEntryIdx == null && 
-          _isEditable() && 
-          (_report!.assignedTechnicianIds.contains(_currentUserId) || _adminOverride))
+
+          // 3. PIE DE PÁGINA (Observaciones, Firmas, Espacio extra)
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                _buildGeneralObservationsBox(),
+                ReportSummary(report: _report!),
+                ReportSignatures(
+                  providerController: _providerSigController,
+                  clientController: _clientSigController,
+                  providerName: _report!.providerSignerName,
+                  clientName: _report!.clientSignerName,
+                  providerSignatureData: _report!.providerSignature,
+                  clientSignatureData: _report!.clientSignature,
+                  isEditable: _isEditable(),
+                  onProviderNameChanged: (val) {
+                    final updated = _report!.copyWith(providerSignerName: val);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                  onClientNameChanged: (val) {
+                    final updated = _report!.copyWith(clientSignerName: val);
+                    setState(() => _report = updated);
+                    _repo.saveReport(_report!);
+                  },
+                ),
+                const SizedBox(height: 80), // Espacio para el FAB
+              ],
+            ),
+          ),
+        ],
+      ),
+
+      // BOTÓN FLOTANTE (Se mantiene igual)
+      floatingActionButton: (_activeObservationEntry == null &&
+              _photoContextEntryIdx == null &&
+              _isEditable() &&
+              (_report!.assignedTechnicianIds.contains(_currentUserId) || _adminOverride))
           ? FloatingActionButton.extended(
               onPressed: _saveReport,
               backgroundColor: const Color(0xFF10B981),
               elevation: 4,
               icon: const Icon(Icons.save_rounded, size: 20),
-              label: const Text(
-                'Guardar Cambios',
-                style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3),
-              ),
+              label: const Text('Guardar Cambios', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3)),
             )
           : null,
-      
-      bottomSheet: _activeObservationEntry != null 
-          ? _buildObservationModal() 
+
+      bottomSheet: _activeObservationEntry != null
+          ? _buildObservationModal()
           : (_photoContextEntryIdx != null ? _buildPhotoModal() : null),
     );
   }

@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:ici_check/features/clients/data/client_model.dart';
@@ -29,9 +30,13 @@ class _ClientsScreenState extends State<ClientsScreen> {
       context: context,
       builder: (context) => _ClientFormDialog(
         clientToEdit: client,
-        onSave: (newClient) async {
+        onSave: (newClient, imageBytes, fileName) async { // ← CAMBIADO
           try {
-            await _repo.saveClient(newClient);
+            await _repo.saveClient(
+              newClient, 
+              newLogoBytes: imageBytes,  // ← CAMBIADO
+              fileName: fileName,
+            );
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
@@ -42,7 +47,15 @@ class _ClientsScreenState extends State<ClientsScreen> {
               );
             }
           } catch (e) {
-            debugPrint(e.toString());
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Error: $e'),
+                  backgroundColor: Colors.red,
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            }
           }
         },
       ),
@@ -277,8 +290,8 @@ class _ClientsScreenState extends State<ClientsScreen> {
 // --- FORMULARIO MODERNO ---
 class _ClientFormDialog extends StatefulWidget {
   final ClientModel? clientToEdit;
-  final Function(ClientModel) onSave;
-
+  final Function(ClientModel, Uint8List?, String?) onSave;
+  
   const _ClientFormDialog({this.clientToEdit, required this.onSave});
 
   @override
@@ -291,18 +304,123 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
   late TextEditingController _addressCtrl;
   late TextEditingController _contactCtrl;
   late TextEditingController _emailCtrl;
+  
+  // ====== CAMBIADO: Usar Uint8List en lugar de File ======
+  Uint8List? _selectedImageBytes;
+  String? _selectedImageName;
+  final ImagePicker _picker = ImagePicker();
+  bool _isUploading = false;
 
   @override
   void initState() {
     super.initState();
     _nameCtrl = TextEditingController(text: widget.clientToEdit?.name ?? '');
-    _addressCtrl = TextEditingController(
-      text: widget.clientToEdit?.address ?? '',
-    );
-    _contactCtrl = TextEditingController(
-      text: widget.clientToEdit?.contact ?? '',
-    );
+    _addressCtrl = TextEditingController(text: widget.clientToEdit?.address ?? '');
+    _contactCtrl = TextEditingController(text: widget.clientToEdit?.contact ?? '');
     _emailCtrl = TextEditingController(text: widget.clientToEdit?.email ?? '');
+  }
+
+  // ====== CORREGIDO: Seleccionar imagen multiplataforma ======
+  Future<void> _pickImage() async {
+    try {
+      final XFile? image = await _picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 512,
+        maxHeight: 512,
+        imageQuality: 85,
+      );
+
+      if (image != null) {
+        final bytes = await image.readAsBytes(); // ← Leer como bytes
+        setState(() {
+          _selectedImageBytes = bytes;
+          _selectedImageName = image.name;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al seleccionar imagen: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  // ====== CORREGIDO: Tomar foto multiplataforma ======
+  Future<void> _takePhoto() async {
+    try {
+      final XFile? image = await _picker.pickImage(
+        source: ImageSource.camera,
+        maxWidth: 512,
+        maxHeight: 512,
+        imageQuality: 85,
+      );
+
+      if (image != null) {
+        final bytes = await image.readAsBytes(); // ← Leer como bytes
+        setState(() {
+          _selectedImageBytes = bytes;
+          _selectedImageName = image.name;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al tomar foto: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  void _showImageOptions() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library, color: Color(0xFF2563EB)),
+              title: const Text('Elegir de galería'),
+              onTap: () {
+                Navigator.pop(context);
+                _pickImage();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.camera_alt, color: Color(0xFF2563EB)),
+              title: const Text('Tomar foto'),
+              onTap: () {
+                Navigator.pop(context);
+                _takePhoto();
+              },
+            ),
+            if (_selectedImageBytes != null || (widget.clientToEdit?.logoUrl.isNotEmpty ?? false))
+              ListTile(
+                leading: const Icon(Icons.delete, color: Colors.red),
+                title: const Text('Eliminar logo'),
+                onTap: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _selectedImageBytes = null;
+                    _selectedImageName = null;
+                  });
+                },
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -340,13 +458,8 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        isEditing
-                            ? 'Modificar datos existentes'
-                            : 'Registrar nueva empresa',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Colors.grey,
-                        ),
+                        isEditing ? 'Modificar datos existentes' : 'Registrar nueva empresa',
+                        style: const TextStyle(fontSize: 12, color: Colors.grey),
                       ),
                     ],
                   ),
@@ -367,74 +480,73 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Avatar Uploader Simulado
+                      // ====== CORREGIDO: Avatar con MemoryImage para Web ======
                       Center(
-                        child: Stack(
-                          children: [
-                            Container(
-                              width: 100,
-                              height: 100,
-                              decoration: BoxDecoration(
-                                color: Colors.grey.shade50,
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(color: Colors.grey.shade200),
-                              ),
-                              child: const Icon(
-                                Icons.business_outlined,
-                                size: 40,
-                                color: Colors.grey,
-                              ),
-                            ),
-                            Positioned(
-                              bottom: -4,
-                              right: -4,
-                              child: Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFF2563EB),
-                                  shape: BoxShape.circle,
+                        child: GestureDetector(
+                          onTap: _showImageOptions,
+                          child: Stack(
+                            children: [
+                              Container(
+                                width: 100,
+                                height: 100,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey.shade50,
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(color: Colors.grey.shade200),
+                                  image: _selectedImageBytes != null
+                                      ? DecorationImage(
+                                          image: MemoryImage(_selectedImageBytes!), // ← Usar MemoryImage
+                                          fit: BoxFit.cover,
+                                        )
+                                      : (widget.clientToEdit?.logoUrl.isNotEmpty ?? false)
+                                          ? DecorationImage(
+                                              image: NetworkImage(widget.clientToEdit!.logoUrl),
+                                              fit: BoxFit.cover,
+                                            )
+                                          : null,
                                 ),
-                                child: const Icon(
-                                  Icons.camera_alt,
-                                  color: Colors.white,
-                                  size: 16,
+                                child: (_selectedImageBytes == null && 
+                                       (widget.clientToEdit?.logoUrl.isEmpty ?? true))
+                                    ? const Icon(Icons.business_outlined, size: 40, color: Colors.grey)
+                                    : null,
+                              ),
+                              Positioned(
+                                bottom: -4,
+                                right: -4,
+                                child: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: const BoxDecoration(
+                                    color: Color(0xFF2563EB),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(Icons.camera_alt, color: Colors.white, size: 16),
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      const Center(
+                        child: Text(
+                          'Toca para cambiar logo',
+                          style: TextStyle(fontSize: 11, color: Colors.grey),
                         ),
                       ),
                       const SizedBox(height: 24),
 
-                      _buildProInput(
-                        'Nombre Empresa',
-                        _nameCtrl,
-                        Icons.business,
-                        required: true,
-                      ),
+                      _buildProInput('Nombre Empresa', _nameCtrl, Icons.business, required: true),
                       const SizedBox(height: 16),
-                      _buildProInput(
-                        'Dirección Fiscal',
-                        _addressCtrl,
-                        Icons.place_outlined,
-                      ),
+                      _buildProInput('Dirección Fiscal', _addressCtrl, Icons.place_outlined),
                       const SizedBox(height: 16),
                       Row(
                         children: [
                           Expanded(
-                            child: _buildProInput(
-                              'Teléfono',
-                              _contactCtrl,
-                              Icons.phone_outlined,
-                            ),
+                            child: _buildProInput('Teléfono', _contactCtrl, Icons.phone_outlined),
                           ),
                           const SizedBox(width: 16),
                           Expanded(
-                            child: _buildProInput(
-                              'Email',
-                              _emailCtrl,
-                              Icons.email_outlined,
-                            ),
+                            child: _buildProInput('Email', _emailCtrl, Icons.email_outlined),
                           ),
                         ],
                       ),
@@ -459,41 +571,26 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
                   TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text(
-                      'Cancelar',
-                      style: TextStyle(color: Colors.grey),
-                    ),
+                    onPressed: _isUploading ? null : () => Navigator.pop(context),
+                    child: const Text('Cancelar', style: TextStyle(color: Colors.grey)),
                   ),
                   const SizedBox(width: 12),
                   ElevatedButton(
-                    onPressed: () {
-                      if (_formKey.currentState!.validate()) {
-                        final newClient = ClientModel(
-                          id: widget.clientToEdit?.id ?? '',
-                          name: _nameCtrl.text.trim(),
-                          address: _addressCtrl.text.trim(),
-                          contact: _contactCtrl.text.trim(),
-                          email: _emailCtrl.text.trim(),
-                          logoUrl: widget.clientToEdit?.logoUrl ?? '',
-                        );
-                        widget.onSave(newClient);
-                        Navigator.pop(context);
-                      }
-                    },
+                    onPressed: _isUploading ? null : _handleSave,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF2563EB),
                       foregroundColor: Colors.white,
                       elevation: 0,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 16,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
-                    child: const Text('Guardar Datos'),
+                    child: _isUploading
+                        ? const SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                          )
+                        : const Text('Guardar Datos'),
                   ),
                 ],
               ),
@@ -502,6 +599,44 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
         ),
       ),
     );
+  }
+
+  // ====== CORREGIDO: Guardar con bytes ======
+  Future<void> _handleSave() async {
+    if (_formKey.currentState!.validate()) {
+      setState(() => _isUploading = true);
+
+      try {
+        final newClient = ClientModel(
+          id: widget.clientToEdit?.id ?? '',
+          name: _nameCtrl.text.trim(),
+          address: _addressCtrl.text.trim(),
+          contact: _contactCtrl.text.trim(),
+          email: _emailCtrl.text.trim(),
+          logoUrl: widget.clientToEdit?.logoUrl ?? '',
+        );
+
+        // ← Pasar bytes en lugar de File
+        await widget.onSave(newClient, _selectedImageBytes, _selectedImageName);
+        
+        if (mounted) {
+          Navigator.pop(context);
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Error al guardar: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      } finally {
+        if (mounted) {
+          setState(() => _isUploading = false);
+        }
+      }
+    }
   }
 
   Widget _buildProInput(
@@ -515,11 +650,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
       children: [
         Text(
           label,
-          style: const TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
-            color: Colors.grey,
-          ),
+          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.grey),
         ),
         const SizedBox(height: 6),
         TextFormField(
@@ -531,10 +662,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
             prefixIcon: Icon(icon, color: Colors.grey.shade400, size: 20),
             filled: true,
             fillColor: const Color(0xFFF8FAFC),
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 16,
-              vertical: 14,
-            ),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
               borderSide: BorderSide.none,
@@ -545,10 +673,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(
-                color: Color(0xFF2563EB),
-                width: 1.5,
-              ),
+              borderSide: const BorderSide(color: Color(0xFF2563EB), width: 1.5),
             ),
           ),
         ),
@@ -569,7 +694,6 @@ class _ClientProCard extends StatelessWidget {
     required this.onDelete,
   });
 
-  // Generar color aleatorio consistente basado en el nombre
   Color _getAvatarColor(String name) {
     final colors = [
       Colors.blue.shade700,
@@ -599,136 +723,165 @@ class _ClientProCard extends StatelessWidget {
         ],
         border: Border.all(color: Colors.grey.shade100),
       ),
-      child: Stack(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header Tarjeta: Avatar y Nombre
+            Row(
               children: [
-                // Header Tarjeta: Avatar y Nombre
-                Row(
-                  children: [
-                    Container(
-                      width: 56,
-                      height: 56,
-                      decoration: BoxDecoration(
-                        color: avatarColor.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: Center(
-                        child: client.logoUrl.isNotEmpty
-                            ? ClipRRect(
-                                borderRadius: BorderRadius.circular(14),
-                                child: Image.network(
-                                  client.logoUrl,
-                                  fit: BoxFit.cover,
+                // ====== CORREGIDO: Avatar con mejor manejo de errores ======
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: avatarColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: client.logoUrl.isNotEmpty
+                        ? Image.network(
+                            client.logoUrl,
+                            fit: BoxFit.cover,
+                            loadingBuilder: (context, child, loadingProgress) {
+                              if (loadingProgress == null) return child;
+                              return Center(
+                                child: SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    value: loadingProgress.expectedTotalBytes != null
+                                        ? loadingProgress.cumulativeBytesLoaded /
+                                            loadingProgress.expectedTotalBytes!
+                                        : null,
+                                    strokeWidth: 2,
+                                    color: avatarColor,
+                                  ),
                                 ),
-                              )
-                            : Text(
-                                client.name.isNotEmpty
-                                    ? client.name[0].toUpperCase()
-                                    : '?',
-                                style: TextStyle(
-                                  fontSize: 24,
-                                  fontWeight: FontWeight.bold,
-                                  color: avatarColor,
+                              );
+                            },
+                            errorBuilder: (context, error, stackTrace) {
+                              // Si falla la carga, mostrar inicial
+                              debugPrint('Error cargando logo: $error');
+                              return Center(
+                                child: Text(
+                                  client.name.isNotEmpty
+                                      ? client.name[0].toUpperCase()
+                                      : '?',
+                                  style: TextStyle(
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                    color: avatarColor,
+                                  ),
                                 ),
-                              ),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            client.name,
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF0F172A),
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          const SizedBox(height: 4),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.green.shade50,
-                              borderRadius: BorderRadius.circular(6),
-                            ),
+                              );
+                            },
+                          )
+                        : Center(
                             child: Text(
-                              'ACTIVO',
+                              client.name.isNotEmpty
+                                  ? client.name[0].toUpperCase()
+                                  : '?',
                               style: TextStyle(
-                                fontSize: 10,
+                                fontSize: 24,
                                 fontWeight: FontWeight.bold,
-                                color: Colors.green.shade700,
+                                color: avatarColor,
                               ),
                             ),
                           ),
-                        ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        client.name,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF0F172A),
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                  ],
-                ),
-
-                const Spacer(),
-
-                // Info
-                _InfoRowPro(
-                  Icons.place_outlined,
-                  client.address.isEmpty ? 'Sin dirección' : client.address,
-                ),
-                const SizedBox(height: 8),
-                _InfoRowPro(
-                  Icons.email_outlined,
-                  client.email.isEmpty ? 'Sin email' : client.email,
-                ),
-                const SizedBox(height: 8),
-                _InfoRowPro(
-                  Icons.phone_outlined,
-                  client.contact.isEmpty ? 'Sin teléfono' : client.contact,
-                ),
-
-                const Spacer(),
-                const Divider(),
-
-                // Acciones Rápidas
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    TextButton.icon(
-                      onPressed: onEdit,
-                      icon: const Icon(Icons.edit_outlined, size: 16),
-                      label: const Text('Editar'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: Colors.blue.shade700,
-                      ),
-                    ),
-                    // IconButton pequeño para borrar
-                    InkWell(
-                      onTap: onDelete,
-                      borderRadius: BorderRadius.circular(8),
-                      child: Padding(
-                        padding: const EdgeInsets.all(8.0),
-                        child: Icon(
-                          Icons.delete_outline,
-                          size: 18,
-                          color: Colors.grey.shade400,
+                      const SizedBox(height: 4),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade50,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          'ACTIVO',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.green.shade700,
+                          ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
-          ),
-        ],
+
+            const Spacer(),
+
+            // Info
+            _InfoRowPro(
+              Icons.place_outlined,
+              client.address.isEmpty ? 'Sin dirección' : client.address,
+            ),
+            const SizedBox(height: 8),
+            _InfoRowPro(
+              Icons.email_outlined,
+              client.email.isEmpty ? 'Sin email' : client.email,
+            ),
+            const SizedBox(height: 8),
+            _InfoRowPro(
+              Icons.phone_outlined,
+              client.contact.isEmpty ? 'Sin teléfono' : client.contact,
+            ),
+
+            const Spacer(),
+            const Divider(),
+
+            // Acciones Rápidas
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                TextButton.icon(
+                  onPressed: onEdit,
+                  icon: const Icon(Icons.edit_outlined, size: 16),
+                  label: const Text('Editar'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.blue.shade700,
+                  ),
+                ),
+                InkWell(
+                  onTap: onDelete,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Icon(
+                      Icons.delete_outline,
+                      size: 18,
+                      color: Colors.grey.shade400,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
