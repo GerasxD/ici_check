@@ -117,10 +117,12 @@ class _DevicesScreenState extends State<DevicesScreen> {
     if (val.contains('diari')) return Frequency.DIARIO;
     if (val.contains('seman')) return Frequency.SEMANAL;
     if (val.contains('mensual')) return Frequency.MENSUAL;
-    if (val.contains('trimest')) return Frequency.TRIMESTRAL;
+    if (val.contains('cuatrimest')) return Frequency.CUATRIMESTRAL; // ✅ PRIMERO
+    if (val.contains('trimest')) return Frequency.TRIMESTRAL;        // ✅ DESPUÉS
     if (val.contains('semest')) return Frequency.SEMESTRAL;
     if (val.contains('anual')) return Frequency.ANUAL;
-    return Frequency.MENSUAL; 
+    
+    return Frequency.MENSUAL;
   }
 
   // --- IMPORTAR EXCEL ---
