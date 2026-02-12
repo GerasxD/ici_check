@@ -14,6 +14,14 @@ class UsersRepository {
     });
   }
 
+  // En users_repository.dart, agrega este método:
+  Future<List<UserModel>> getUsers() async {
+    final snapshot = await _usersCollection.get();
+    return snapshot.docs.map((doc) {
+      return UserModel.fromMap(doc.data() as Map<String, dynamic>, doc.id);
+    }).toList();
+  }
+
   // 2. GUARDAR (Crear o Actualizar)
   // Nota: Esto guarda los datos en la BD. Para crear el Login (Auth), 
   // idealmente se usa una Cloud Function, pero aquí manejamos la ficha del usuario.

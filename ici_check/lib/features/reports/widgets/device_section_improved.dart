@@ -79,7 +79,11 @@ class DeviceSectionImproved extends StatelessWidget {
   }
 
   void _showAssignmentDialog(BuildContext context) {
-    final Set<String> localAssignments = Set.from(sectionAssignments);
+    // ✅ IMPORTANTE: Crear una COPIA de la lista para el modal local
+    final Set<String> localAssignments = Set<String>.from(sectionAssignments);
+
+    debugPrint("🔓 Dialog: Abriendo para dispositivo: $defId");
+    debugPrint("   Asignaciones iniciales: ${localAssignments.toList()}");
 
     showDialog(
       context: context,
@@ -183,14 +187,21 @@ class DeviceSectionImproved extends StatelessWidget {
                                     ),
                                     value: isAssigned,
                                     onChanged: (val) {
-                                      onToggleAssignment(user.id);
+                                      // ✅ Actualizar primero el estado local del modal
                                       setModalState(() {
                                         if (isAssigned) {
                                           localAssignments.remove(user.id);
+                                          debugPrint("   ✂️ Dialog: Removiendo ${user.name} (${user.id})");
                                         } else {
                                           localAssignments.add(user.id);
+                                          debugPrint("   ➕ Dialog: Agregando ${user.name} (${user.id})");
                                         }
+                                        debugPrint("   Estado local del dialog: ${localAssignments.toList()}");
                                       });
+                                      
+                                      // ✅ LUEGO llamar al callback para actualizar el estado global
+                                      debugPrint("   📤 Enviando cambio al estado global");
+                                      onToggleAssignment(user.id);
                                     },
                                   ),
                                 );
@@ -206,7 +217,11 @@ class DeviceSectionImproved extends StatelessWidget {
                       child: SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
-                          onPressed: () => Navigator.pop(ctx),
+                          onPressed: () {
+                            debugPrint("🔒 Cerrando dialog");
+                            debugPrint("   Asignaciones finales: ${localAssignments.toList()}");
+                            Navigator.pop(ctx);
+                          },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF0F172A),
                             foregroundColor: Colors.white,

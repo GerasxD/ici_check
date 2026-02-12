@@ -500,31 +500,50 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   void _toggleSectionAssignment(String defId, String userId) {
     if (_report == null) return;
 
-    final currentAssignments = _report!.sectionAssignments[defId] ?? [];
-    List<String> newAssignments;
+    // ✅ PASO 1: Obtener la lista actual de asignados a este dispositivo
+    final currentAssignments = List<String>.from(_report!.sectionAssignments[defId] ?? []);
+    
+    debugPrint("📋 ANTES: Dispositivo $defId tiene asignados: $currentAssignments");
+    debugPrint("   Intentando toggle de usuario: $userId");
 
+    // ✅ PASO 2: Agregar o quitar el usuario
     if (currentAssignments.contains(userId)) {
-      newAssignments = currentAssignments.where((id) => id != userId).toList();
+      currentAssignments.remove(userId);
+      debugPrint("   ✂️ REMOVIENDO: Técnico $userId eliminado");
     } else {
-      newAssignments = [...currentAssignments, userId];
+      currentAssignments.add(userId);
+      debugPrint("   ➕ AGREGANDO: Técnico $userId agregado");
     }
 
+    debugPrint("📋 DESPUÉS: Dispositivo $defId ahora tiene: $currentAssignments");
+
+    // ✅ PASO 3: Actualizar el mapa completo de sectionAssignments
+    // IMPORTANTE: Hacer una copia profunda para no afectar el estado anterior
     final newSectionAssignments = Map<String, List<String>>.from(_report!.sectionAssignments);
-    newSectionAssignments[defId] = newAssignments;
+    newSectionAssignments[defId] = List<String>.from(currentAssignments);
 
+    // ✅ PASO 4: Recalcular el list global de todos los técnicos asignados
     final Set<String> allAssignedTechs = {};
-    for (var techList in newSectionAssignments.values) {
-      allAssignedTechs.addAll(techList);
-    }
+    newSectionAssignments.forEach((defId, techIds) {
+      debugPrint("   Device $defId → Tecnicos: $techIds");
+      allAssignedTechs.addAll(techIds);
+    });
 
+    debugPrint("✅ TÉCNICOS GLOBALES FINALES: $allAssignedTechs");
+
+    // ✅ PASO 5: Crear el reporte actualizado
     final updatedReport = _report!.copyWith(
       sectionAssignments: newSectionAssignments,
       assignedTechnicianIds: allAssignedTechs.toList(),
     );
     
+    // ✅ PASO 6: Actualizar el estado local
     setState(() {
       _report = updatedReport;
     });
+
+    // ✅ PASO 7: Guardar en Firebase
+    debugPrint("💾 Guardando reporte con asignaciones actualizadas...");
     _repo.saveReport(_report!);
   }
 
@@ -861,6 +880,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     final groupedEntries = _groupEntries();
     final groupedEntriesList = groupedEntries.entries.toList();
     final frequencies = _getFrequencies(groupedEntries);
+    final assignedUsers = widget.users.where((user) => 
+      _report!.assignedTechnicianIds.contains(user.id)
+    ).toList();
+    
+    debugPrint("👥 Usuarios asignados al reporte: ${assignedUsers.length}");
 
     return Scaffold(
       backgroundColor: _bgLight,
@@ -969,7 +993,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   defId: defId,
                   deviceDef: deviceDef,
                   entries: sectionEntries,
-                  users: widget.users,
+                  users: assignedUsers, // ✅ PASAR SOLO USUARIOS ASIGNADOS
                   sectionAssignments: _report!.sectionAssignments[defId] ?? [],
                   isEditable: _isEditable(),
                   allowedToEdit: _isEditable(),

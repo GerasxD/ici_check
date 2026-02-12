@@ -99,54 +99,125 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   }
 
   Future<void> _loadAllData() async {
+  try {
+    final pList = await _policiesRepo.getPoliciesStream().first;
+    final p = pList.firstWhere((element) => element.id == widget.policyId);
+    final cList = await _clientsRepo.getClientsStream().first;
+    final c = cList.firstWhere((element) => element.id == p.clientId);
+    final devs = await _devicesRepo.getDevicesStream().first;    
+    
+    List<UserModel> allUsers = [];
     try {
-      final pList = await _policiesRepo.getPoliciesStream().first;
-      final p = pList.firstWhere((element) => element.id == widget.policyId);
-      final cList = await _clientsRepo.getClientsStream().first;
-      final c = cList.firstWhere((element) => element.id == p.clientId);
-      final devs = await _devicesRepo.getDevicesStream().first;
-
-      final allUsers = await _usersRepo.getUsersStream().first;
-      final techs = allUsers.where((u) => 
-        u.role == UserRole.TECHNICIAN || 
-        u.role == UserRole.ADMIN || 
-        u.role == UserRole.SUPER_USER
-      ).toList();
-
-      _reportsSub?.cancel(); // Cancelar anterior si existe
-      _reportsSub = FirebaseFirestore.instance
-          .collection('reports')
-          .where('policyId', isEqualTo: widget.policyId)
-          .snapshots() // <--- Esto es lo que permite la actualización automática
-          .listen((snapshot) {
-            if (mounted) {
-              setState(() {
-                _reports = snapshot.docs.map((d) => d.data()).toList();
-              });
-            }
-          });
-
-      if (mounted) {
-        setState(() {
-          _policy = p;
-          _client = c;
-          _deviceDefinitions = devs;
-          _allTechnicians = techs; // <--- Guardamos los técnicos
-          _isLoading = false;
-        });
-      }
+      // ✅ getUsers() con .get() directo — no depende de caché del stream
+      allUsers = await _usersRepo.getUsers();
+      debugPrint("✅ Usuarios cargados directamente: ${allUsers.length}");
     } catch (e) {
-      debugPrint("Error loading scheduler: $e");
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Error al cargar datos: $e"),
-            backgroundColor: Colors.red.shade400,
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+      debugPrint("❌ Error con getUsers(), intentando stream: $e");
+      try {
+        allUsers = await _usersRepo.getUsersStream().first;
+      } catch (e2) {
+        debugPrint("❌ Error también con stream: $e2");
       }
     }
+    
+    // Filtro más flexible - incluir cualquier usuario que NO sea solo lectura
+    final techs = allUsers.where((u) => 
+      u.role == UserRole.TECHNICIAN || 
+      u.role == UserRole.ADMIN || 
+      u.role == UserRole.SUPER_USER
+    ).toList();
+
+    // ✅ DEBUG: Verificar cuántos técnicos se cargaron
+    debugPrint("✅ Técnicos cargados: ${techs.length}");
+    for (var tech in techs) {
+      debugPrint("  - ${tech.name} (${tech.role})");
+    }
+    
+    // ⚠️ ALERTA SI NO SE CARGARON TÉCNICOS
+    if (techs.isEmpty && allUsers.isNotEmpty) {
+      debugPrint("⚠️ Se cargaron ${allUsers.length} usuarios pero NINGUNO es técnico/admin");
+      for (var u in allUsers) {
+        debugPrint("   Usuario: ${u.name} - Rol: ${u.role}");
+      }
+    }
+
+    _reportsSub?.cancel();
+    _reportsSub = FirebaseFirestore.instance
+        .collection('reports')
+        .where('policyId', isEqualTo: widget.policyId)
+        .snapshots()
+        .listen((snapshot) {
+          if (mounted) {
+            setState(() {
+              _reports = snapshot.docs.map((d) => d.data()).toList();
+            });
+          }
+        });
+
+    if (mounted) {
+      setState(() {
+        _policy = p;
+        _client = c;
+        _deviceDefinitions = devs;
+        _allTechnicians = techs;
+        _isLoading = false;
+      });
+    }
+  } catch (e) {
+    debugPrint("❌ Error loading scheduler: $e");
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("Error al cargar datos: $e"),
+          backgroundColor: Colors.red.shade400,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+}
+
+  // ✅ NUEVO MÉTODO: Determinar el estado de una actividad en un reporte
+  String _getActivityStatusForReport(Map<String, dynamic>? report, PolicyDevice devInstance, ActivityConfig activity) {
+    // Paso 1: Si no hay reporte, está vacío
+    if (report == null) return 'empty';
+    
+    // Paso 2: Verificar si el servicio fue iniciado
+    final String? startTime = report['startTime'];
+    final bool serviceInitiated = startTime != null && startTime.isNotEmpty;
+    
+    if (!serviceInitiated) return 'empty';
+    
+    // Paso 3: Verificar entries
+    if (report['entries'] == null || report['entries'] is! List) {
+      return 'partial';
+    }
+    
+    final entries = report['entries'] as List;
+    final entryList = entries.where(
+      (e) => e['instanceId'] == devInstance.instanceId
+    ).toList();
+    
+    if (entryList.isEmpty) return 'partial';
+    
+    // Paso 4: Revisar TODAS las instancias y tomar el mejor estado
+    for (var entry in entryList) {
+      if (entry['results'] != null && entry['results'] is Map) {
+        final results = entry['results'] as Map;
+        
+        if (results.containsKey(activity.id)) {
+          final resValue = results[activity.id];
+          
+          // Si encontramos una respuesta válida (OK, NOK, NA), es COMPLETO
+          if (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA') {
+            return 'full';
+          }
+        }
+      }
+    }
+    
+    // Si llegamos aquí, no hay respuesta válida
+    return 'partial';
   }
 
   double _getFrequencyMonths(Frequency freq) {
@@ -584,50 +655,140 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   }
 
   Future<void> _saveScheduleToFirebase(String dateKey, DateTime serviceDate, List<String> techIds) async {
-    try {
-      final reportsRef = _db.collection('reports');
-      
-      // 1. Verificar si ya existe un reporte para esta póliza y este periodo (dateKey)
-      final qSnapshot = await reportsRef
-          .where('policyId', isEqualTo: _policy.id)
-          .where('dateStr', isEqualTo: dateKey)
-          .limit(1)
-          .get();
+  try {
+    final reportsRef = _db.collection('reports');
+    
+    // Verificar si ya existe
+    final qSnapshot = await reportsRef
+        .where('policyId', isEqualTo: _policy.id)
+        .where('dateStr', isEqualTo: dateKey)
+        .limit(1)
+        .get();
 
-      if (qSnapshot.docs.isNotEmpty) {
-        // --- ACTUALIZAR EXISTENTE ---
-        final docId = qSnapshot.docs.first.id;
-        await reportsRef.doc(docId).update({
-          'serviceDate': Timestamp.fromDate(serviceDate), // Guardar como Timestamp
-          'assignedTechnicianIds': techIds,
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+    if (qSnapshot.docs.isNotEmpty) {
+      // --- ACTUALIZAR EXISTENTE ---
+      final docId = qSnapshot.docs.first.id;
+      await reportsRef.doc(docId).update({
+        'serviceDate': Timestamp.fromDate(serviceDate),
+        'assignedTechnicianIds': techIds,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } else {
+      // --- CREAR NUEVO CON ENTRIES GENERADAS ---
+      
+      // ✅ CALCULAR SI ES SEMANAL Y EL ÍNDICE DE TIEMPO
+      bool isWeekly = dateKey.contains('W');
+      int timeIndex = 0;
+      
+      if (!isWeekly) {
+        // Para mensual: calcular meses desde el inicio
+        try {
+          final parts = dateKey.split('-');
+          if (parts.length == 2) {
+            final reportYear = int.parse(parts[0]);
+            final reportMonth = int.parse(parts[1]);
+            timeIndex = (reportYear - _policy.startDate.year) * 12 + 
+                       (reportMonth - _policy.startDate.month);
+          }
+        } catch (e) {
+          debugPrint('Error parseando dateStr: $e');
+        }
       } else {
-        // --- CREAR NUEVO (Logic from React 'handleSaveSchedule') ---
-        // Aquí deberíamos generar las entradas vacías ('entries') basadas en los dispositivos
-        // pero para simplificar la programación, crearemos el esqueleto básico del reporte.
-        
-        await reportsRef.add({
-          'policyId': _policy.id,
-          'clientId': _policy.clientId, // Útil para búsquedas rápidas
-          'dateStr': dateKey, // "2025-01" o "2025-W01"
-          'serviceDate': Timestamp.fromDate(serviceDate),
-          'assignedTechnicianIds': techIds,
-          'status': 'draft', // Estado inicial
-          'createdAt': FieldValue.serverTimestamp(),
-          // Nota: Las 'entries' se pueden generar aquí o al abrir el reporte por primera vez.
-          // Si quieres replicar React exacto, necesitarías un bucle sobre _policy.devices aquí.
-        });
+        // Para semanal: extraer número de semana
+        try {
+          final weekNum = int.tryParse(dateKey.split('W').last) ?? 1;
+          timeIndex = weekNum - 1;
+        } catch (e) {
+          debugPrint('Error parseando semana: $e');
+        }
       }
-      
-      // Opcional: Enviar notificaciones a los técnicos (como en tu React)
-      // _sendNotifications(techIds, serviceDate);
 
-    } catch (e) {
-      debugPrint("Error guardando programación: $e");
-      throw e; // Re-lanzar para que el botón muestre error si quieres
+      // ✅ GENERAR ENTRIES USANDO LA LÓGICA EXISTENTE DEL REPOSITORIO
+      List<Map<String, dynamic>> generatedEntries = [];
+      
+      for (var devInstance in _policy.devices) {
+        final def = _deviceDefinitions.firstWhere(
+          (d) => d.id == devInstance.definitionId,
+          orElse: () => DeviceModel(
+            id: 'err', 
+            name: 'Unknown', 
+            description: '', 
+            activities: []
+          )
+        );
+
+        if (def.id == 'err') continue;
+
+        for (int i = 1; i <= devInstance.quantity; i++) {
+          Map<String, String?> activityResults = {};
+
+          for (var act in def.activities) {
+            bool isDue = false;
+
+            if (isWeekly) {
+              if (act.frequency == Frequency.SEMANAL) {
+                isDue = true;
+              }
+            } else {
+              if (act.frequency != Frequency.SEMANAL) {
+                double freqMonths = _getFrequencyMonths(act.frequency);
+                int offset = devInstance.scheduleOffsets[act.id] ?? 0;
+                double adjustedTime = timeIndex - offset.toDouble();
+                const double epsilon = 0.05;
+
+                if (adjustedTime >= -epsilon) {
+                  double remainder = (adjustedTime % freqMonths).abs();
+                  if (remainder < epsilon || (remainder - freqMonths).abs() < epsilon) {
+                    isDue = true;
+                  }
+                }
+              }
+            }
+
+            if (isDue) {
+              activityResults[act.id] = null;
+            }
+          }
+
+          // Agregar entrada
+          generatedEntries.add({
+            'instanceId': devInstance.instanceId,
+            'deviceIndex': i,
+            'customId': "${def.name.substring(0, 3).toUpperCase()}-$i",
+            'area': '',
+            'results': activityResults,
+            'observations': '',
+            'photoUrls': [],
+            'activityData': {},
+            'assignedUserId': null,
+          });
+        }
+      }
+
+      // ✅ CREAR REPORTE COMPLETO
+      await reportsRef.add({
+        'policyId': _policy.id,
+        'dateStr': dateKey,
+        'serviceDate': Timestamp.fromDate(serviceDate),
+        'startTime': null, // Sin iniciar aún
+        'endTime': null,
+        'assignedTechnicianIds': techIds,
+        'entries': generatedEntries, // ✅ ESTO ES LO QUE FALTABA
+        'generalObservations': '',
+        'providerSignature': null,
+        'clientSignature': null,
+        'providerSignerName': null,
+        'clientSignerName': null,
+        'sectionAssignments': {},
+        'status': 'draft',
+        'createdAt': FieldValue.serverTimestamp(),
+      });
     }
+  } catch (e) {
+    debugPrint("Error guardando programación: $e");
+    rethrow;
   }
+}
   
   void _handleHeaderReportClick(int index) {
     DateTime columnDate;
@@ -1361,62 +1522,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
               if (active) {
                 final report = _getReportForColumn(tIdx);
                 
-                // ✅ PASO 1: Verificar SI EL SERVICIO FUE INICIADO (tiene startTime)
-                final String? startTime = report?['startTime'];
-                final bool serviceInitiated = startTime != null && startTime.isNotEmpty;
-                
-                // Si el servicio NO fue iniciado, siempre mostrar EMPTY
-                if (!serviceInitiated) {
-                  status = 'empty';
-                } else {
-                  // ✅ PASO 2: El servicio SÍ fue iniciado, verificar respuestas de ESTA actividad específica
-                  if (report != null && report['entries'] != null) {
-                    final entries = report['entries'] as List;
-                    
-                    // Buscar la entrada correspondiente a este dispositivo
-                    final entryList = entries.where(
-                      (e) => e['instanceId'] == devInstance.instanceId
-                    ).toList();
-                    
-                    if (entryList.isNotEmpty) {
-                      final entry = entryList.first;
-                      
-                      // ✅ PASO 3: Verificar si existe el mapa de resultados
-                      if (entry['results'] != null && entry['results'] is Map) {
-                        final results = entry['results'] as Map;
-                        
-                        // ✅ PASO 4: Verificar si esta actividad específica tiene respuesta
-                        if (results.containsKey(activity.id)) {
-                          final resValue = results[activity.id];
-
-                          // ✅ LÓGICA CORREGIDA:
-                          // - Si la respuesta es null o 'NR' → INCOMPLETO (partial)
-                          // - Si la respuesta es OK/NOK/NA → COMPLETO (full)
-                          if (resValue == null || resValue == 'NR') {
-                            status = 'partial'; // Incompleto (sin respuesta o no registrado)
-                          } else if (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA') {
-                            status = 'full'; // Completo (tiene respuesta válida)
-                          } else {
-                            // Cualquier otro valor extraño → Incompleto por seguridad
-                            status = 'partial';
-                          }
-                        } else {
-                          // La actividad no está en el mapa de resultados → Incompleto
-                          status = 'partial';
-                        }
-                      } else {
-                        // Sin mapa de resultados válido → Incompleto
-                        status = 'partial';
-                      }
-                    } else {
-                      // No hay entrada para este dispositivo → Incompleto
-                      status = 'partial';
-                    }
-                  } else {
-                    // Sin entries en el reporte pero servicio iniciado → Incompleto
-                    status = 'partial';
-                  }
-                }
+                // ✅ Usar el nuevo método simplificado
+                status = _getActivityStatusForReport(report, devInstance, activity);
               }
 
               return TableCell(
@@ -1457,25 +1564,44 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     // Configuraciones visuales según el estado
     Color fillColor;
     Widget? internalWidget;
+    double borderWidth;
 
-    if (status == 'full') {
-      // COMPLETO: Relleno sólido del color de la actividad
-      fillColor = color; 
-    } else if (status == 'partial') {
-      // INCOMPLETO (Programado): Fondo blanco con "media luna" o relleno grisáceo
-      fillColor = Colors.white;
-      internalWidget = ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Row(
-          children: [
-            Expanded(child: Container(color: color.withOpacity(0.6))), // Mitad coloreada
-            Expanded(child: Container(color: Colors.transparent)),     // Mitad vacía
-          ],
-        ),
-      );
-    } else {
-      // VACÍO (Proyectado): Solo borde, fondo blanco
-      fillColor = Colors.white;
+    switch (status) {
+      case 'full':
+        // COMPLETO: Relleno sólido del color de la actividad
+        fillColor = color;
+        borderWidth = 0; // Sin borde cuando está completo
+        break;
+        
+      case 'partial':
+        // INCOMPLETO (Programado pero sin respuesta válida): Medio relleno
+        fillColor = Colors.white;
+        borderWidth = 2;
+        internalWidget = ClipOval(
+          child: Container(
+            color: Colors.white,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Container(
+                    color: color.withOpacity(0.5), // Mitad izquierda semi-coloreada
+                  ),
+                ),
+                Expanded(
+                  child: Container(
+                    color: Colors.transparent, // Mitad derecha vacía
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+        break;
+        
+      default:
+        // VACÍO (Proyectado): Solo borde, fondo blanco
+        fillColor = Colors.white;
+        borderWidth = 1.5;
     }
 
     return Container(
@@ -1484,14 +1610,17 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       decoration: BoxDecoration(
         color: fillColor,
         shape: BoxShape.circle,
-        // Si está lleno, no necesitamos borde grueso, si está vacío sí
         border: Border.all(
           color: color, 
-          width: status == 'full' ? 0 : 2
+          width: borderWidth,
         ),
         boxShadow: [
           if (status == 'full') // Sombra más fuerte si está completo
-            BoxShadow(color: color.withOpacity(0.4), blurRadius: 4, offset: const Offset(0, 2))
+            BoxShadow(
+              color: color.withOpacity(0.4), 
+              blurRadius: 4, 
+              offset: const Offset(0, 2),
+            )
         ],
       ),
       child: internalWidget,

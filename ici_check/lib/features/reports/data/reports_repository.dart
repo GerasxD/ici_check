@@ -18,7 +18,12 @@ class ReportsRepository {
         .snapshots()
         .map((snapshot) {
       if (snapshot.docs.isEmpty) return null;
-      return ServiceReportModel.fromMap(snapshot.docs.first.data());
+      
+      // ✅ IMPORTANTE: Agregar el ID del documento
+      final data = snapshot.docs.first.data();
+      data['id'] = snapshot.docs.first.id;
+      
+      return ServiceReportModel.fromMap(data);
     });
   }
 
@@ -29,7 +34,6 @@ class ReportsRepository {
         .set(report.toMap(), SetOptions(merge: true));
   }
 
-  // --- NUEVA FUNCIÓN PÚBLICA (EXTRAÍDA) ---
   List<ReportEntry> generateEntriesForDate(
     PolicyModel policy,
     String dateStr,
@@ -40,7 +44,6 @@ class ReportsRepository {
     List<ReportEntry> entries = [];
     int correctedTimeIndex = timeIndex;
 
-    // Lógica de corrección de fecha
     if (!isWeekly && dateStr.isNotEmpty) {
       try {
         final parts = dateStr.split('-');
@@ -58,9 +61,15 @@ class ReportsRepository {
     }
 
     for (var devInstance in policy.devices) {
-      final def = definitions.firstWhere((d) => d.id == devInstance.definitionId,
-          orElse: () => DeviceModel(
-              id: 'err', name: 'Unknown', description: '', activities: []));
+      final def = definitions.firstWhere(
+        (d) => d.id == devInstance.definitionId,
+        orElse: () => DeviceModel(
+          id: 'err', 
+          name: 'Unknown', 
+          description: '', 
+          activities: []
+        )
+      );
 
       if (def.id == 'err') continue;
 
@@ -79,7 +88,6 @@ class ReportsRepository {
               double freqMonths = _getFrequencyVal(act.frequency);
               int offset = devInstance.scheduleOffsets[act.id] ?? 0;
               
-              // Usamos el índice corregido
               double adjustedTime = correctedTimeIndex - offset.toDouble();
               const double epsilon = 0.05;
 
@@ -97,7 +105,6 @@ class ReportsRepository {
           }
         }
 
-        // Siempre agregamos la entrada (incluso si no tiene actividades, para mantener consistencia)
         entries.add(ReportEntry(
           instanceId: devInstance.instanceId,
           deviceIndex: i,
@@ -109,7 +116,6 @@ class ReportsRepository {
     return entries;
   }
 
-  // Tu función original ahora queda mucho más limpia y reutiliza la lógica de arriba
   ServiceReportModel initializeReport(
     PolicyModel policy,
     String dateStr,
@@ -117,9 +123,9 @@ class ReportsRepository {
     bool isWeekly,
     int timeIndex,
   ) {
-    // LLAMAMOS A LA NUEVA FUNCIÓN
     final entries = generateEntriesForDate(
-        policy, dateStr, definitions, isWeekly, timeIndex);
+      policy, dateStr, definitions, isWeekly, timeIndex
+    );
 
     debugPrint('✅ Reporte inicializado: ${entries.length} entradas para $dateStr');
 
@@ -133,13 +139,23 @@ class ReportsRepository {
     );
   }
 
+  // ✅ ARREGLADO: Agregar CUATRIMESTRAL
   double _getFrequencyVal(Frequency f) {
     switch (f) {
-      case Frequency.MENSUAL: return 1.0;
-      case Frequency.TRIMESTRAL: return 3.0;
-      case Frequency.SEMESTRAL: return 6.0;
-      case Frequency.ANUAL: return 12.0;
-      default: return 1.0;
+      case Frequency.MENSUAL: 
+        return 1.0;
+      case Frequency.TRIMESTRAL: 
+        return 3.0;
+      case Frequency.CUATRIMESTRAL:  // ✅ AGREGADO
+        return 4.0;
+      case Frequency.SEMESTRAL: 
+        return 6.0;
+      case Frequency.ANUAL: 
+        return 12.0;
+      case Frequency.SEMANAL:
+        return 0.25;
+      default: 
+        return 1.0;
     }
   }
 }
