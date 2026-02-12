@@ -7,13 +7,15 @@ import 'package:ici_check/features/devices/presentation/devices_screen.dart';
 import 'package:ici_check/features/policies/presentation/policies_screen.dart';
 import 'package:ici_check/features/settings/presentation/settings_screen.dart';
 import 'package:ici_check/features/users/presentation/users_screen.dart';
-import 'package:ici_check/features/auth/data/models/user_model.dart'; 
+import 'package:ici_check/features/auth/data/models/user_model.dart';
+import 'package:ici_check/features/notifications/presentation/notifications_screen_modal.dart'; 
 
 // --- TEMAS Y COLORES ---
 const Color _primaryDark = Color(0xFF0F172A);
 const Color _accentBlue = Color(0xFF1E40AF);
 const Color _bgGrey = Color(0xFFF1F5F9);
 const Color _textSlate = Color(0xFF64748B);
+const Color _textPrimary = Color(0xFF0F172A);
 
 class MainLayoutScreen extends StatefulWidget {
   const MainLayoutScreen({super.key});
@@ -178,6 +180,17 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                 'ICI-CHECK',
                 style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
               ),
+              actions: [
+                if (currentUser != null)
+                  NotificationBadge(
+                    userId: currentUser!.uid,
+                    child: IconButton(
+                      icon: const Icon(Icons.notifications_outlined, color: Colors.white),
+                      onPressed: () => showNotificationsModal(context),
+                      tooltip: 'Notificaciones',
+                    ),
+                  ),
+              ],
             ),
             drawer: Drawer(
               width: 280,
@@ -373,11 +386,16 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
           ),
           Row(
             children: [
-              const CircleAvatar(
-                radius: 16,
-                backgroundColor: _bgGrey,
-                child: Icon(Icons.person, color: _textSlate, size: 20),
-              ),
+              if (currentUser != null)
+                NotificationBadge(
+                  userId: currentUser!.uid,
+                  child: IconButton(
+                    icon: const Icon(Icons.notifications_outlined, color: _textPrimary),
+                    onPressed: () => showNotificationsModal(context),
+                    tooltip: 'Notificaciones',
+                  ),
+                ),
+              const SizedBox(width: 8),
             ],
           )
         ],

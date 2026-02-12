@@ -562,6 +562,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     return _report!.startTime != null && _report!.endTime == null;
   }
 
+  // ✅ NUEVO: Las firmas siempre pueden ser editadas, incluso después de finalizar
+  bool _canSignReport() {
+    return _report != null;
+  }
+
   bool _isUserCoordinator() {
     if (_currentUser == null) return false;
     return _currentUser!.role == UserRole.SUPER_USER ||
@@ -1115,7 +1120,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   clientName: _report!.clientSignerName,
                   providerSignatureData: _report!.providerSignature,
                   clientSignatureData: _report!.clientSignature,
-                  isEditable: _isEditable(),
+                  isEditable: _canSignReport(),
                   onProviderNameChanged: (val) {
                     final updated = _report!.copyWith(providerSignerName: val);
                     setState(() => _report = updated);
