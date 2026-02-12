@@ -10,6 +10,7 @@ import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:intl/intl.dart';
 import 'dart:convert';
+import 'package:http/http.dart' as http; // <--- AGREGA ESTO
 
 class PdfGeneratorService {
   static Future<Uint8List> generateServiceReport({
@@ -605,30 +606,32 @@ class PdfGeneratorService {
   }
 
   static Future<pw.Widget> _buildListView({
-  required List<ReportEntry> entries,
-  required List<ActivityConfig> activities,
-  required pw.Font font,
-  required pw.Font fontBold,
-}) async {
-    final Map<String, Map<String, pw.Widget>> activityPhotoGalleries = {};
-  
-  for (var entry in entries) {
-    for (var act in activities) {
-      final actData = entry.activityData[act.id];
-      if (actData != null && actData.photoUrls.isNotEmpty) {
-        final key = '${entry.instanceId}_${act.id}';
-        activityPhotoGalleries[key] = {
-          'gallery': await _buildPhotoGallery(actData.photoUrls)
-        };
+    required List<ReportEntry> entries,
+    required List<ActivityConfig> activities,
+    required pw.Font font,
+    required pw.Font fontBold,
+  }) async {
+    
+    // 1. PREPARAR GALERÍAS (Esto ya lo tenías bien, lo dejamos igual)
+    final Map<String, pw.Widget> activityPhotoGalleries = {};
+
+    for (var entry in entries) {
+      for (var act in activities) {
+        final actData = entry.activityData[act.id];
+        if (actData != null && actData.photoUrls.isNotEmpty) {
+          final key = '${entry.instanceId}_${act.id}';
+          // Generamos la galería asíncronamente aquí
+          activityPhotoGalleries[key] = await _buildPhotoGallery(actData.photoUrls);
+        }
       }
     }
-  }
+
     return pw.Wrap(
       spacing: 0,
       runSpacing: 0,
       children: entries.map((entry) {
         return pw.Container(
-          width: 190, // 50% del ancho
+          width: 190,
           decoration: pw.BoxDecoration(
             border: pw.Border.all(color: PdfColors.grey400, width: 0.5),
           ),
@@ -637,10 +640,7 @@ class PdfGeneratorService {
             children: [
               // Header Card
               pw.Container(
-                padding: const pw.EdgeInsets.symmetric(
-                  horizontal: 4,
-                  vertical: 2,
-                ),
+                padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                 color: PdfColors.grey200,
                 child: pw.Row(
                   mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
@@ -652,11 +652,7 @@ class PdfGeneratorService {
                     pw.Expanded(
                       child: pw.Text(
                         entry.area,
-                        style: pw.TextStyle(
-                          font: font,
-                          fontSize: 5,
-                          color: PdfColors.grey600,
-                        ),
+                        style: pw.TextStyle(font: font, fontSize: 5, color: PdfColors.grey600),
                         textAlign: pw.TextAlign.right,
                         overflow: pw.TextOverflow.clip,
                       ),
@@ -671,132 +667,67 @@ class PdfGeneratorService {
                 if (status == null) return pw.SizedBox();
 
                 final actData = entry.activityData[act.id];
-                final actPhotos = actData?.photoUrls ?? [];
                 final actObs = actData?.observations ?? '';
+                
+                // CLAVE: Usamos la clave única para recuperar la galería generada previamente
+                final galleryKey = '${entry.instanceId}_${act.id}';
+                final photoWidget = activityPhotoGalleries[galleryKey]; 
 
                 String statusText = '';
                 PdfColor statusColor = PdfColors.black;
 
                 switch (status) {
-                  case 'OK':
-                    statusText = 'OK';
-                    break;
-                  case 'NOK':
-                    statusText = 'FALLA';
-                    statusColor = PdfColors.red;
-                    break;
-                  case 'NA':
-                    statusText = 'N/A';
-                    statusColor = PdfColors.grey600;
-                    break;
-                  case 'NR':
-                    statusText = 'N/R';
-                    statusColor = PdfColors.orange;
-                    break;
+                  case 'OK': statusText = 'OK'; break;
+                  case 'NOK': statusText = 'FALLA'; statusColor = PdfColors.red; break;
+                  case 'NA': statusText = 'N/A'; statusColor = PdfColors.grey600; break;
+                  case 'NR': statusText = 'N/R'; statusColor = PdfColors.orange; break;
                 }
 
                 return pw.Container(
                   decoration: const pw.BoxDecoration(
-                    border: pw.Border(
-                      bottom: pw.BorderSide(color: PdfColors.grey300),
-                    ),
+                    border: pw.Border(bottom: pw.BorderSide(color: PdfColors.grey300)),
                   ),
                   child: pw.Column(
                     children: [
                       // Nombre y estado
                       pw.Container(
-                        padding: const pw.EdgeInsets.symmetric(
-                          horizontal: 4,
-                          vertical: 2,
-                        ),
+                        padding: const pw.EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                         color: PdfColors.grey50,
                         child: pw.Row(
                           mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                           children: [
                             pw.Row(
                               children: [
-                                pw.Text(
-                                  act.name,
-                                  style: pw.TextStyle(
-                                    font: fontBold,
-                                    fontSize: 5,
-                                  ),
-                                ),
+                                pw.Text(act.name, style: pw.TextStyle(font: fontBold, fontSize: 5)),
                                 pw.SizedBox(width: 3),
                                 pw.Container(
-                                  padding: const pw.EdgeInsets.symmetric(
-                                    horizontal: 2,
-                                    vertical: 1,
-                                  ),
+                                  padding: const pw.EdgeInsets.symmetric(horizontal: 2, vertical: 1),
                                   decoration: pw.BoxDecoration(
-                                    border: pw.Border.all(
-                                      color: PdfColors.grey400,
-                                    ),
+                                    border: pw.Border.all(color: PdfColors.grey400),
                                     borderRadius: pw.BorderRadius.circular(2),
                                   ),
                                   child: pw.Text(
                                     act.frequency.toString().split('.').last,
-                                    style: pw.TextStyle(
-                                      font: font,
-                                      fontSize: 4,
-                                      color: PdfColors.grey600,
-                                    ),
+                                    style: pw.TextStyle(font: font, fontSize: 4, color: PdfColors.grey600),
                                   ),
                                 ),
                               ],
                             ),
-                            pw.Text(
-                              statusText,
-                              style: pw.TextStyle(
-                                font: fontBold,
-                                fontSize: 6,
-                                color: statusColor,
-                              ),
-                            ),
+                            pw.Text(statusText, style: pw.TextStyle(font: fontBold, fontSize: 6, color: statusColor)),
                           ],
                         ),
                       ),
 
-                      // Fotos y observaciones (si hay)
-                      if (actPhotos.isNotEmpty || actObs.isNotEmpty)
+                      // Fotos y observaciones
+                      if (photoWidget != null || actObs.isNotEmpty) // Verificamos si hay widget de foto
                         pw.Padding(
                           padding: const pw.EdgeInsets.all(2),
                           child: pw.Row(
                             crossAxisAlignment: pw.CrossAxisAlignment.start,
                             children: [
-                              // Fotos
+                              // ✅ FOTOS CORREGIDAS: Usamos el widget pre-generado
                               pw.Expanded(
-                                child: actPhotos.isNotEmpty
-                                    ? pw.Wrap(
-                                        spacing: 2,
-                                        runSpacing: 2,
-                                        children: actPhotos.take(2).map((
-                                          photo,
-                                        ) {
-                                          try {
-                                            return pw.Container(
-                                              height: 25,
-                                              width: 35,
-                                              child: pw.Image(
-                                                pw.MemoryImage(
-                                                  base64Decode(photo),
-                                                ),
-                                                fit: pw.BoxFit.cover,
-                                              ),
-                                            );
-                                          } catch (e) {
-                                            return pw.SizedBox();
-                                          }
-                                        }).toList(),
-                                      )
-                                    : pw.Text(
-                                        'Sin fotos',
-                                        style: pw.TextStyle(
-                                          font: font,
-                                          fontSize: 5,
-                                          color: PdfColors.grey400,
-                                        ),
-                                      ),
+                                child: photoWidget ?? pw.Text('Sin fotos', style: pw.TextStyle(font: font, fontSize: 5, color: PdfColors.grey400)),
                               ),
 
                               // Observaciones
@@ -804,22 +735,11 @@ class PdfGeneratorService {
                                 child: actObs.isNotEmpty
                                     ? pw.Text(
                                         actObs,
-                                        style: pw.TextStyle(
-                                          font: font,
-                                          fontSize: 5,
-                                          fontStyle: pw.FontStyle.italic,
-                                        ),
+                                        style: pw.TextStyle(font: font, fontSize: 5, fontStyle: pw.FontStyle.italic),
                                         maxLines: 3,
                                         overflow: pw.TextOverflow.clip,
                                       )
-                                    : pw.Text(
-                                        'Sin obs.',
-                                        style: pw.TextStyle(
-                                          font: font,
-                                          fontSize: 5,
-                                          color: PdfColors.grey400,
-                                        ),
-                                      ),
+                                    : pw.Text('Sin obs.', style: pw.TextStyle(font: font, fontSize: 5, color: PdfColors.grey400)),
                               ),
                             ],
                           ),
@@ -1145,24 +1065,26 @@ class PdfGeneratorService {
 
   // Nuevo Helper para mostrar minigalería de fotos
   // ==================== NUEVO HELPER PARA DESCARGAR FOTOS ====================
-static Future<pw.MemoryImage?> _downloadPhoto(String photoUrl) async {
-  try {
-    if (photoUrl.startsWith('http')) {
-      // Es una URL de Firebase - descargar desde la red
-      return await networkImage(photoUrl) as pw.MemoryImage?;
-    } else if (photoUrl.contains('base64,')) {
-      // Es un data URI base64
-      final base64String = photoUrl.split('base64,').last;
-      return pw.MemoryImage(base64Decode(base64String));
-    } else {
-      // Es base64 puro
-      return pw.MemoryImage(base64Decode(photoUrl));
+  static Future<pw.ImageProvider?> _downloadPhoto(String photoUrl) async {
+    try {
+      if (photoUrl.startsWith('http')) {
+        // Opción A: Descargar bytes manualmente (Más seguro y robusto)
+        final response = await http.get(Uri.parse(photoUrl));
+        if (response.statusCode == 200) {
+          return pw.MemoryImage(response.bodyBytes);
+        }
+        return null;
+      } else if (photoUrl.contains('base64,')) {
+        final base64String = photoUrl.split('base64,').last;
+        return pw.MemoryImage(base64Decode(base64String));
+      } else {
+        return pw.MemoryImage(base64Decode(photoUrl));
+      }
+    } catch (e) {
+      print('❌ Error descargando foto: $e');
+      return null;
     }
-  } catch (e) {
-    print('❌ Error descargando foto: $e');
-    return null;
   }
-}
 
   static Future<pw.Widget> _buildPhotoGallery(List<String> photos) async {
     if (photos.isEmpty) return pw.SizedBox();
@@ -1172,7 +1094,7 @@ static Future<pw.MemoryImage?> _downloadPhoto(String photoUrl) async {
     
     for (final photoUrl in photos) {
       final image = await _downloadPhoto(photoUrl);
-      downloadedPhotos.add(image);
+      downloadedPhotos.add(image as pw.MemoryImage?);
     }
 
     return pw.Container(

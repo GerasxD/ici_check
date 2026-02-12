@@ -911,6 +911,142 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     }
   }
 
+  // ✅ NUEVO: Bottom sheet de acciones para tablet/mobile
+  void _showColumnActionsBottomSheet(BuildContext context, int index) {
+    // Calcular label de la columna para mostrarlo en el título
+    DateTime date;
+    if (_viewMode == 'monthly') {
+      date = DateTime(
+        _policy.startDate.year,
+        _policy.startDate.month + index,
+        _policy.startDate.day,
+      );
+    } else {
+      date = _policy.startDate.add(Duration(days: index * 7));
+    }
+
+    String label = _viewMode == 'monthly'
+        ? DateFormat('MMMM yyyy', 'es').format(date).toUpperCase()
+        : "Semana ${index + 1} · ${DateFormat('dd MMM', 'es').format(date)}";
+
+    final report = _getReportForColumn(index);
+    final bool hasReport = report != null;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+            top: 8,
+            left: 20,
+            right: 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle bar
+              Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 20),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              // Título
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: _primaryBlue.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Icon(Icons.calendar_month, color: _primaryBlue, size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          label,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w800,
+                            color: _textPrimary,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                        Text(
+                          "Selecciona una acción",
+                          style: TextStyle(fontSize: 12, color: _textSecondary),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              const Divider(height: 1),
+              const SizedBox(height: 16),
+              // Acción 1: Programar
+              _BottomSheetAction(
+                icon: Icons.calendar_today_rounded,
+                color: const Color(0xFF3B82F6),
+                title: "Programar Servicio",
+                subtitle: "Asignar fecha y técnicos para este periodo",
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _handleHeaderCalendarClick(index);
+                },
+              ),
+              const SizedBox(height: 12),
+              // Acción 2: Ver Reporte
+              _BottomSheetAction(
+                icon: Icons.assignment_outlined,
+                color: hasReport ? const Color(0xFF8B5CF6) : const Color(0xFF94A3B8),
+                title: "Ver / Llenar Reporte",
+                subtitle: hasReport
+                    ? "Reporte disponible · Toca para abrir"
+                    : "Sin reporte aún · Se creará al abrir",
+                badge: hasReport ? "ACTIVO" : null,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _handleHeaderReportClick(index);
+                },
+              ),
+              const SizedBox(height: 12),
+              // Acción 3: Descargar PDF
+              _BottomSheetAction(
+                icon: Icons.picture_as_pdf_rounded,
+                color: const Color(0xFF10B981),
+                title: "Descargar PDF",
+                subtitle: hasReport
+                    ? "Generar reporte en PDF"
+                    : "Requiere reporte completado",
+                onTap: hasReport
+                    ? () {
+                        Navigator.pop(ctx);
+                        _handleHeaderDownloadClick(index);
+                      }
+                    : null, // Deshabilitado si no hay reporte
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -1375,33 +1511,79 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
               ),
             ),
             const SizedBox(height: 6),
-            
-            // BOTONES DE ACCIÓN (Se mantienen igual)
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _HeaderActionButton(
-                  icon: Icons.calendar_today,
-                  color: const Color(0xFF60A5FA),
-                  onTap: () => _handleHeaderCalendarClick(index),
-                  tooltip: "Programar",
-                ),
-                const SizedBox(width: 4),
-                _HeaderActionButton(
-                  icon: Icons.assignment_outlined,
-                  color: const Color(0xFF94A3B8),
-                  onTap: () => _handleHeaderReportClick(index),
-                  tooltip: "Ver Reporte",
-                ),
-                const SizedBox(width: 4),
-                _HeaderActionButton(
-                  icon: Icons.download_rounded,
-                  color: const Color(0xFF4ADE80),
-                  onTap: () => _handleHeaderDownloadClick(index),
-                  tooltip: "Descargar PDF",
-                ),
-              ],
-            )
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final screenWidth = MediaQuery.of(context).size.width;
+                final isMobileOrTablet = screenWidth <= 700;
+
+                if (isMobileOrTablet) {
+                  // 📱 MÓVIL/TABLET: Un solo botón grande que abre el bottom sheet
+                  return GestureDetector(
+                    onTap: () => _showColumnActionsBottomSheet(context, index),
+                    child: Container(
+                      margin: const EdgeInsets.only(top: 2),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.3),
+                          width: 1,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.touch_app_rounded,
+                            size: 12,
+                            color: Colors.white.withOpacity(0.9),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            "ACCIONES",
+                            style: TextStyle(
+                              fontSize: 9,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white.withOpacity(0.9),
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
+
+                // 🖥️ DESKTOP: Los 3 botones originales
+                return Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _HeaderActionButton(
+                      icon: Icons.calendar_today,
+                      color: const Color(0xFF60A5FA),
+                      onTap: () => _handleHeaderCalendarClick(index),
+                      tooltip: "Programar",
+                    ),
+                    const SizedBox(width: 4),
+                    _HeaderActionButton(
+                      icon: Icons.assignment_outlined,
+                      color: const Color(0xFF94A3B8),
+                      onTap: () => _handleHeaderReportClick(index),
+                      tooltip: "Ver Reporte",
+                    ),
+                    const SizedBox(width: 4),
+                    _HeaderActionButton(
+                      icon: Icons.download_rounded,
+                      color: const Color(0xFF4ADE80),
+                      onTap: () => _handleHeaderDownloadClick(index),
+                      tooltip: "Descargar PDF",
+                    ),
+                  ],
+                );
+              },
+            ),
           ],
         ),
       ),
@@ -1812,6 +1994,115 @@ class _LegendItem extends StatelessWidget {
           const SizedBox(width: 6),
           Text(text, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: color)),
         ],
+      ),
+    );
+  }
+}
+
+class _BottomSheetAction extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String subtitle;
+  final VoidCallback? onTap;
+  final String? badge;
+
+  const _BottomSheetAction({
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.subtitle,
+    this.onTap,
+    this.badge,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isDisabled = onTap == null;
+
+    return Opacity(
+      opacity: isDisabled ? 0.45 : 1.0,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: isDisabled ? Colors.grey.shade50 : color.withOpacity(0.06),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isDisabled ? Colors.grey.shade200 : color.withOpacity(0.25),
+              width: 1.5,
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, color: color, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          title,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w700,
+                            color: isDisabled
+                                ? Colors.grey.shade500
+                                : const Color(0xFF0F172A),
+                          ),
+                        ),
+                        if (badge != null) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: color,
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              badge!,
+                              style: const TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: isDisabled ? Colors.grey.shade300 : color.withOpacity(0.6),
+                size: 20,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

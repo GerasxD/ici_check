@@ -12,8 +12,8 @@ class PolicyDevice {
     required this.instanceId,
     required this.definitionId,
     required this.quantity,
-    this.scheduleOffsets = const {}, // Inicializamos vacío
-  });
+    Map<String, int>? scheduleOffsets,
+  }) : scheduleOffsets = scheduleOffsets ?? {};
 
   Map<String, dynamic> toMap() => {
     'instanceId': instanceId,

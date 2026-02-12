@@ -504,6 +504,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
           instanceId: _uuid.v4(),
           definitionId: _selectedDeviceDefId!,
           quantity: 1,
+          scheduleOffsets: {}, // ✅ Mapa mutable explícito
         ),
       );
       _selectedDeviceDefId = null;

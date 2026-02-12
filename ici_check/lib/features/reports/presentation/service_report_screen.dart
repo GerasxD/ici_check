@@ -500,13 +500,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   void _toggleSectionAssignment(String defId, String userId) {
     if (_report == null) return;
 
-    // ✅ PASO 1: Obtener la lista actual de asignados a este dispositivo
+    // PASO 1: Obtener asignaciones actuales del dispositivo
     final currentAssignments = List<String>.from(_report!.sectionAssignments[defId] ?? []);
     
     debugPrint("📋 ANTES: Dispositivo $defId tiene asignados: $currentAssignments");
     debugPrint("   Intentando toggle de usuario: $userId");
 
-    // ✅ PASO 2: Agregar o quitar el usuario
+    // PASO 2: Agregar o quitar el usuario
     if (currentAssignments.contains(userId)) {
       currentAssignments.remove(userId);
       debugPrint("   ✂️ REMOVIENDO: Técnico $userId eliminado");
@@ -517,13 +517,15 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
     debugPrint("📋 DESPUÉS: Dispositivo $defId ahora tiene: $currentAssignments");
 
-    // ✅ PASO 3: Actualizar el mapa completo de sectionAssignments
-    // IMPORTANTE: Hacer una copia profunda para no afectar el estado anterior
+    // PASO 3: Actualizar mapa de asignaciones por dispositivo
     final newSectionAssignments = Map<String, List<String>>.from(_report!.sectionAssignments);
     newSectionAssignments[defId] = List<String>.from(currentAssignments);
 
-    // ✅ PASO 4: Recalcular el list global de todos los técnicos asignados
-    final Set<String> allAssignedTechs = {};
+    // ✅ PASO 4 CORREGIDO: Preservar técnicos globales existentes
+    // Primero tomamos TODOS los técnicos que ya estaban asignados globalmente
+    final Set<String> allAssignedTechs = Set<String>.from(_report!.assignedTechnicianIds);
+    
+    // Luego agregamos los técnicos de dispositivos específicos
     newSectionAssignments.forEach((defId, techIds) {
       debugPrint("   Device $defId → Tecnicos: $techIds");
       allAssignedTechs.addAll(techIds);
@@ -531,18 +533,16 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
     debugPrint("✅ TÉCNICOS GLOBALES FINALES: $allAssignedTechs");
 
-    // ✅ PASO 5: Crear el reporte actualizado
+    // PASO 5: Crear reporte actualizado
     final updatedReport = _report!.copyWith(
       sectionAssignments: newSectionAssignments,
       assignedTechnicianIds: allAssignedTechs.toList(),
     );
     
-    // ✅ PASO 6: Actualizar el estado local
-    setState(() {
-      _report = updatedReport;
-    });
+    // PASO 6: Actualizar estado
+    setState(() => _report = updatedReport);
 
-    // ✅ PASO 7: Guardar en Firebase
+    // PASO 7: Guardar en Firebase
     debugPrint("💾 Guardando reporte con asignaciones actualizadas...");
     _repo.saveReport(_report!);
   }
@@ -686,13 +686,49 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     });
 
     if (existingPhotos.isEmpty) {
-      _pickImage();
+      _showImageSourceSelection(); 
     }
   }
 
-  Future<void> _pickImage() async {
-    if (_isUploadingPhoto) return;
+  // --- NUEVA LÓGICA DE SELECCIÓN DE FOTOS ---
 
+  // 1. Mostrar menú para elegir entre Cámara o Galería
+  void _showImageSourceSelection() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (BuildContext ctx) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt, color: Color(0xFF3B82F6)),
+                title: const Text('Tomar Foto'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickFromCamera();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library, color: Color(0xFF3B82F6)),
+                title: const Text('Seleccionar de Galería (Múltiple)'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickFromGallery();
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  // 2. Lógica para la Cámara (Una sola foto + Guardar en Galería con GAL)
+  Future<void> _pickFromCamera() async {
     try {
       final XFile? image = await _picker.pickImage(
         source: ImageSource.camera,
@@ -700,32 +736,62 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         imageQuality: 85,
       );
 
-      if (image != null && _photoContextEntryIdx != null && _report != null) {
+      if (image != null) {
+        // Solo guardamos en galería si viene de la cámara
         try {
-          // Verifica permisos primero (gal lo hace automático, pero es buena práctica)
-          // Guarda la imagen en la galería
           await Gal.putImage(image.path, album: "ICI Check");
-          debugPrint("✅ Foto guardada en la galería con Gal");
         } catch (e) {
-          debugPrint("⚠️ Error guardando en galería: $e");
-          // Si es un error de permisos, Gal lanza una excepción específica
-          if (e is GalException && e.type == GalExceptionType.accessDenied) {
-             debugPrint("El usuario denegó el acceso a las fotos");
-          }
+          debugPrint("⚠️ Error guardando en galería local: $e");
         }
-        setState(() => _isUploadingPhoto = true);
+        // Procesamos como una lista de 1 elemento
+        await _processAndUploadImages([image]);
+      }
+    } catch (e) {
+      debugPrint('Error en cámara: $e');
+    }
+  }
 
+  // 3. Lógica para la Galería (Múltiples fotos)
+  Future<void> _pickFromGallery() async {
+    try {
+      final List<XFile> images = await _picker.pickMultiImage(
+        maxWidth: 1200,
+        imageQuality: 85,
+      );
+
+      if (images.isNotEmpty) {
+        await _processAndUploadImages(images);
+      }
+    } catch (e) {
+      debugPrint('Error en galería: $e');
+    }
+  }
+
+  // 4. Lógica unificada de subida (Procesa una lista de imágenes)
+  Future<void> _processAndUploadImages(List<XFile> images) async {
+    if (_isUploadingPhoto || _photoContextEntryIdx == null || _report == null) return;
+
+    setState(() => _isUploadingPhoto = true);
+    int successCount = 0;
+
+    try {
+      // Iteramos sobre todas las imágenes seleccionadas
+      for (int i = 0; i < images.length; i++) {
+        final image = images[i];
+        
+        // Actualizar SnackBar para mostrar progreso
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Row(
               children: [
-                SizedBox(width: 20, height: 20, 
+                const SizedBox(width: 20, height: 20, 
                   child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
-                SizedBox(width: 12),
-                Text('Subiendo foto...'),
+                const SizedBox(width: 12),
+                Text('Subiendo ${i + 1} de ${images.length}...'),
               ],
             ),
-            duration: Duration(minutes: 1),
+            duration: const Duration(seconds: 10), // Duración larga para que no se oculte
           ),
         );
 
@@ -733,7 +799,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         final entryIdx = _photoContextEntryIdx!;
         final activityId = _photoContextActivityId;
 
-        // ✅ Subir a Firebase Storage
+        // Subir a Firebase Storage
         final photoUrl = await _photoService.uploadPhoto(
           photoBytes: bytes,
           reportId: '${widget.policyId}_${widget.dateStr}',
@@ -741,12 +807,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           activityId: activityId,
         );
 
+        // Actualizar el estado local con la nueva URL
         final entry = _report!.entries[entryIdx];
-
         if (activityId != null) {
           final currentData = entry.activityData[activityId] ?? 
               ActivityData(photoUrls: [], observations: '');
           final newPhotoUrls = [...currentData.photoUrls, photoUrl];
+          
           final newActivityData = Map<String, ActivityData>.from(entry.activityData);
           newActivityData[activityId] = ActivityData(
             photoUrls: newPhotoUrls,
@@ -757,32 +824,32 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           final newPhotoUrls = [...entry.photoUrls, photoUrl];
           _updateEntry(entryIdx, photoUrls: newPhotoUrls);
         }
-
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Row(
-              children: [
-                Icon(Icons.check_circle, color: Colors.white),
-                SizedBox(width: 12),
-                Text('Foto subida'),
-              ],
-            ),
-            backgroundColor: Colors.green,
-            duration: Duration(seconds: 2),
-          ),
-        );
+        successCount++;
       }
-    } catch (e) {
+
+      // Éxito Final
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: Colors.red,
+          content: Row(
+            children: [
+              const Icon(Icons.check_circle, color: Colors.white),
+              const SizedBox(width: 12),
+              Text(successCount == 1 ? 'Foto subida' : '$successCount fotos subidas'),
+            ],
+          ),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 2),
         ),
       );
+
+    } catch (e) {
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+      );
     } finally {
-      setState(() => _isUploadingPhoto = false);
+      if (mounted) setState(() => _isUploadingPhoto = false);
     }
   }
 
@@ -1667,10 +1734,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
               child: SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
-                  onPressed: _pickImage,
+                  onPressed: _showImageSourceSelection, // <--- CAMBIO AQUÍ (antes era _pickImage)
                   icon: const Icon(Icons.add_a_photo, size: 20),
                   label: const Text(
-                    'Tomar Primera Foto',
+                    'Agregar Fotos', // <--- CAMBIAR TEXTO (para que sea genérico)
                     style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
                   ),
                   style: ElevatedButton.styleFrom(
@@ -1730,7 +1797,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   Widget _buildAddPhotoButton() {
     return InkWell(
-      onTap: _pickImage,
+      onTap: _showImageSourceSelection,
       borderRadius: BorderRadius.circular(12),
       child: Container(
         decoration: BoxDecoration(
