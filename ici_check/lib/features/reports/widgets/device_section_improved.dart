@@ -602,93 +602,97 @@ class DeviceSectionImproved extends StatelessWidget {
     );
   }
 
-  Widget _buildTableViewOptimized(BuildContext context, List<ActivityConfig> activities) {
-    // Ajustamos el ancho total para dar un poco más de aire si es necesario
-    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0; // +10px extra al final
+ Widget _buildTableViewOptimized(BuildContext context, List<ActivityConfig> activities) {
+    // 1. Creamos un controlador local para vincular la barra con la vista
+    final ScrollController horizontalScrollController = ScrollController(); // <--- IMPORTANTE
 
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: SizedBox(
-        width: totalWidth,
-        child: Column(
-          children: [
-            // ... (El Container del Header se queda igual) ...
-            Container(
-              height: 48,
-              color: const Color(0xFFF1F5F9),
-              child: Row(
-                children: [
-                  _buildHeaderCell('ID', 80),
-                  _buildHeaderCell('UBICACIÓN', 150),
-                  ...activities.map((act) => _buildHeaderCell(act.name, 100)),
-                  _buildHeaderCell('FOTO/OBS', 110), // Aumentamos un poco el ancho aquí
-                ],
+    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0; 
+
+    return Scrollbar(
+      controller: horizontalScrollController, // <--- ASIGNAR AQUÍ
+      thumbVisibility: true,
+      trackVisibility: true,
+      child: SingleChildScrollView(
+        controller: horizontalScrollController, // <--- Y ASIGNAR EL MISMO AQUÍ
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.only(bottom: 12),
+        child: SizedBox(
+          width: totalWidth,
+          child: Column(
+            children: [
+              // Header (sin cambios)
+              Container(
+                height: 48,
+                color: const Color(0xFFF1F5F9),
+                child: Row(
+                  children: [
+                    _buildHeaderCell('ID', 80),
+                    _buildHeaderCell('UBICACIÓN', 150),
+                    ...activities.map((act) => _buildHeaderCell(act.name, 100)),
+                    _buildHeaderCell('FOTO/OBS', 110),
+                  ],
+                ),
               ),
-            ),
 
-            ListView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: entries.length,
-              itemBuilder: (context, index) {
-                final entry = entries[index];
-                return Container(
-                  height: 52,
-                  decoration: const BoxDecoration(
-                    border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
-                  ),
-                  child: Row(
-                    children: [
-                      SizedBox(width: 80, child: Center(child: _buildInputCell(index, entry.customId, 'id', 60, onCustomIdChanged))),
-                      SizedBox(width: 150, child: Center(child: _buildInputCell(index, entry.area, 'area', 130, onAreaChanged, hint: '...'))),
-                      
-                      // Celdas de estado (OK/NOK)
-                      ...activities.map((act) {
-                        if (!entry.results.containsKey(act.id)) return const SizedBox(width: 100);
-                        return SizedBox(
-                          width: 100,
-                          child: Center(
-                            child: InkWell(
-                              onTap: _canEdit ? () => onToggleStatus(index, act.id) : null,
-                              borderRadius: BorderRadius.circular(12),
-                              child: _buildStatusBadge(entry.results[act.id]),
+              // Lista (sin cambios)
+              ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: entries.length,
+                itemBuilder: (context, index) {
+                  final entry = entries[index];
+                  return Container(
+                    height: 52,
+                    decoration: const BoxDecoration(
+                      border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
+                    ),
+                    child: Row(
+                      children: [
+                        SizedBox(width: 80, child: Center(child: _buildInputCell(index, entry.customId, 'id', 60, onCustomIdChanged))),
+                        SizedBox(width: 150, child: Center(child: _buildInputCell(index, entry.area, 'area', 130, onAreaChanged, hint: '...'))),
+                        
+                        ...activities.map((act) {
+                          if (!entry.results.containsKey(act.id)) return const SizedBox(width: 100);
+                          return SizedBox(
+                            width: 100,
+                            child: Center(
+                              child: InkWell(
+                                onTap: _canEdit ? () => onToggleStatus(index, act.id) : null,
+                                borderRadius: BorderRadius.circular(12),
+                                child: _buildStatusBadge(entry.results[act.id]),
+                              ),
                             ),
+                          );
+                        }),
+
+                        SizedBox(
+                          width: 110,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              _buildCompactActionIcon(
+                                icon: entry.photoUrls.isNotEmpty ? Icons.camera_alt : Icons.camera_alt_outlined,
+                                isActive: entry.photoUrls.isNotEmpty,
+                                activeColor: const Color(0xFF3B82F6),
+                                onTap: _canEdit ? () => onCameraClick(index) : null,
+                              ),
+                              const SizedBox(width: 8),
+                              _buildCompactActionIcon(
+                                icon: entry.observations.isNotEmpty ? Icons.comment : Icons.comment_outlined,
+                                isActive: entry.observations.isNotEmpty,
+                                activeColor: const Color(0xFFF59E0B),
+                                onTap: _canEdit ? () => onObservationClick(index) : null,
+                              ),
+                            ],
                           ),
-                        );
-                      }),
-
-                      // --- AQUÍ ESTÁ LA CORRECCIÓN DEL OVERFLOW ---
-                      SizedBox(
-                        width: 110, // Un poco más de espacio
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            // Usamos el widget compacto en lugar de IconButton
-                            _buildCompactActionIcon(
-                              icon: entry.photoUrls.isNotEmpty ? Icons.camera_alt : Icons.camera_alt_outlined,
-                              isActive: entry.photoUrls.isNotEmpty,
-                              activeColor: const Color(0xFF3B82F6),
-                              onTap: _canEdit ? () => onCameraClick(index) : null,
-                            ),
-                            
-                            const SizedBox(width: 8), // Reducimos espacio de 12 a 8
-                            
-                            // Icono de Observaciones
-                            _buildCompactActionIcon(
-                              icon: entry.observations.isNotEmpty ? Icons.comment : Icons.comment_outlined,
-                              isActive: entry.observations.isNotEmpty,
-                              activeColor: const Color(0xFFF59E0B), // Color ámbar para resaltar si hay obs
-                              onTap: _canEdit ? () => onObservationClick(index) : null,
-                            ),
-                          ],
                         ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-          ],
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
         ),
       ),
     );

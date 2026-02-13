@@ -199,7 +199,6 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     // Paso 2: Verificar si el servicio fue iniciado
     final String? startTime = report['startTime'];
     final bool serviceInitiated = startTime != null && startTime.isNotEmpty;
-
     if (!serviceInitiated) return 'empty';
 
     // Paso 3: Verificar entries
@@ -208,30 +207,48 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     }
 
     final entries = report['entries'] as List;
+
+    // Filtrar TODAS las entradas que corresponden a este tipo de dispositivo
     final entryList = entries
         .where((e) => e['instanceId'] == devInstance.instanceId)
         .toList();
 
     if (entryList.isEmpty) return 'partial';
 
-    // Paso 4: Revisar TODAS las instancias y tomar el mejor estado
+    // ✅ FIX: Contadores para el estado REAL
+    int totalWithActivity = 0;
+    int answeredCount = 0;
+
     for (var entry in entryList) {
-      if (entry['results'] != null && entry['results'] is Map) {
-        final results = entry['results'] as Map;
+      if (entry['results'] == null || entry['results'] is! Map) continue;
 
-        if (results.containsKey(activity.id)) {
-          final resValue = results[activity.id];
+      final results = entry['results'] as Map;
 
-          // Si encontramos una respuesta válida (OK, NOK, NA), es COMPLETO
-          if (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA') {
-            return 'full';
-          }
-        }
+      // Solo contar si esta actividad existe en los results de esta entrada
+      if (!results.containsKey(activity.id)) continue;
+
+      totalWithActivity++;
+
+      final resValue = results[activity.id];
+
+      // Verificación estricta: null y 'NR' NO son respuestas válidas
+      if (resValue != null &&
+          resValue != 'NR' &&
+          (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA')) {
+        answeredCount++;
       }
     }
 
-    // Si llegamos aquí, no hay respuesta válida
-    return 'partial';
+    // Paso 4: Estado basado en contadores
+    if (totalWithActivity == 0) return 'partial';
+
+    if (answeredCount == 0) {
+      return 'partial';                          // Ninguna respondida
+    } else if (answeredCount == totalWithActivity) {
+      return 'full';                             // ✅ TODAS respondidas → completo
+    } else {
+      return 'partial';                          // Algunas respondidas → incompleto
+    }
   }
 
   double _getFrequencyMonths(Frequency freq) {
