@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -28,12 +29,35 @@ class _DevicesScreenState extends State<DevicesScreen> {
   bool _isEditing = false;
   bool _isLoading = false;
   String _searchQuery = ''; // Nuevo: Para el buscador
+  final ScrollController _listScrollCtrl = ScrollController();
+  List<DeviceModel> _allDevices = [];          // ✅ Estado local de la lista
+  StreamSubscription? _devicesSubscription;    // ✅ Suscripción manual al stream
 
   // Paleta de Colores Profesional
   final Color _primaryDark = const Color(0xFF0F172A);
   final Color _accentBlue = const Color(0xFF2563EB);
   final Color _bgLight = const Color(0xFFF8FAFC);
   final Color _textSlate = const Color(0xFF64748B);
+
+  @override
+  void initState() {
+    super.initState();
+    // ✅ Suscribirse al stream solo una vez — el scroll nunca se reinicia
+    _devicesSubscription = _repo.getDevicesStream().listen((devices) {
+      if (mounted) {
+        setState(() {
+          _allDevices = devices;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _devicesSubscription?.cancel();   // ✅ AGREGA
+    _listScrollCtrl.dispose();
+    super.dispose();
+  }
 
   // --- ACCIONES ---
   void _handleCreate() {
@@ -55,6 +79,31 @@ class _DevicesScreenState extends State<DevicesScreen> {
         )).toList(),
       );
       _isEditing = true;
+    });
+    // ✅ Hacer scroll para que el dispositivo seleccionado sea visible
+    // Se ejecuta después del frame para que el ListView ya tenga los items renderizados
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_listScrollCtrl.hasClients) {
+        final devices = _filterDevices(_allDevices);
+        final idx = devices.indexWhere((d) => d.id == device.id);
+        if (idx >= 0) {
+          // Cada card tiene ~88px de altura aprox (padding 16 + contenido ~60 + margin 12)
+          const double itemHeight = 100.0;
+          final double targetOffset = idx * itemHeight;
+          final double viewportHeight = _listScrollCtrl.position.viewportDimension;
+          final double maxScroll = _listScrollCtrl.position.maxScrollExtent;
+
+          // Centramos el item en la pantalla
+          double scrollTo = targetOffset - (viewportHeight / 2) + (itemHeight / 2);
+          scrollTo = scrollTo.clamp(0.0, maxScroll);
+
+          _listScrollCtrl.animateTo(
+            scrollTo,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+          );
+        }
+      }
     });
   }
 
@@ -212,35 +261,66 @@ class _DevicesScreenState extends State<DevicesScreen> {
         int opCount = 0;
 
         for (var dev in importedMap.values) {
-          DocumentReference docRef;
-          
-          // Nombre del dispositivo del Excel normalizado para comparar
-          String excelNameKey = dev.name.trim().toLowerCase();
+        DocumentReference docRef;
+        
+        String excelNameKey = dev.name.trim().toLowerCase();
 
-          // 5. Verificamos: ¿Ya existe este nombre en Firebase?
-          if (existingDevicesMap.containsKey(excelNameKey)) {
-            // SI EXISTE: Usamos el ID viejo para ACTUALIZAR
-            String existingId = existingDevicesMap[excelNameKey]!;
-            docRef = collection.doc(existingId);
-            dev.id = existingId; // Actualizamos el ID del objeto local para que coincida
-          } else {
-            // NO EXISTE: Creamos un ID nuevo (Documento nuevo)
-            docRef = collection.doc();
-            dev.id = docRef.id; 
+        if (existingDevicesMap.containsKey(excelNameKey)) {
+          // SI EXISTE: Usar el ID viejo para ACTUALIZAR
+          String existingId = existingDevicesMap[excelNameKey]!;
+          docRef = collection.doc(existingId);
+          dev.id = existingId;
+
+          // ✅ FIX: Recuperar las actividades existentes para preservar sus IDs
+          // Esto evita que el cronograma pierda su configuración de offsets
+          try {
+            final existingDoc = await collection.doc(existingId).get();
+            if (existingDoc.exists) {
+              final existingData = existingDoc.data();
+              final existingActivitiesList = existingData?['activities'] as List<dynamic>? ?? [];
+              
+              // Construir mapa: nombre normalizado → ID existente
+              final Map<String, String> existingActivityIds = {};
+              for (var actMap in existingActivitiesList) {
+                if (actMap is Map<String, dynamic>) {
+                  final actName = (actMap['name'] ?? '').toString().trim().toLowerCase();
+                  final actId = (actMap['id'] ?? '').toString();
+                  if (actName.isNotEmpty && actId.isNotEmpty) {
+                    existingActivityIds[actName] = actId;
+                  }
+                }
+              }
+
+              // Reusar IDs existentes para actividades con el mismo nombre
+              for (var activity in dev.activities) {
+                final actNameKey = activity.name.trim().toLowerCase();
+                if (existingActivityIds.containsKey(actNameKey)) {
+                  // ✅ MISMO NOMBRE = MISMO ID → el cronograma no pierde los offsets
+                  activity.id = existingActivityIds[actNameKey]!;
+                }
+                // Si es nueva actividad (nombre nuevo), conserva el UUID generado
+              }
+            }
+          } catch (e) {
+            debugPrint("⚠️ Error recuperando actividades existentes para $existingId: $e");
+            // Si falla, continúa con los IDs nuevos (degradación elegante)
           }
 
-          // 'set' sobrescribirá los datos. Si querías fusionar actividades (merge), 
-          // la lógica sería más compleja, pero esto actualiza el equipo 
-          // con lo que venga en el Excel.
-          batch.set(docRef, dev.toMap());
-          opCount++;
-
-          if (opCount >= 400) {
-            await batch.commit();
-            batch = FirebaseFirestore.instance.batch();
-            opCount = 0;
-          }
+        } else {
+          // NO EXISTE: Crear documento nuevo con IDs nuevos (correcto)
+          docRef = collection.doc();
+          dev.id = docRef.id; 
         }
+
+        batch.set(docRef, dev.toMap());
+        opCount++;
+
+        if (opCount >= 400) {
+          await batch.commit();
+          batch = FirebaseFirestore.instance.batch();
+          opCount = 0;
+        }
+      }
         if (opCount > 0) await batch.commit();
 
         if(mounted) _showSnack('Proceso completado. Equipos procesados: ${importedMap.length}.', Colors.green);
@@ -391,13 +471,13 @@ class _DevicesScreenState extends State<DevicesScreen> {
                   children: [
                     _buildHeader(isLargeScreen), // Header con Buscador
                     Expanded(
-                      child: StreamBuilder<List<DeviceModel>>(
-                        stream: _repo.getDevicesStream(),
-                        builder: (context, snapshot) {
-                          if (snapshot.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator());
-                          
-                          final allDevices = snapshot.data ?? [];
-                          final devices = _filterDevices(allDevices); // Aplicar filtro
+                      child: Builder(
+                        builder: (context) {
+                          final devices = _filterDevices(_allDevices);
+
+                          if (_allDevices.isEmpty) {
+                            return const Center(child: CircularProgressIndicator());
+                          }
 
                           if (devices.isEmpty) {
                             return Center(
@@ -408,7 +488,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                   const SizedBox(height: 16),
                                   Text(
                                     _searchQuery.isEmpty ? 'No hay dispositivos registrados' : 'No se encontraron resultados',
-                                    style: TextStyle(color: _textSlate)
+                                    style: TextStyle(color: _textSlate),
                                   ),
                                 ],
                               ),
@@ -416,6 +496,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                           }
 
                           return ListView.builder(
+                            controller: _listScrollCtrl,
                             padding: const EdgeInsets.all(16),
                             itemCount: devices.length,
                             itemBuilder: (context, index) {

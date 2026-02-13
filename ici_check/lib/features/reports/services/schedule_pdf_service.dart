@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
-import 'package:flutter/services.dart'; // Necesario para debugPrint si lo usas, o elimínalo
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -40,7 +40,7 @@ class SchedulePdfService {
     final fontBold = await PdfGoogleFonts.robotoBold();
     final fontBlack = await PdfGoogleFonts.robotoBlack();
 
-    // --- 1. PRE-CARGA DE IMÁGENES (La clave para que salgan los logos) ---
+    // --- 1. PRE-CARGA DE IMÁGENES ---
     pw.ImageProvider? companyLogo;
     pw.ImageProvider? clientLogo;
 
@@ -48,19 +48,16 @@ class SchedulePdfService {
     if (companySettings.logoUrl.isNotEmpty) {
       try {
         if (companySettings.logoUrl.startsWith('http')) {
-          // Si es URL (Internet)
           companyLogo = await networkImage(companySettings.logoUrl);
         } else {
-          // Si es Base64 (Local string)
           companyLogo = pw.MemoryImage(base64Decode(companySettings.logoUrl));
         }
       } catch (e) {
-        // Si falla, se queda null y no rompe el PDF
         print("Error cargando logo empresa: $e");
       }
     }
 
-    // B) Cargar Logo del CLIENTE (Aquí estaba el detalle)
+    // B) Cargar Logo del CLIENTE
     if (client.logoUrl.isNotEmpty) {
       try {
         if (client.logoUrl.startsWith('http')) {
@@ -72,7 +69,6 @@ class SchedulePdfService {
         print("Error cargando logo cliente: $e");
       }
     }
-    // ---------------------------------------------------------------------
 
     // 2. Calcular columnas
     int totalColumns = viewMode == 'monthly' 
@@ -90,12 +86,11 @@ class SchedulePdfService {
         pageFormat: pageFormat,
         margin: const pw.EdgeInsets.all(30),
         
-        // Pasamos las imágenes YA cargadas al header
         header: (context) => _buildMainHeader(
           client, policy, companySettings, viewMode, 
           font, fontBold, fontBlack,
-          companyLogo, // <-- Pasamos el logo procesado
-          clientLogo   // <-- Pasamos el logo procesado
+          companyLogo,
+          clientLogo
         ),
 
         footer: (context) => _buildFooter(context, font, fontBold),
@@ -136,7 +131,7 @@ class SchedulePdfService {
     return pdf.save();
   }
 
-  // --- HEADER ACTUALIZADO (Recibe los ImageProviders listos) ---
+  // --- HEADER ---
   static pw.Widget _buildMainHeader(
     ClientModel client, 
     PolicyModel policy, 
@@ -145,18 +140,16 @@ class SchedulePdfService {
     pw.Font font, 
     pw.Font fontBold,
     pw.Font fontBlack,
-    pw.ImageProvider? companyLogoImg, // Nuevo parámetro
-    pw.ImageProvider? clientLogoImg,   // Nuevo parámetro
+    pw.ImageProvider? companyLogoImg,
+    pw.ImageProvider? clientLogoImg,
   ) {
     final dateFormat = DateFormat('dd/MM/yyyy');
     
-    // Widget del Logo Empresa
     pw.Widget logoWidget = pw.SizedBox(width: 50, height: 50);
     if (companyLogoImg != null) {
        logoWidget = pw.Image(companyLogoImg, width: 50, height: 50, fit: pw.BoxFit.contain);
     }
 
-    // Widget del Logo Cliente
     pw.Widget clientLogoWidget = pw.SizedBox(width: 50, height: 50);
     if (clientLogoImg != null) {
        clientLogoWidget = pw.Image(clientLogoImg, width: 50, height: 50, fit: pw.BoxFit.contain);
@@ -233,7 +226,7 @@ class SchedulePdfService {
                       ),
                     ),
                     pw.SizedBox(width: 10),
-                    clientLogoWidget, // <--- AQUÍ SE MUESTRA EL LOGO DEL CLIENTE
+                    clientLogoWidget,
                   ],
                 ),
               ),
@@ -245,7 +238,7 @@ class SchedulePdfService {
     );
   }
 
-  // --- FOOTER (LEYENDA + NÚMERO DE PÁGINA) ---
+  // --- FOOTER ---
   static pw.Widget _buildFooter(pw.Context context, pw.Font font, pw.Font fontBold) {
     return pw.Column(
       children: [
@@ -297,12 +290,7 @@ class SchedulePdfService {
     );
   }
 
-  // ... (El resto de funciones auxiliares como _buildScheduleSliceTable, _calculateColumnsData, etc. se mantienen igual) ...
-  // Si necesitas que te las copie de nuevo dimelo, pero son idénticas a la respuesta anterior.
-  // Asegúrate de incluir aquí abajo:
-  // _buildScheduleSliceTable, _buildStatusCircle, _legendDot, _legendStatus, _buildStatusCircleGeneric, _getActivityColor, _calculateColumnsData, _isScheduledHelper y la clase _TimeColumnData.
-  // COPIA Y PEGA EL RESTO DE FUNCIONES DE LA RESPUESTA ANTERIOR AQUÍ.
-    // --- TABLA POR FRAGMENTOS ---
+  // --- TABLA POR FRAGMENTOS ---
   static pw.Widget _buildScheduleSliceTable({
     required PolicyModel policy,
     required List<DeviceModel> deviceDefinitions,
@@ -436,39 +424,13 @@ class SchedulePdfService {
                   
                   if (!isScheduled) return pw.Container();
 
-                  String status = 'EMPTY';
-                  final dateKey = sliceColumns[index].dateKey;
-                  final reportMap = reports.cast<Map<String, dynamic>?>().firstWhere(
-                    (r) => r?['dateStr'] == dateKey, orElse: () => null
+                  // ✅ USAR LA LÓGICA MEJORADA PARA DETERMINAR EL ESTADO
+                  String status = _getActivityStatusForReport(
+                    reports,
+                    sliceColumns[index].dateKey,
+                    devInstance,
+                    activity,
                   );
-
-                  if (reportMap != null) {
-                    final String? startTime = reportMap['startTime'] as String?;
-                    if (startTime == null || startTime.isEmpty) {
-                      status = 'EMPTY';
-                    } else {
-                      if (reportMap['entries'] != null) {
-                        final entries = reportMap['entries'] as List;
-                        final relevantEntries = entries.where((e) => e['instanceId'] == devInstance.instanceId).toList();
-                        
-                        if (relevantEntries.isNotEmpty) {
-                          bool hasResponse = false;
-                          for(var entry in relevantEntries) {
-                             final res = entry['results']?[activity.id];
-                             if (res == 'OK' || res == 'NOK' || res == 'NA') {
-                               hasResponse = true;
-                               break;
-                             }
-                          }
-                          status = hasResponse ? 'COMPLETE' : 'PARTIAL';
-                        } else {
-                          status = 'PARTIAL'; 
-                        }
-                      } else {
-                        status = 'PARTIAL';
-                      }
-                    }
-                  }
 
                   return pw.Container(
                     alignment: pw.Alignment.center,
@@ -489,15 +451,108 @@ class SchedulePdfService {
     );
   }
 
+  // ✅ NUEVA FUNCIÓN: Lógica idéntica a la del scheduler_screen.dart
+  static String _getActivityStatusForReport(
+    List<Map<String, dynamic>> reports,
+    String dateKey,
+    PolicyDevice devInstance,
+    ActivityConfig activity,
+  ) {
+    // Paso 1: Buscar el reporte correspondiente
+    Map<String, dynamic>? report;
+    try {
+      report = reports.firstWhere((r) => r['dateStr'] == dateKey);
+    } catch (e) {
+      return 'EMPTY'; // No hay reporte
+    }
+
+    // Paso 2: Verificar si el servicio fue iniciado
+    final String? startTime = report['startTime'] as String?;
+    final bool serviceInitiated = startTime != null && startTime.isNotEmpty;
+    if (!serviceInitiated) return 'EMPTY';
+
+    // Paso 3: Verificar entries
+    if (report['entries'] == null || report['entries'] is! List) {
+      return 'PARTIAL';
+    }
+
+    final entries = report['entries'] as List;
+
+    // Filtrar TODAS las entradas que corresponden a este tipo de dispositivo
+    final entryList = entries
+        .where((e) => e['instanceId'] == devInstance.instanceId)
+        .toList();
+
+    if (entryList.isEmpty) return 'PARTIAL';
+
+    // ✅ FIX: Contadores para el estado REAL
+    int totalWithActivity = 0;
+    int answeredCount = 0;
+
+    for (var entry in entryList) {
+      if (entry['results'] == null || entry['results'] is! Map) continue;
+
+      final results = entry['results'] as Map;
+
+      // Solo contar si esta actividad existe en los results de esta entrada
+      if (!results.containsKey(activity.id)) continue;
+
+      totalWithActivity++;
+
+      final resValue = results[activity.id];
+
+      // Verificación estricta: null y 'NR' NO son respuestas válidas
+      if (resValue != null &&
+          resValue != 'NR' &&
+          (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA')) {
+        answeredCount++;
+      }
+    }
+
+    // Paso 4: Estado basado en contadores
+    if (totalWithActivity == 0) return 'PARTIAL';
+
+    if (answeredCount == 0) {
+      return 'PARTIAL'; // Ninguna respondida
+    } else if (answeredCount == totalWithActivity) {
+      return 'COMPLETE'; // ✅ TODAS respondidas → completo
+    } else {
+      return 'PARTIAL'; // Algunas respondidas → incompleto
+    }
+  }
+
   // --- HELPERS VISUALES (Círculos) ---
   static pw.Widget _buildStatusCircle(ActivityType type, String status) {
     final PdfColor color = _getActivityColor(type);
     if (status == 'COMPLETE') {
-      return pw.Container(width: 8, height: 8, decoration: pw.BoxDecoration(color: color, shape: pw.BoxShape.circle));
+      return pw.Container(
+        width: 8, 
+        height: 8, 
+        decoration: pw.BoxDecoration(
+          color: color, 
+          shape: pw.BoxShape.circle
+        )
+      );
     } else if (status == 'PARTIAL') {
-      return pw.Container(width: 8, height: 8, decoration: pw.BoxDecoration(shape: pw.BoxShape.circle, color: colorSlate200, border: pw.Border.all(color: color, width: 1.5)));
+      return pw.Container(
+        width: 8, 
+        height: 8, 
+        decoration: pw.BoxDecoration(
+          shape: pw.BoxShape.circle, 
+          color: colorSlate200, 
+          border: pw.Border.all(color: color, width: 1.5)
+        )
+      );
     } else {
-      return pw.Container(width: 8, height: 8, decoration: pw.BoxDecoration(shape: pw.BoxShape.circle, color: PdfColors.white, border: pw.Border.all(color: colorSlate200, width: 1.5)));
+      return pw.Container(
+        width: 8, 
+        height: 8, 
+        decoration: pw.BoxDecoration(
+          shape: pw.BoxShape.circle, 
+          color: PdfColors.white, 
+          border: pw.Border.all(color: colorSlate200, width: 1.5)
+        )
+      );
     }
   }
 

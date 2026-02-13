@@ -569,11 +569,25 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   bool _isUserCoordinator() {
     if (_currentUser == null) return false;
-    return _currentUser!.role == UserRole.SUPER_USER ||
-        _currentUser!.role == UserRole.ADMIN ||
-        widget.policy.assignedUserIds.contains(_currentUserId);
+    
+    // ✅ Usuarios SUPER_USER y ADMIN siempre tienen acceso
+    if (_currentUser!.role == UserRole.SUPER_USER || 
+        _currentUser!.role == UserRole.ADMIN) {
+      debugPrint("✅ Usuario es ${_currentUser!.role} - Tiene permisos de coordinador");
+      return true;
+    }
+    
+    // ✅ Usuarios asignados a la póliza también tienen acceso
+    final isAssigned = widget.policy.assignedUserIds.contains(_currentUserId);
+    if (isAssigned) {
+      debugPrint("✅ Usuario está asignado a la póliza - Tiene permisos de coordinador");
+    } else {
+      debugPrint("❌ Usuario NO es coordinador - Sin permisos especiales");
+    }
+    
+    return isAssigned;
   }
-
+  
   bool _areAllSectionsAssigned() {
     if (_report == null) return false;
 
@@ -957,6 +971,18 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     ).toList();
     
     debugPrint("👥 Usuarios asignados al reporte: ${assignedUsers.length}");
+    String adminTooltip = 'Modo Admin';
+    if (_isUserCoordinator()) {
+      if (_currentUser!.role == UserRole.SUPER_USER || _currentUser!.role == UserRole.ADMIN) {
+        adminTooltip = _adminOverride 
+            ? 'Modo Admin Activo (${_currentUser!.role})' 
+            : 'Activar Modo Admin (${_currentUser!.role})';
+      } else {
+        adminTooltip = _adminOverride 
+            ? 'Modo Admin Activo (Responsable de Póliza)' 
+            : 'Activar Modo Admin (Responsable de Póliza)';
+      }
+    }
 
     return Scaffold(
       backgroundColor: _bgLight,
@@ -1001,9 +1027,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         actions: [
           if (_isUserCoordinator())
             IconButton(
-              icon: Icon(_adminOverride ? Icons.admin_panel_settings : Icons.admin_panel_settings_outlined, color: _adminOverride ? const Color(0xFFF59E0B) : const Color(0xFF94A3B8), size: 22),
+              icon: Icon(_adminOverride ? Icons.admin_panel_settings : Icons.admin_panel_settings_outlined, 
+                  color: _adminOverride ? const Color(0xFFF59E0B) : const Color(0xFF94A3B8), 
+                  size: 22),
               onPressed: () => setState(() => _adminOverride = !_adminOverride),
-              tooltip: _adminOverride ? 'Modo Admin Activo' : 'Activar Modo Admin',
+              tooltip: adminTooltip,  // ✅ TOOLTIP MEJORADO
             ),
           const SizedBox(width: 8),
         ],
