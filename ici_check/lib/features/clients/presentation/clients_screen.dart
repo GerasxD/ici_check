@@ -13,8 +13,6 @@ class ClientsScreen extends StatefulWidget {
 
 class _ClientsScreenState extends State<ClientsScreen> {
   final ClientsRepository _repo = ClientsRepository();
-  // ignore: unused_field
-  final ImagePicker _picker = ImagePicker();
 
   String _searchQuery = '';
 
@@ -30,11 +28,11 @@ class _ClientsScreenState extends State<ClientsScreen> {
       context: context,
       builder: (context) => _ClientFormDialog(
         clientToEdit: client,
-        onSave: (newClient, imageBytes, fileName) async { // ← CAMBIADO
+        onSave: (newClient, imageBytes, fileName) async {
           try {
             await _repo.saveClient(
               newClient, 
-              newLogoBytes: imageBytes,  // ← CAMBIADO
+              newLogoBytes: imageBytes,
               fileName: fileName,
             );
             if (mounted) {
@@ -89,12 +87,10 @@ class _ClientsScreenState extends State<ClientsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Detectamos si es móvil usando el ancho de la pantalla
     bool isMobile = MediaQuery.of(context).size.width < 700;
 
     return Scaffold(
       backgroundColor: _bgLight,
-      // SOLUCIÓN 1: Botón Flotante en Móvil (Evita overflow en header)
       floatingActionButton: isMobile
           ? FloatingActionButton(
               onPressed: () => _showClientModal(),
@@ -117,7 +113,6 @@ class _ClientsScreenState extends State<ClientsScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    // Título (Usamos Expanded para que ocupe el espacio disponible sin empujar)
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -130,8 +125,7 @@ class _ClientsScreenState extends State<ClientsScreen> {
                               color: _primaryDark,
                               letterSpacing: -0.5,
                             ),
-                            overflow: TextOverflow
-                                .ellipsis, // Cortar con ... si es muy largo
+                            overflow: TextOverflow.ellipsis,
                           ),
                           const SizedBox(height: 4),
                           Text(
@@ -141,7 +135,6 @@ class _ClientsScreenState extends State<ClientsScreen> {
                         ],
                       ),
                     ),
-                    // Botón Desktop (Solo visible si NO es móvil)
                     if (!isMobile)
                       ElevatedButton.icon(
                         onPressed: () => _showClientModal(),
@@ -167,7 +160,7 @@ class _ClientsScreenState extends State<ClientsScreen> {
                 TextField(
                   onChanged: (val) => setState(() => _searchQuery = val),
                   decoration: InputDecoration(
-                    hintText: 'Buscar por nombre, correo o dirección...',
+                    hintText: 'Buscar por nombre, razón social, contacto, email...',
                     prefixIcon: const Icon(Icons.search, color: Colors.grey),
                     filled: true,
                     fillColor: _bgLight,
@@ -201,11 +194,18 @@ class _ClientsScreenState extends State<ClientsScreen> {
 
                 var clients = snapshot.data ?? [];
 
+                // ← BÚSQUEDA MEJORADA: Ahora incluye razón social y nombre de contacto
                 if (_searchQuery.isNotEmpty) {
                   clients = clients
                       .where(
                         (c) =>
                             c.name.toLowerCase().contains(
+                              _searchQuery.toLowerCase(),
+                            ) ||
+                            c.razonSocial.toLowerCase().contains(
+                              _searchQuery.toLowerCase(),
+                            ) ||
+                            c.nombreContacto.toLowerCase().contains(
                               _searchQuery.toLowerCase(),
                             ) ||
                             c.email.toLowerCase().contains(
@@ -237,23 +237,13 @@ class _ClientsScreenState extends State<ClientsScreen> {
                   );
                 }
 
-                // Grid Responsivo
                 return LayoutBuilder(
                   builder: (context, constraints) {
                     double width = constraints.maxWidth;
-                    // Ajuste de columnas
-                    int crossAxisCount = width > 1200
-                        ? 3
-                        : (width > 800 ? 2 : 1);
-
-                    // SOLUCIÓN 2: Aspect Ratio Dinámico
-                    // En móvil (1 columna), damos más altura a la tarjeta para evitar overflow vertical
-                    double aspectRatio = width > 800
-                        ? 1.6
-                        : 1.4; // 1.4 es más alto que 1.6
+                    int crossAxisCount = width > 1200 ? 3 : (width > 800 ? 2 : 1);
+                    double aspectRatio = width > 800 ? 1.5 : 1.3; // ← Ajustado para más info
 
                     return GridView.builder(
-                      // Importante: padding inferior extra para que el FAB no tape el último elemento en móvil
                       padding: EdgeInsets.only(
                         left: 24,
                         right: 24,
@@ -270,8 +260,7 @@ class _ClientsScreenState extends State<ClientsScreen> {
                       itemBuilder: (context, index) {
                         return _ClientProCard(
                           client: clients[index],
-                          onEdit: () =>
-                              _showClientModal(client: clients[index]),
+                          onEdit: () => _showClientModal(client: clients[index]),
                           onDelete: () => _handleDelete(clients[index].id),
                         );
                       },
@@ -287,7 +276,7 @@ class _ClientsScreenState extends State<ClientsScreen> {
   }
 }
 
-// --- FORMULARIO MODERNO ---
+// --- FORMULARIO MODERNO CON NUEVOS CAMPOS ---
 class _ClientFormDialog extends StatefulWidget {
   final ClientModel? clientToEdit;
   final Function(ClientModel, Uint8List?, String?) onSave;
@@ -301,14 +290,15 @@ class _ClientFormDialog extends StatefulWidget {
 class _ClientFormDialogState extends State<_ClientFormDialog> {
   final _formKey = GlobalKey<FormState>();
   late TextEditingController _nameCtrl;
+  late TextEditingController _razonSocialCtrl; // ← NUEVO
+  late TextEditingController _nombreContactoCtrl; // ← NUEVO
   late TextEditingController _addressCtrl;
   late TextEditingController _contactCtrl;
   late TextEditingController _emailCtrl;
   
-  // ====== CAMBIADO: Usar Uint8List en lugar de File ======
   Uint8List? _selectedImageBytes;
   String? _selectedImageName;
-  bool _isLogoDeleted = false; // <--- AGREGA ESTA VARIABLE
+  bool _isLogoDeleted = false;
   final ImagePicker _picker = ImagePicker();
   bool _isUploading = false;
 
@@ -316,12 +306,13 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
   void initState() {
     super.initState();
     _nameCtrl = TextEditingController(text: widget.clientToEdit?.name ?? '');
+    _razonSocialCtrl = TextEditingController(text: widget.clientToEdit?.razonSocial ?? ''); // ← NUEVO
+    _nombreContactoCtrl = TextEditingController(text: widget.clientToEdit?.nombreContacto ?? ''); // ← NUEVO
     _addressCtrl = TextEditingController(text: widget.clientToEdit?.address ?? '');
     _contactCtrl = TextEditingController(text: widget.clientToEdit?.contact ?? '');
     _emailCtrl = TextEditingController(text: widget.clientToEdit?.email ?? '');
   }
 
-  // ====== CORREGIDO: Seleccionar imagen multiplataforma ======
   Future<void> _pickImage() async {
     try {
       final XFile? image = await _picker.pickImage(
@@ -332,11 +323,11 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
       );
 
       if (image != null) {
-        final bytes = await image.readAsBytes(); // ← Leer como bytes
+        final bytes = await image.readAsBytes();
         setState(() {
           _selectedImageBytes = bytes;
           _selectedImageName = image.name;
-          _isLogoDeleted = false; // <--- IMPORTANTE: Si elige nueva, ya no está borrada
+          _isLogoDeleted = false;
         });
       }
     } catch (e) {
@@ -351,7 +342,6 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
     }
   }
 
-  // ====== CORREGIDO: Tomar foto multiplataforma ======
   Future<void> _takePhoto() async {
     try {
       final XFile? image = await _picker.pickImage(
@@ -362,10 +352,11 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
       );
 
       if (image != null) {
-        final bytes = await image.readAsBytes(); // ← Leer como bytes
+        final bytes = await image.readAsBytes();
         setState(() {
           _selectedImageBytes = bytes;
           _selectedImageName = image.name;
+          _isLogoDeleted = false;
         });
       }
     } catch (e) {
@@ -416,7 +407,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
                   setState(() {
                     _selectedImageBytes = null;
                     _selectedImageName = null;
-                    _isLogoDeleted = true; // <--- AHORA SÍ SABEMOS QUE SE BORRÓ
+                    _isLogoDeleted = true;
                   });
                 },
               ),
@@ -435,7 +426,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
       elevation: 10,
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 500),
+        constraints: const BoxConstraints(maxWidth: 600), // ← Más ancho para nuevos campos
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -483,7 +474,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // ====== CORREGIDO: Avatar con MemoryImage para Web ======
+                      // Avatar
                       Center(
                         child: GestureDetector(
                           onTap: _showImageOptions,
@@ -498,7 +489,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
                                   border: Border.all(color: Colors.grey.shade200),
                                   image: _selectedImageBytes != null
                                       ? DecorationImage(
-                                          image: MemoryImage(_selectedImageBytes!), // ← Usar MemoryImage
+                                          image: MemoryImage(_selectedImageBytes!),
                                           fit: BoxFit.cover,
                                         )
                                       : (!_isLogoDeleted && (widget.clientToEdit?.logoUrl.isNotEmpty ?? false))
@@ -538,10 +529,21 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
                       ),
                       const SizedBox(height: 24),
 
-                      _buildProInput('Nombre Empresa', _nameCtrl, Icons.business, required: true),
+                      // ========== CAMPOS ACTUALIZADOS ==========
+                      _buildProInput('Nombre Comercial', _nameCtrl, Icons.store, required: true),
                       const SizedBox(height: 16),
+                      
+                      // ← NUEVO CAMPO: Razón Social
+                      _buildProInput('Razón Social', _razonSocialCtrl, Icons.business, required: true),
+                      const SizedBox(height: 16),
+                      
                       _buildProInput('Dirección Fiscal', _addressCtrl, Icons.place_outlined),
                       const SizedBox(height: 16),
+                      
+                      // ← NUEVO CAMPO: Nombre de Contacto
+                      _buildProInput('Nombre de Contacto', _nombreContactoCtrl, Icons.person_outline, required: true),
+                      const SizedBox(height: 16),
+                      
                       Row(
                         children: [
                           Expanded(
@@ -604,7 +606,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
     );
   }
 
-  // ====== CORREGIDO: Guardar con bytes ======
+  // ← ACTUALIZADO: Guardar con nuevos campos
   Future<void> _handleSave() async {
     if (_formKey.currentState!.validate()) {
       setState(() => _isUploading = true);
@@ -613,13 +615,14 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
         final newClient = ClientModel(
           id: widget.clientToEdit?.id ?? '',
           name: _nameCtrl.text.trim(),
+          razonSocial: _razonSocialCtrl.text.trim(), // ← NUEVO
+          nombreContacto: _nombreContactoCtrl.text.trim(), // ← NUEVO
           address: _addressCtrl.text.trim(),
           contact: _contactCtrl.text.trim(),
           email: _emailCtrl.text.trim(),
           logoUrl: _isLogoDeleted ? '' : (widget.clientToEdit?.logoUrl ?? ''),
         );
 
-        // ← Pasar bytes en lugar de File
         await widget.onSave(newClient, _selectedImageBytes, _selectedImageName);
         
         if (mounted) {
@@ -685,7 +688,7 @@ class _ClientFormDialogState extends State<_ClientFormDialog> {
   }
 }
 
-// --- TARJETA DE CLIENTE PRO ---
+// --- TARJETA DE CLIENTE CON NUEVOS CAMPOS ---
 class _ClientProCard extends StatelessWidget {
   final ClientModel client;
   final VoidCallback onEdit;
@@ -731,10 +734,9 @@ class _ClientProCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header Tarjeta: Avatar y Nombre
+            // Header Tarjeta
             Row(
               children: [
-                // ====== CORREGIDO: Avatar con mejor manejo de errores ======
                 Container(
                   width: 56,
                   height: 56,
@@ -766,8 +768,6 @@ class _ClientProCard extends StatelessWidget {
                               );
                             },
                             errorBuilder: (context, error, stackTrace) {
-                              // Si falla la carga, mostrar inicial
-                              debugPrint('Error cargando logo: $error');
                               return Center(
                                 child: Text(
                                   client.name.isNotEmpty
@@ -838,7 +838,21 @@ class _ClientProCard extends StatelessWidget {
 
             const Spacer(),
 
-            // Info
+            // ← NUEVA INFO: Mostrar razón social y contacto
+            if (client.razonSocial.isNotEmpty)
+              _InfoRowPro(
+                Icons.business,
+                client.razonSocial,
+              ),
+            if (client.razonSocial.isNotEmpty) const SizedBox(height: 8),
+            
+            if (client.nombreContacto.isNotEmpty)
+              _InfoRowPro(
+                Icons.person,
+                client.nombreContacto,
+              ),
+            if (client.nombreContacto.isNotEmpty) const SizedBox(height: 8),
+            
             _InfoRowPro(
               Icons.place_outlined,
               client.address.isEmpty ? 'Sin dirección' : client.address,
@@ -857,7 +871,7 @@ class _ClientProCard extends StatelessWidget {
             const Spacer(),
             const Divider(),
 
-            // Acciones Rápidas
+            // Acciones
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [

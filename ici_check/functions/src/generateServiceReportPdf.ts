@@ -68,20 +68,24 @@ interface ActivityConfig {
   type: string;
 }
 
+// ✅ ACTUALIZADO: Cliente con nuevos campos
 interface Client {
   id: string;
   name: string;
+  razonSocial: string; // ← NUEVO
+  nombreContacto: string; // ← NUEVO
   contact: string;
   address: string;
   logoUrl: string;
 }
 
+// ✅ ACTUALIZADO: Empresa con email
 interface CompanySettings {
   name: string;
   legalName: string;
   address: string;
   phone: string;
-  email: string;
+  email: string; // ← YA ESTABA, pero lo hacemos explícito
   logoUrl: string;
 }
 
@@ -106,8 +110,7 @@ const PDF_COLORS = {
   grey800: "#424242",
   red: "#F44336",
   orange: "#FF9800",
-  green: "#4CAF50", // ✅ AGREGADO: Color verde para OK
-
+  green: "#4CAF50",
 };
 
 const MARGIN = 14.4;
@@ -198,7 +201,6 @@ function calcStats(entries: ReportEntry[]) {
   return { ok, nok, na, nr };
 }
 
-// 1. AGREGA ESTA FUNCIÓN NUEVA (Para recortar fotos y que no se salgan)
 function drawClippedImage(
   doc: PDFKit.PDFDocument,
   buffer: Buffer,
@@ -207,8 +209,8 @@ function drawClippedImage(
   w: number,
   h: number
 ) {
-  doc.save(); // Guarda estado
-  doc.roundedRect(x, y, w, h, 2).clip(); // Recorta
+  doc.save();
+  doc.roundedRect(x, y, w, h, 2).clip();
   try {
     doc.image(buffer, x, y, {
       fit: [w, h],
@@ -218,26 +220,22 @@ function drawClippedImage(
   } catch (e) {
     // Si falla, no rompe el PDF
   }
-  doc.restore(); // Restaura estado
+  doc.restore();
 }
 
-// 2. REEMPLAZA ESTA FUNCIÓN (Ahora acepta una función para dibujar el header en hojas nuevas)
 function addPageIfNeeded(
   doc: PDFKit.PDFDocument, 
   currentY: number, 
   requiredSpace: number, 
   drawHeaderFn?: (d: PDFKit.PDFDocument) => number
 ): number {
-  // Margen de seguridad: 25 puntos (balance entre seguridad y eficiencia)
   if (currentY + requiredSpace > PAGE_HEIGHT - MARGIN - 25) {
     doc.addPage();
-    // Si nos pasan la función de header, la ejecutamos, si no, devolvemos margen
     return drawHeaderFn ? drawHeaderFn(doc) : MARGIN; 
   }
   return currentY;
 }
 
-// MANTÉN TU FUNCIÓN renderImage IGUAL QUE ANTES
 function renderImage(
   doc: PDFKit.PDFDocument,
   imgCache: Map<string, Buffer | null>,
@@ -262,8 +260,6 @@ function needsNewPage(
   currentY: number,
   requiredSpace: number
 ): boolean {
-  // Determina si hace falta crear una nueva página antes de dibujar
-  // (coincide con la lógica usada en addPageIfNeeded)
   return currentY + requiredSpace > PAGE_HEIGHT - MARGIN - 25;
 }
 
@@ -327,26 +323,40 @@ async function buildPdf(p: {
 
       const W = PAGE_WIDTH - MARGIN * 2;
 
-      // DEFINIMOS LA LÓGICA DEL HEADER AQUÍ ADENTRO PARA REUSARLA
+      // ═══════════════════════════════════════════════════════════════════
+      // ✅ HEADER ACTUALIZADO CON TODOS LOS CAMPOS
+      // ═══════════════════════════════════════════════════════════════════
       const drawHeader = (doc: PDFKit.PDFDocument): number => {
         const startY = MARGIN;
-        const HEADER_HEIGHT = 72;
+        const HEADER_HEIGHT = 80; // ← Aumentado un poco para más info
         
         doc.rect(MARGIN, startY, W, HEADER_HEIGHT).stroke(PDF_COLORS.black);
 
-        // ── Columna 1: PROVEEDOR ──
+        // ── Columna 1: PROVEEDOR (con email agregado) ──
         const col1Width = W * 0.28;
         renderImage(doc, imgCache, company.logoUrl, MARGIN + 8, startY + 8, 35, 35);
         
         const infoX = MARGIN + (company.logoUrl ? 49 : 8);
+        
+        // Nombre empresa
         doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(company.name, infoX, startY + 8, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+            .text(company.name, infoX, startY + 6, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+        
+        // Razón social
         doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.grey700)
-            .text(company.legalName, infoX, startY + 18, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
-        doc.fontSize(6).fillColor(PDF_COLORS.grey700)
-            .text(company.address, infoX, startY + 28, { width: col1Width - (infoX - MARGIN) - 4, height: 20, ellipsis: true });
+            .text(company.legalName, infoX, startY + 15, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+        
+        // Dirección
+        doc.fontSize(5.5).fillColor(PDF_COLORS.grey700)
+            .text(company.address, infoX, startY + 24, { width: col1Width - (infoX - MARGIN) - 4, height: 14, ellipsis: true });
+        
+        // ✅ Email de la empresa
+        doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
+            .text(company.email || "", infoX, startY + 40, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+        
+        // Teléfono
         doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(company.phone, infoX, startY + 50, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+            .text(company.phone, infoX, startY + 48, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
 
         doc.moveTo(MARGIN + col1Width, startY).lineTo(MARGIN + col1Width, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
 
@@ -358,43 +368,59 @@ async function buildPdf(p: {
         const periodLabelText = periodLabel(report.dateStr);
 
         doc.fontSize(10).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text("REPORTE DE SERVICIO", col2X, startY + 10, { width: col2Width, align: "center" });
+            .text("REPORTE DE SERVICIO", col2X, startY + 12, { width: col2Width, align: "center" });
         doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
-            .text("SISTEMA DE DETECCIÓN DE INCENDIOS", col2X, startY + 22, { width: col2Width, align: "center" });
+            .text("SISTEMA DE DETECCIÓN DE INCENDIOS", col2X, startY + 24, { width: col2Width, align: "center" });
 
-        // ✅ CORRECCIÓN: Aumentamos el ancho de la caja para que quepa el año completo
-        const boxW = 180; // CAMBIADO DE 160 A 180
+        const boxW = 180;
         const boxX = col2X + (col2Width - boxW) / 2;
-        doc.rect(boxX, startY + 35, boxW, 11).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
+        doc.rect(boxX, startY + 38, boxW, 11).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
         
-        // ✅ Reducimos un poco el tamaño de fuente para mejor ajuste
         doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(`EJECUCIÓN: ${executionDate}  |  PERIODO: ${periodLabelText.toUpperCase()}`, boxX + 3, startY + 37.5, { width: boxW - 6, align: "center" });
+            .text(`EJECUCIÓN: ${executionDate}  |  PERIODO: ${periodLabelText.toUpperCase()}`, boxX + 3, startY + 40.5, { width: boxW - 6, align: "center" });
 
         const frequencies = getInvolvedFrequencies(report, devices);
         doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-            .text(`Frecuencias: ${frequencies}`, col2X, startY + 52, { width: col2Width, align: "center", ellipsis: true });
+            .text(`Frecuencias: ${frequencies}`, col2X, startY + 56, { width: col2Width, align: "center", ellipsis: true });
 
         doc.moveTo(col2X + col2Width, startY).lineTo(col2X + col2Width, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
 
-        // ── Columna 3: CLIENTE ──
+        // ── Columna 3: CLIENTE (con nuevos campos) ──
         const col3Width = W * 0.28;
         const col3X = col2X + col2Width;
 
+        // ✅ ACTUALIZADO: Mostrar nombre comercial
         doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(client.name, col3X + 8, startY + 8, { width: col3Width - 50, ellipsis: true });
-        doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
-            .text(`Telefono: ${client.contact}`, col3X + 8, startY + 18, { width: col3Width - 50, ellipsis: true });
-        doc.fontSize(6).fillColor(PDF_COLORS.grey700)
-            .text(client.address, col3X + 8, startY + 28, { width: col3Width - 50, height: 20, ellipsis: true });
+            .text(client.name, col3X + 8, startY + 6, { width: col3Width - 50, ellipsis: true });
+        
+        // ✅ NUEVO: Razón social del cliente
+        if (client.razonSocial) {
+          doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.grey700)
+              .text(client.razonSocial, col3X + 8, startY + 14, { width: col3Width - 50, ellipsis: true });
+        }
+        
+        // ✅ NUEVO: Nombre de contacto
+        if (client.nombreContacto) {
+          doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+              .text(`Contacto: ${client.nombreContacto}`, col3X + 8, startY + 22, { width: col3Width - 50, ellipsis: true });
+        }
+        
+        // Teléfono
+        doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.black)
+            .text(`Tel: ${client.contact}`, col3X + 8, startY + 30, { width: col3Width - 50, ellipsis: true });
+        
+        // Dirección
+        doc.fontSize(5).fillColor(PDF_COLORS.grey700)
+            .text(client.address, col3X + 8, startY + 38, { width: col3Width - 50, height: 18, ellipsis: true });
 
         renderImage(doc, imgCache, client.logoUrl, col3X + col3Width - 40, startY + 8, 35, 35);
 
         return MARGIN + HEADER_HEIGHT + 10;
-        };
+      };
 
       // EJECUTAMOS EL PRIMER HEADER
       let Y = drawHeader(doc);
+      
       // ═══════════════════════════════════════════════════════════════════
       // INFO BAR
       // ═══════════════════════════════════════════════════════════════════
@@ -406,6 +432,7 @@ async function buildPdf(p: {
       const sd = report.serviceDate.toDate();
       const dateStr = `${sd.getDate().toString().padStart(2, "0")}/${(sd.getMonth() + 1).toString().padStart(2, "0")}/${sd.getFullYear()}`;
 
+      // ✅ Primera fila: Fecha, Horario y Personal
       const INFO_BAR_HEIGHT = 12;
       doc.rect(MARGIN, Y, W, INFO_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
       
@@ -424,7 +451,19 @@ async function buildPdf(p: {
       doc.font("Helvetica").fillColor(PDF_COLORS.black)
         .text(staffNames || "N/A", MARGIN + 285, Y + 4, { width: W - 289, ellipsis: true });
 
-      Y += INFO_BAR_HEIGHT + 8;
+      Y += INFO_BAR_HEIGHT;
+
+      // ✅ Segunda fila: NFPA
+      const NFPA_BAR_HEIGHT = 10;
+      doc.rect(MARGIN, Y, W, NFPA_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
+      
+      doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+        .text("Norma de Referencia: NFPA", MARGIN + 4, Y + 3, { 
+          width: W - 8, 
+          align: "center" 
+        });
+
+      Y += NFPA_BAR_HEIGHT + 8;
 
     /// ═══════════════════════════════════════════════════════════════════
     // DISPOSITIVOS
@@ -450,13 +489,11 @@ async function buildPdf(p: {
 
     doc.rect(MARGIN, Y, W, SECTION_HEADER_HEIGHT).fillAndStroke(PDF_COLORS.grey800, PDF_COLORS.black);
     
-    // ✅ CORRECCIÓN 1: Medimos el ancho del nombre antes de mostrar la cantidad
     doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.white);
     const deviceNameWidth = doc.widthOfString(def.name.toUpperCase());
     
     doc.text(`${def.name.toUpperCase()}`, MARGIN + 5, Y + 4, { continued: false });
     
-    // Ahora dibujamos la cantidad con un margen adecuado
     doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.grey400)
         .text(`  (${entries.length} U.)`, MARGIN + 5 + deviceNameWidth + 2, Y + 4);
     
@@ -470,15 +507,13 @@ async function buildPdf(p: {
     if (!isListView) {
     // ══════ VISTA TABLA CON DIVISIÓN AUTOMÁTICA ══════
     
-    const MAX_ACTIVITIES_PER_TABLE = 12; // Máximo de actividades por tabla
+    const MAX_ACTIVITIES_PER_TABLE = 12;
     const activityGroups: ActivityConfig[][] = [];
     
-    // ✅ Dividir actividades en grupos manejables
     for (let i = 0; i < relevantActivities.length; i += MAX_ACTIVITIES_PER_TABLE) {
         activityGroups.push(relevantActivities.slice(i, i + MAX_ACTIVITIES_PER_TABLE));
     }
 
-    // ✅ Crear una tabla por cada grupo
     for (let groupIdx = 0; groupIdx < activityGroups.length; groupIdx++) {
         const activityGroup = activityGroups[groupIdx];
         const activityColWidth = activityGroup.length > 8 ? 25.0 : 38.0;
@@ -486,7 +521,6 @@ async function buildPdf(p: {
         const locationColWidth = W - idColWidth - (activityGroup.length * activityColWidth);
         const TABLE_HEADER_HEIGHT = 20;
 
-        // Si hay múltiples tablas, agregamos un subtítulo
         if (activityGroups.length > 1) {
         Y = addPageIfNeeded(doc, Y, 12);
         doc.rect(MARGIN, Y, W, 10).fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
@@ -531,7 +565,6 @@ async function buildPdf(p: {
         drawTableHeader(Y);
         Y += TABLE_HEADER_HEIGHT;
 
-        // DATA ROWS (solo mostramos fotos en la primera tabla del grupo para no duplicar)
         for (const entry of entries) {
         const photoCount = (groupIdx === 0) ? entry.photoUrls.length : 0;
         const BASE_ROW_HEIGHT = 25;
@@ -579,7 +612,6 @@ async function buildPdf(p: {
             const cellCy = Y + ROW_HEIGHT / 2;
 
             if (status === "OK") {
-                // ✅ CAMBIO: Color verde en lugar de negro
                 doc.circle(cellCx, cellCy, 2.5).fill(PDF_COLORS.green);
             } else if (status === "NOK") {
                 doc.fontSize(12).font("Helvetica-Bold").fillColor(PDF_COLORS.red)
@@ -596,7 +628,7 @@ async function buildPdf(p: {
             Y += ROW_HEIGHT;
         }
         
-        Y += 6; // Espacio entre tablas del mismo dispositivo
+        Y += 6;
     }
     } else {
         // ══════ VISTA LISTA ══════
@@ -708,11 +740,9 @@ async function buildPdf(p: {
         doc.circle(freqBadgeX + 35, rowY + 6, 4).fill(statusBgColor);
 
         if (status === "OK") {
-        // Para OK: solo círculo verde, sin texto adicional
         statusColor = PDF_COLORS.green;
-        statusText = ""; // NO mostramos texto, solo el círculo verde
+        statusText = "";
         } else if (status === "NOK") {
-        // Para NOK: X roja grande
         statusColor = PDF_COLORS.red;
         statusText = "X";
         } else if (status === "NA") {
@@ -726,16 +756,11 @@ async function buildPdf(p: {
         statusText = "-";
         }
 
-        // Solo dibujamos texto si hay algo que mostrar
         if (statusText) {
         const statusFontSize = status === "NOK" ? 10 : 5;
         doc.fontSize(statusFontSize).font("Helvetica-Bold").fillColor(statusColor)
             .text(statusText, freqBadgeX + 50, rowY + 2, { width: ENTRY_AREA_WIDTH - 160, align: "left" });
         }
-
-        const statusFontSize = status === "NOK" ? 10 : 6;
-        doc.fontSize(statusFontSize).font("Helvetica-Bold").fillColor(statusColor)
-        .text(statusText, freqBadgeX + 50, rowY + 1, { width: ENTRY_AREA_WIDTH - 140, align: "left" });
 
         if (hasPhotos) {
             let photoY = rowY + 12;
@@ -818,7 +843,6 @@ async function buildPdf(p: {
       const sumX = MARGIN + obsWidth + W * 0.05;
       const SUMMARY_HEIGHT = 50;
 
-      // Observaciones
       doc.rect(MARGIN, Y, obsWidth, SUMMARY_HEIGHT).stroke(PDF_COLORS.grey400);
       doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
         .text("Observaciones Generales", MARGIN + 4, Y + 4);
@@ -831,7 +855,6 @@ async function buildPdf(p: {
           { width: obsWidth - 8, height: SUMMARY_HEIGHT - 19 }
         );
 
-      // Resumen
       doc.rect(sumX, Y, sumWidth, SUMMARY_HEIGHT).stroke(PDF_COLORS.grey400);
       doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
         .text("Resumen", sumX, Y + 4, { width: sumWidth, align: "center" });
@@ -865,7 +888,6 @@ async function buildPdf(p: {
       const sigWidth = (W - 15) / 2;
       const sig2X = MARGIN + sigWidth + 15;
 
-      // Firma Proveedor
       doc.rect(MARGIN, Y, sigWidth, SIGNATURE_HEIGHT).stroke(PDF_COLORS.black);
       doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
         .text("Nombre y Firma del Responsable (Proveedor)", MARGIN + 4, Y + 2);
@@ -881,7 +903,6 @@ async function buildPdf(p: {
           align: "center",
         });
 
-      // Firma Cliente
       doc.rect(sig2X, Y, sigWidth, SIGNATURE_HEIGHT).stroke(PDF_COLORS.black);
       doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
         .text("Nombre y Firma del Responsable (Cliente)", sig2X + 4, Y + 2);
@@ -1045,4 +1066,4 @@ export const generateServiceReportPdf = onCall(
       sizeBytes: pdfBuffer.length,
     };
   }
-)
+);
