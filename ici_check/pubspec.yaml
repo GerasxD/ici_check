@@ -30,9 +30,9 @@ dependencies:
   gal: ^2.3.0  # <--- Esta es la nueva dependencia para guardar fotos en la galería local del dispositivo
   open_filex: ^4.5.0  # Usamos open_filex que es la versión mantenida
 
-
-
-
+  cloud_functions: ^6.0.6 # O la versión compatible con tu firebase_core
+  url_launcher: ^6.2.5
+  http: ^1.2.0
   
 dev_dependencies:
   flutter_test:

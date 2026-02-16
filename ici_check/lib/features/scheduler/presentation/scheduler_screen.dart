@@ -1,15 +1,15 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:ici_check/features/auth/data/users_repository.dart';
 import 'package:ici_check/features/notifications/data/notification_model.dart';
 import 'package:ici_check/features/notifications/data/notification_service.dart';
-import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/reports/presentation/service_report_screen.dart';
-import 'package:ici_check/features/reports/services/pdf_generator_service.dart';
 import 'package:ici_check/features/reports/services/schedule_pdf_service.dart';
 import 'package:ici_check/features/settings/data/settings_repository.dart';
 import 'package:intl/intl.dart';
@@ -1018,89 +1018,129 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
 
   Future<void> _handleHeaderDownloadClick(int index) async {
     try {
-      // Mostrar indicador de carga
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (context) => const Center(child: CircularProgressIndicator()),
+        builder: (_) => const AlertDialog(
+          content: Row(children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Expanded(child: Text("Generando PDF en servidor...\nEsto puede tardar unos segundos.")),
+          ]),
+        ),
       );
 
-      // Obtener el reporte
-      final report = _getReportForColumn(index);
-      if (report == null) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No hay reporte disponible para este periodo'),
-            backgroundColor: Colors.orange,
-          ),
+      // Calcular el dateStr de la columna
+      DateTime columnDate;
+      if (_viewMode == 'monthly') {
+        columnDate = DateTime(
+          _policy.startDate.year,
+          _policy.startDate.month + index, 1,
+        );
+      } else {
+        columnDate = _policy.startDate.add(Duration(days: index * 7));
+      }
+
+      final dateKey = _viewMode == 'monthly'
+          ? DateFormat('yyyy-MM').format(columnDate)
+          : "${columnDate.year}-W${index + 1}";
+
+      // Llamar a la Cloud Function
+      final result = await _callGeneratePdfFunction(
+        policyId: widget.policyId,
+        dateStr: dateKey,
+      );
+
+      if (Navigator.canPop(context)) Navigator.pop(context);
+
+      if (result != null) {
+        await _downloadAndOpenPdf(result['downloadUrl'], result['fileName']);
+      }
+    } catch (e) {
+      if (Navigator.canPop(context)) Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  Future<Map<String, dynamic>?> _callGeneratePdfFunction({
+  required String policyId,
+  required String dateStr,
+}) async {
+  try {
+    debugPrint('🔍 Llamando CF con policyId: "$policyId"');
+    debugPrint('🔍 Llamando CF con dateStr: "$dateStr"');
+    
+    final functions = FirebaseFunctions.instanceFor(region: 'us-central1');
+    final callable = functions.httpsCallable(
+      'generateServiceReportPdf',
+      options: HttpsCallableOptions(
+        timeout: const Duration(minutes: 9),
+      ),
+    );
+
+    // ✅ Envío simple - el SDK se encarga del resto
+    final result = await callable.call({
+      'policyId': policyId,
+      'dateStr': dateStr,
+    });
+
+    debugPrint('✅ Respuesta recibida: ${result.data}');
+
+    final data = result.data as Map<String, dynamic>;
+
+    return {
+      'downloadUrl': data['downloadUrl'] as String,
+      'fileName': 'Reporte_${_client?.name ?? "cliente"}_$dateStr.pdf',
+    };
+  } on FirebaseFunctionsException catch (e) {
+    debugPrint('❌ FirebaseFunctions error: ${e.code} - ${e.message}');
+    debugPrint('❌ Details: ${e.details}');
+    throw Exception('Error en Cloud Function: ${e.message}');
+  } catch (e) {
+    debugPrint('❌ Error inesperado: $e');
+    rethrow;
+  }
+}
+
+  Future<void> _downloadAndOpenPdf(String url, String fileName) async {
+    try {
+      if (kIsWeb) {
+        // Web: abrir directamente la URL
+        // ignore: avoid_web_libraries_in_flutter
+        // html.window.open(url, '_blank'); // Si usas dart:html
+        await Printing.sharePdf(
+          bytes: (await http.get(Uri.parse(url))).bodyBytes,
+          filename: fileName,
         );
         return;
       }
 
-      // Convertir el Map a ServiceReportModel
-      final reportModel = ServiceReportModel.fromMap(report);
-
-      // Obtener configuración de empresa
-      final companySettings = await SettingsRepository().getSettings();
-
-      // Generar PDF
-      final pdfBytes = await PdfGeneratorService.generateServiceReport(
-        report: reportModel,
-        client: _client!,
-        companySettings: companySettings,
-        deviceDefinitions: _deviceDefinitions,
-        technicians: _allTechnicians,
-        policyDevices: _policy.devices,
+      // Móvil: descargar y abrir
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Descargando PDF...')),
       );
 
-      // Cerrar indicador de carga
-      Navigator.pop(context);
-
-      // 2. Obtener directorio temporal
-      if (kIsWeb) {
-        // 🟢 OPCIÓN WEB: Usamos Printing.sharePdf (El navegador maneja la descarga)
-        await Printing.sharePdf(
-          bytes: pdfBytes,
-          filename: 'Reporte_${_client!.name}_${reportModel.dateStr}.pdf',
-        );
-      } else {
-        // 📱 OPCIÓN MÓVIL: Guardamos y abrimos directo
-        final output = await getTemporaryDirectory();
-        final fileName = 'Reporte_${_client!.name}_${reportModel.dateStr}.pdf';
-        final file = File("${output.path}/$fileName");
-
-        await file.writeAsBytes(pdfBytes);
-
-        // Abrimos el archivo
-        final result = await OpenFilex.open(file.path);
-        if (result.type != ResultType.done) {
-          throw "No se pudo abrir: ${result.message}";
-        }
+      final response = await http.get(Uri.parse(url));
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(response.bodyBytes);
+      
+      final result = await OpenFilex.open(file.path);
+      if (result.type != ResultType.done) {
+        throw Exception("No se pudo abrir: ${result.message}");
       }
-      // --------------------------------------
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('PDF generado exitosamente'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('PDF listo'),
+          backgroundColor: Colors.green,
+        ),
+      );
     } catch (e) {
-      // Cerrar indicador de carga si está abierto
-      if (Navigator.canPop(context)) Navigator.pop(context);
-
-      debugPrint('Error generando PDF: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error al generar PDF: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
+      debugPrint('Error abriendo PDF: $e');
+      rethrow;
     }
   }
 
