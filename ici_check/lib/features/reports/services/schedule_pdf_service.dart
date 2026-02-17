@@ -21,9 +21,9 @@ class SchedulePdfService {
   static const PdfColor colorSlate500 = PdfColor.fromInt(0xFF64748B);
   static const PdfColor colorSlate800 = PdfColor.fromInt(0xFF1E293B);
   
-  static const PdfColor colorSky400 = PdfColor.fromInt(0xFF38BDF8);   
-  static const PdfColor colorAmber400 = PdfColor.fromInt(0xFFFBBF24); 
-  static const PdfColor colorRose400 = PdfColor.fromInt(0xFFFB7185);  
+  static const PdfColor colorSky400 = PdfColor.fromInt(0xFF0284C7);   // sky-600
+  static const PdfColor colorAmber400 = PdfColor.fromInt(0xFFD97706); // amber-600
+  static const PdfColor colorRose400 = PdfColor.fromInt(0xFFE11D48);  // rose-600 
 
   static Future<Uint8List> generateSchedule({
     required PolicyModel policy,
@@ -359,8 +359,10 @@ class SchedulePdfService {
           );
 
           final visibleActivities = def.activities.where((act) {
-            if (viewMode == 'monthly') return act.frequency != Frequency.SEMANAL;
-            return act.frequency == Frequency.SEMANAL;
+            bool isWeeklyFreq = act.frequency == Frequency.SEMANAL || 
+                                act.frequency == Frequency.QUINCENAL;
+            if (viewMode == 'monthly') return !isWeeklyFreq;
+            return isWeeklyFreq; // vista semanal muestra SEMANAL y QUINCENAL
           }).toList();
 
           if (visibleActivities.isEmpty && viewMode == 'weekly') return <pw.TableRow>[];
@@ -539,8 +541,8 @@ class SchedulePdfService {
         height: 8, 
         decoration: pw.BoxDecoration(
           shape: pw.BoxShape.circle, 
-          color: colorSlate200, 
-          border: pw.Border.all(color: color, width: 1.5)
+          color: PdfColors.white,  // fondo blanco para que destaque el borde
+          border: pw.Border.all(color: color, width: 2.0) 
         )
       );
     } else {
@@ -550,7 +552,7 @@ class SchedulePdfService {
         decoration: pw.BoxDecoration(
           shape: pw.BoxShape.circle, 
           color: PdfColors.white, 
-          border: pw.Border.all(color: colorSlate200, width: 1.5)
+          border: pw.Border.all(color: colorSlate400, width: 1.5)
         )
       );
     }
@@ -631,6 +633,7 @@ class SchedulePdfService {
       double freqMonths = 0;
       switch (activity.frequency) {
         case Frequency.SEMANAL: freqMonths = 0.25; break;
+        case Frequency.QUINCENAL: freqMonths = 0.5; break; // ← AGREGAR
         case Frequency.MENSUAL: freqMonths = 1.0; break;
         case Frequency.TRIMESTRAL: freqMonths = 3.0; break;
         case Frequency.CUATRIMESTRAL: freqMonths = 4.0; break; 

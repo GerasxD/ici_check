@@ -35,15 +35,17 @@ class ReportsRepository {
   }
 
   List<ReportEntry> generateEntriesForDate(
-    PolicyModel policy,
-    String dateStr,
-    List<DeviceModel> definitions,
-    bool isWeekly,
-    int timeIndex,
-  ) {
+  PolicyModel policy,
+  String dateStr,
+  List<DeviceModel> definitions,
+  bool isWeekly,
+  int timeIndex, {
+  Map<String, Map<String, String>> savedLocations = const {}, // ← NUEVO
+  }) {
     List<ReportEntry> entries = [];
     int correctedTimeIndex = timeIndex;
 
+    // Para mensual: corregir el timeIndex desde el dateStr
     if (!isWeekly && dateStr.isNotEmpty) {
       try {
         final parts = dateStr.split('-');
@@ -64,11 +66,11 @@ class ReportsRepository {
       final def = definitions.firstWhere(
         (d) => d.id == devInstance.definitionId,
         orElse: () => DeviceModel(
-          id: 'err', 
-          name: 'Unknown', 
-          description: '', 
-          activities: []
-        )
+          id: 'err',
+          name: 'Unknown',
+          description: '',
+          activities: [],
+        ),
       );
 
       if (def.id == 'err') continue;
@@ -78,22 +80,36 @@ class ReportsRepository {
 
         for (var act in def.activities) {
           bool isDue = false;
+          const double epsilon = 0.05;
 
           if (isWeekly) {
-            if (act.frequency == Frequency.SEMANAL) {
-              isDue = true;
-            }
-          } else {
-            if (act.frequency != Frequency.SEMANAL) {
+            // ✅ Vista SEMANAL: solo SEMANAL y QUINCENAL
+            if (act.frequency == Frequency.SEMANAL ||
+                act.frequency == Frequency.QUINCENAL) {
               double freqMonths = _getFrequencyVal(act.frequency);
               int offset = devInstance.scheduleOffsets[act.id] ?? 0;
-              
-              double adjustedTime = correctedTimeIndex - offset.toDouble();
-              const double epsilon = 0.05;
-
+              double adjustedTime = (timeIndex / 4.0) - offset.toDouble(); // ✅ /4.0
               if (adjustedTime >= -epsilon) {
                 double remainder = (adjustedTime % freqMonths).abs();
-                if (remainder < epsilon || (remainder - freqMonths).abs() < epsilon) {
+                if (remainder < epsilon ||
+                    (remainder - freqMonths).abs() < epsilon) {
+                  isDue = true;
+                }
+              }
+            }
+          } else {
+            // ✅ Vista MENSUAL: MENSUAL, TRIMESTRAL, CUATRIMESTRAL, SEMESTRAL, ANUAL
+            if (act.frequency != Frequency.SEMANAL &&
+                act.frequency != Frequency.QUINCENAL &&
+                act.frequency != Frequency.DIARIO) {
+              double freqMonths = _getFrequencyVal(act.frequency);
+              int offset = devInstance.scheduleOffsets[act.id] ?? 0;
+              double adjustedTime =
+                  correctedTimeIndex.toDouble() - offset.toDouble();
+              if (adjustedTime >= -epsilon) {
+                double remainder = (adjustedTime % freqMonths).abs();
+                if (remainder < epsilon ||
+                    (remainder - freqMonths).abs() < epsilon) {
                   isDue = true;
                 }
               }
@@ -101,14 +117,21 @@ class ReportsRepository {
           }
 
           if (isDue) {
-            activityResults[act.id] = null; 
+            activityResults[act.id] = null;
           }
         }
+        final saved = savedLocations[devInstance.instanceId];
+        final savedCustomId = saved?['customId'] ?? '';
+        final savedArea = saved?['area'] ?? '';
 
         entries.add(ReportEntry(
           instanceId: devInstance.instanceId,
           deviceIndex: i,
-          customId: "${def.name.substring(0, 3).toUpperCase()}-$i",
+          // Si hay customId guardado lo usamos, si no el auto-generado
+          customId: savedCustomId.isNotEmpty 
+              ? savedCustomId 
+              : "${def.name.substring(0, 3).toUpperCase()}-$i",
+          area: savedArea, // ← Se pre-llena automáticamente
           results: activityResults,
         ));
       }
@@ -121,10 +144,12 @@ class ReportsRepository {
     String dateStr,
     List<DeviceModel> definitions,
     bool isWeekly,
-    int timeIndex,
-  ) {
+    int timeIndex, {
+    Map<String, Map<String, String>> savedLocations = const {},
+  }) {
     final entries = generateEntriesForDate(
-      policy, dateStr, definitions, isWeekly, timeIndex
+      policy, dateStr, definitions, isWeekly, timeIndex,
+      savedLocations: savedLocations,
     );
 
     debugPrint('✅ Reporte inicializado: ${entries.length} entradas para $dateStr');
@@ -154,6 +179,8 @@ class ReportsRepository {
         return 12.0;
       case Frequency.SEMANAL:
         return 0.25;
+        case Frequency.QUINCENAL:  // ← AGREGAR
+        return 0.5;
       default: 
         return 1.0;
     }

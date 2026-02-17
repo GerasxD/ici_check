@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:ici_check/features/policies/presentation/new_policy_screen.dart';
 import 'package:ici_check/features/scheduler/presentation/scheduler_screen.dart';
@@ -473,6 +474,12 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
   late int _durationMonths;
   late bool _includeWeekly;
   late List<PolicyDevice> _devices;
+  bool _isDisposed = false;
+
+  // NUEVO: Estado para usuarios
+  List<Map<String, dynamic>> _users = [];
+  String? _selectedUserId;
+  bool _loadingUsers = true;
 
   String? _selectedDeviceDefId;
   final TextEditingController _searchController = TextEditingController();
@@ -481,19 +488,47 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
   void initState() {
     super.initState();
     final p = widget.policyToEdit;
-    _clientId =
-        p?.clientId ??
-        (widget.clients.isNotEmpty ? widget.clients.first.id : '');
+    _clientId = p?.clientId ?? (widget.clients.isNotEmpty ? widget.clients.first.id : '');
     _startDate = p?.startDate ?? DateTime.now();
     _durationMonths = p?.durationMonths ?? 12;
     _includeWeekly = p?.includeWeekly ?? false;
     _devices = p != null ? List.from(p.devices) : [];
+    
+    // NUEVO: Inicializar usuario seleccionado desde la póliza
+    _selectedUserId = (p?.assignedUserIds.isNotEmpty == true) ? p!.assignedUserIds.first : null;
+    
+    _loadUsers();
   }
 
   @override
   void dispose() {
+    _isDisposed = true;
     _searchController.dispose();
     super.dispose();
+  }
+
+  // NUEVO: Cargar usuarios desde Firestore
+  Future<void> _loadUsers() async {
+    try {
+      final snap = await FirebaseFirestore.instance.collection('users').get();
+      
+      if (_isDisposed || !mounted) return; // ✅ doble guard
+      
+      setState(() {
+        _users = snap.docs.map((d) {
+          final data = d.data();
+          return {
+            'id': d.id,
+            'name': data['name'] ?? 'Usuario',
+            'role': data['role'] ?? 'staff',
+          };
+        }).toList();
+        _loadingUsers = false;
+      });
+    } catch (e) {
+      if (_isDisposed || !mounted) return;
+      setState(() => _loadingUsers = false);
+    }
   }
 
   void _addDevice() {
@@ -504,7 +539,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
           instanceId: _uuid.v4(),
           definitionId: _selectedDeviceDefId!,
           quantity: 1,
-          scheduleOffsets: {}, // ✅ Mapa mutable explícito
+          scheduleOffsets: {},
         ),
       );
       _selectedDeviceDefId = null;
@@ -536,9 +571,10 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
       backgroundColor: Colors.white,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       child: Container(
-        constraints: const BoxConstraints(maxWidth: 700, maxHeight: 800),
+        constraints: const BoxConstraints(maxWidth: 700, maxHeight: 850), // <-- aumentamos maxHeight
         child: Column(
           children: [
+            // --- HEADER ---
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
@@ -548,13 +584,8 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    widget.policyToEdit == null
-                        ? 'Nueva Póliza'
-                        : 'Editar Póliza',
-                    style: const TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    widget.policyToEdit == null ? 'Nueva Póliza' : 'Editar Póliza',
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   ),
                   IconButton(
                     onPressed: () => Navigator.pop(context),
@@ -570,6 +601,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // --- CLIENTE ---
                     _Label('Cliente Asociado'),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -583,12 +615,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                           isExpanded: true,
                           hint: const Text('Seleccionar Cliente'),
                           items: widget.clients
-                              .map(
-                                (c) => DropdownMenuItem(
-                                  value: c.id,
-                                  child: Text(c.name),
-                                ),
-                              )
+                              .map((c) => DropdownMenuItem(value: c.id, child: Text(c.name)))
                               .toList(),
                           onChanged: (v) => setState(() => _clientId = v!),
                         ),
@@ -596,6 +623,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                     ),
                     const SizedBox(height: 20),
 
+                    // --- FECHAS ---
                     Row(
                       children: [
                         Expanded(
@@ -614,28 +642,16 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                                   if (d != null) setState(() => _startDate = d);
                                 },
                                 child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 12,
-                                    horizontal: 12,
-                                  ),
+                                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
                                   decoration: BoxDecoration(
-                                    border: Border.all(
-                                      color: Colors.grey.shade300,
-                                    ),
+                                    border: Border.all(color: Colors.grey.shade300),
                                     borderRadius: BorderRadius.circular(8),
                                   ),
                                   child: Row(
                                     children: [
-                                      const Icon(
-                                        Icons.calendar_today,
-                                        size: 16,
-                                      ),
+                                      const Icon(Icons.calendar_today, size: 16),
                                       const SizedBox(width: 8),
-                                      Text(
-                                        DateFormat(
-                                          'dd/MM/yyyy',
-                                        ).format(_startDate),
-                                      ),
+                                      Text(DateFormat('dd/MM/yyyy').format(_startDate)),
                                     ],
                                   ),
                                 ),
@@ -652,17 +668,10 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                               TextFormField(
                                 initialValue: _durationMonths.toString(),
                                 keyboardType: TextInputType.number,
-                                onChanged: (v) => setState(
-                                  () => _durationMonths = int.tryParse(v) ?? 12,
-                                ),
+                                onChanged: (v) => setState(() => _durationMonths = int.tryParse(v) ?? 12),
                                 decoration: InputDecoration(
-                                  contentPadding: const EdgeInsets.symmetric(
-                                    vertical: 12,
-                                    horizontal: 12,
-                                  ),
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
+                                  contentPadding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                                 ),
                               ),
                             ],
@@ -673,25 +682,16 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                     const SizedBox(height: 8),
                     Text(
                       'Finaliza el: $endDateStr',
-                      style: TextStyle(
-                        color: Colors.blue.shade800,
-                        fontSize: 13,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: TextStyle(color: Colors.blue.shade800, fontSize: 13, fontWeight: FontWeight.bold),
                     ),
 
                     const SizedBox(height: 20),
+
+                    // --- SWITCH SEMANAL ---
                     SwitchListTile(
-                      title: const Text(
-                        'Habilitar Frecuencia Semanal',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                      ),
-                      subtitle: const Text(
-                        'Permite gestionar revisiones cada semana en el cronograma.',
-                      ),
+                      title: const Text('Habilitar Frecuencia Semanal',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                      subtitle: const Text('Permite gestionar revisiones cada semana en el cronograma.'),
                       value: _includeWeekly,
                       onChanged: (v) => setState(() => _includeWeekly = v),
                       contentPadding: EdgeInsets.zero,
@@ -700,12 +700,85 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
 
                     const Divider(height: 40),
 
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        _Label('Dispositivos en Póliza'),
-                      ],
-                    ),
+                    // --- NUEVO: SECCIÓN RESPONSABLE ---
+                    _Label('Responsable Asignado'),
+                    const SizedBox(height: 8),
+                    if (_loadingUsers)
+                      const Center(child: Padding(
+                        padding: EdgeInsets.all(12),
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ))
+                    else if (_users.isEmpty)
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.grey.shade200),
+                        ),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.info_outline, color: Colors.grey, size: 18),
+                            SizedBox(width: 8),
+                            Text('No hay usuarios disponibles', style: TextStyle(color: Colors.grey)),
+                          ],
+                        ),
+                      )
+                    else
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey.shade300),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: _selectedUserId,
+                            isExpanded: true,
+                            hint: const Text('Seleccionar responsable'),
+                            items: _users.map((u) {
+                              return DropdownMenuItem<String>(
+                                value: u['id'] as String,
+                                child: Row(
+                                  children: [
+                                    CircleAvatar(
+                                      radius: 14,
+                                      backgroundColor: const Color(0xFF2563EB).withOpacity(0.1),
+                                      child: Text(
+                                        (u['name'] as String)[0].toUpperCase(),
+                                        style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.bold,
+                                          color: Color(0xFF2563EB),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(child: Text(u['name'] as String)),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: Colors.grey.shade100,
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Text(
+                                        u['role'] as String,
+                                        style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }).toList(),
+                            onChanged: (v) => setState(() => _selectedUserId = v),
+                          ),
+                        ),
+                      ),
+
+                    const Divider(height: 40),
+
+                    // --- DISPOSITIVOS ---
+                    _Label('Dispositivos en Póliza'),
                     const SizedBox(height: 8),
                     Container(
                       padding: const EdgeInsets.all(12),
@@ -716,19 +789,11 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                       ),
                       child: Column(
                         children: [
-                          // ============================================
-                          // NUEVO: AUTOCOMPLETE CON BÚSQUEDA
-                          // ============================================
                           Autocomplete<DeviceModel>(
                             optionsBuilder: (TextEditingValue textEditingValue) {
-                              if (textEditingValue.text.isEmpty) {
-                                return widget.deviceDefinitions;
-                              }
-                              return widget.deviceDefinitions.where((device) {
-                                return device.name.toLowerCase().contains(
-                                  textEditingValue.text.toLowerCase(),
-                                );
-                              });
+                              if (textEditingValue.text.isEmpty) return widget.deviceDefinitions;
+                              return widget.deviceDefinitions.where((device) =>
+                                  device.name.toLowerCase().contains(textEditingValue.text.toLowerCase()));
                             },
                             displayStringForOption: (DeviceModel option) => option.name,
                             fieldViewBuilder: (context, controller, focusNode, onSubmitted) {
@@ -786,12 +851,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                                               children: [
                                                 Icon(Icons.devices_other, size: 18, color: Colors.grey.shade600),
                                                 const SizedBox(width: 12),
-                                                Expanded(
-                                                  child: Text(
-                                                    device.name,
-                                                    style: const TextStyle(fontSize: 14),
-                                                  ),
-                                                ),
+                                                Expanded(child: Text(device.name, style: const TextStyle(fontSize: 14))),
                                                 Icon(Icons.add_circle_outline, size: 18, color: Colors.green.shade600),
                                               ],
                                             ),
@@ -808,25 +868,15 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                           if (_devices.isEmpty)
                             const Padding(
                               padding: EdgeInsets.all(20),
-                              child: Text(
-                                'No hay dispositivos asignados',
-                                style: TextStyle(color: Colors.grey),
-                              ),
+                              child: Text('No hay dispositivos asignados', style: TextStyle(color: Colors.grey)),
                             ),
-
                           ..._devices.asMap().entries.map((entry) {
                             final index = entry.key;
                             final item = entry.value;
                             final def = widget.deviceDefinitions.firstWhere(
                               (d) => d.id == item.definitionId,
-                              orElse: () => DeviceModel(
-                                id: '',
-                                name: 'Desc.',
-                                description: '',
-                                activities: [],
-                              ),
+                              orElse: () => DeviceModel(id: '', name: 'Desc.', description: '', activities: []),
                             );
-
                             return Container(
                               margin: const EdgeInsets.only(bottom: 8),
                               padding: const EdgeInsets.all(8),
@@ -838,16 +888,10 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                               child: Row(
                                 children: [
                                   Expanded(
-                                    child: Text(
-                                      def.name,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 13,
-                                      ),
-                                    ),
+                                    child: Text(def.name,
+                                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
                                   ),
                                   const SizedBox(width: 8),
-                                  // NUEVO: Campo de texto editable para cantidad
                                   Container(
                                     decoration: BoxDecoration(
                                       color: Colors.grey.shade100,
@@ -857,25 +901,17 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        _QtyBtn(
-                                          Icons.remove,
-                                          () => _updateQuantity(index, -1),
-                                        ),
+                                        _QtyBtn(Icons.remove, () => _updateQuantity(index, -1)),
                                         Container(
                                           width: 50,
                                           padding: const EdgeInsets.symmetric(horizontal: 4),
                                           child: TextField(
-                                            controller: TextEditingController(
-                                              text: '${item.quantity}',
-                                            )..selection = TextSelection.fromPosition(
-                                                TextPosition(offset: '${item.quantity}'.length),
-                                              ),
+                                            controller: TextEditingController(text: '${item.quantity}')
+                                              ..selection = TextSelection.fromPosition(
+                                                  TextPosition(offset: '${item.quantity}'.length)),
                                             textAlign: TextAlign.center,
                                             keyboardType: TextInputType.number,
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 14,
-                                            ),
+                                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                                             decoration: const InputDecoration(
                                               isDense: true,
                                               border: InputBorder.none,
@@ -884,42 +920,21 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                                             onChanged: (value) {
                                               final newQty = int.tryParse(value);
                                               if (newQty != null && newQty > 0 && newQty <= 999) {
-                                                setState(() {
-                                                  _devices[index].quantity = newQty;
-                                                });
-                                              }
-                                            },
-                                            onSubmitted: (value) {
-                                              final newQty = int.tryParse(value);
-                                              if (newQty == null || newQty <= 0) {
-                                                // Si el valor es inválido, revertir a 1
-                                                setState(() {
-                                                  _devices[index].quantity = 1;
-                                                });
+                                                setState(() => _devices[index].quantity = newQty);
                                               }
                                             },
                                           ),
                                         ),
-                                        _QtyBtn(
-                                          Icons.add,
-                                          () => _updateQuantity(index, 1),
-                                        ),
+                                        _QtyBtn(Icons.add, () => _updateQuantity(index, 1)),
                                       ],
                                     ),
                                   ),
                                   const SizedBox(width: 8),
                                   IconButton(
                                     onPressed: () => _removeDevice(index),
-                                    icon: const Icon(
-                                      Icons.close,
-                                      color: Colors.red,
-                                      size: 18,
-                                    ),
+                                    icon: const Icon(Icons.close, color: Colors.red, size: 18),
                                     padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(
-                                      minWidth: 32,
-                                      minHeight: 32,
-                                    ),
+                                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                                   ),
                                 ],
                               ),
@@ -933,6 +948,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
               ),
             ),
 
+            // --- FOOTER ---
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
@@ -944,19 +960,14 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                 children: [
                   TextButton(
                     onPressed: () => Navigator.pop(context),
-                    child: const Text(
-                      'Cancelar',
-                      style: TextStyle(color: Colors.grey),
-                    ),
+                    child: const Text('Cancelar', style: TextStyle(color: Colors.grey)),
                   ),
                   const SizedBox(width: 12),
                   ElevatedButton(
                     onPressed: () {
                       if (_clientId.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Selecciona un cliente'),
-                          ),
+                          const SnackBar(content: Text('Selecciona un cliente')),
                         );
                         return;
                       }
@@ -967,19 +978,18 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                         durationMonths: _durationMonths,
                         includeWeekly: _includeWeekly,
                         devices: _devices,
-                        assignedUserIds:
-                            widget.policyToEdit?.assignedUserIds ?? [],
+                        assignedUserIds: _selectedUserId != null
+                            ? [_selectedUserId!]
+                            : (widget.policyToEdit?.assignedUserIds ?? []),
                       );
-                      widget.onSave(newPolicy);
+                      final onSave = widget.onSave;
                       Navigator.pop(context);
+                      onSave(newPolicy);
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF2563EB),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 24,
-                        vertical: 16,
-                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
                     ),
                     child: const Text('Guardar Póliza'),
                   ),

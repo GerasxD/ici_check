@@ -8,6 +8,7 @@ enum ActivityType {
 enum Frequency { 
   DIARIO,
   SEMANAL,
+  QUINCENAL, // <--- AGREGADO AQUÍ (Cada 15 días)
   MENSUAL,
   TRIMESTRAL,
   CUATRIMESTRAL, // <--- AGREGADO AQUÍ (4 Meses)

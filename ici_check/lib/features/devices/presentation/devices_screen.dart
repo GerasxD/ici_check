@@ -165,6 +165,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
     val = val.toLowerCase().trim();
     if (val.contains('diari')) return Frequency.DIARIO;
     if (val.contains('seman')) return Frequency.SEMANAL;
+    if (val.contains('quincen')) return Frequency.QUINCENAL; // ← AGREGAR
     if (val.contains('mensual')) return Frequency.MENSUAL;
     if (val.contains('cuatrimest')) return Frequency.CUATRIMESTRAL; // ✅ PRIMERO
     if (val.contains('trimest')) return Frequency.TRIMESTRAL;        // ✅ DESPUÉS

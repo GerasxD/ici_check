@@ -266,8 +266,8 @@ class DeviceSectionImproved extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheduledActivityIds = entries.expand((e) => e.results.keys).toSet();
     final relevantActivities = deviceDef.activities
-        .where((a) => scheduledActivityIds.contains(a.id))
-        .toList();
+      .where((a) => scheduledActivityIds.contains(a.id))
+      .toList();
 
     if (relevantActivities.isEmpty) return const SizedBox();
     
@@ -620,20 +620,21 @@ class DeviceSectionImproved extends StatelessWidget {
           width: totalWidth,
           child: Column(
             children: [
-              // Header (sin cambios)
-              Container(
-                height: 48,
-                color: const Color(0xFFF1F5F9),
-                child: Row(
-                  children: [
-                    _buildHeaderCell('ID', 80),
-                    _buildHeaderCell('UBICACIÓN', 150),
-                    ...activities.map((act) => _buildHeaderCell(act.name, 100)),
-                    _buildHeaderCell('FOTO/OBS', 110),
-                  ],
+              // DESPUÉS: Sin height fija, se adapta al contenido
+              IntrinsicHeight(
+                child: Container(
+                  color: const Color(0xFFF1F5F9),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _buildHeaderCell('ID', 80),
+                      _buildHeaderCell('UBICACIÓN', 150),
+                      ...activities.map((act) => _buildHeaderCell(act.name, 100)),
+                      _buildHeaderCell('FOTO/OBS', 110),
+                    ],
+                  ),
                 ),
               ),
-
               // Lista (sin cambios)
               ListView.builder(
                 shrinkWrap: true,
@@ -641,52 +642,56 @@ class DeviceSectionImproved extends StatelessWidget {
                 itemCount: entries.length,
                 itemBuilder: (context, index) {
                   final entry = entries[index];
-                  return Container(
-                    height: 52,
-                    decoration: const BoxDecoration(
-                      border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
-                    ),
-                    child: Row(
-                      children: [
-                        SizedBox(width: 80, child: Center(child: _buildInputCell(index, entry.customId, 'id', 60, onCustomIdChanged))),
-                        SizedBox(width: 150, child: Center(child: _buildInputCell(index, entry.area, 'area', 130, onAreaChanged, hint: '...'))),
-                        
-                        ...activities.map((act) {
-                          if (!entry.results.containsKey(act.id)) return const SizedBox(width: 100);
-                          return SizedBox(
-                            width: 100,
-                            child: Center(
-                              child: InkWell(
-                                onTap: _canEdit ? () => onToggleStatus(index, act.id) : null,
-                                borderRadius: BorderRadius.circular(12),
-                                child: _buildStatusBadge(entry.results[act.id]),
+                 // DESPUÉS: altura dinámica con IntrinsicHeight
+                  return IntrinsicHeight(
+                    child: Container(
+                      constraints: const BoxConstraints(minHeight: 52), // ✅ Mínimo 52, crece si necesita
+                      decoration: const BoxDecoration(
+                        border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          SizedBox(width: 80, child: Center(child: _buildInputCell(index, entry.customId, 'id', 60, onCustomIdChanged))),
+                          SizedBox(width: 150, child: Center(child: _buildInputCell(index, entry.area, 'area', 130, onAreaChanged, hint: '...'))),
+                          
+                          ...activities.map((act) {
+                            if (!entry.results.containsKey(act.id)) return const SizedBox(width: 100);
+                            return SizedBox(
+                              width: 100,
+                              child: Center(
+                                child: InkWell(
+                                  onTap: _canEdit ? () => onToggleStatus(index, act.id) : null,
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: _buildStatusBadge(entry.results[act.id]),
+                                ),
                               ),
-                            ),
-                          );
-                        }),
+                            );
+                          }),
 
-                        SizedBox(
-                          width: 110,
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              _buildCompactActionIcon(
-                                icon: entry.photoUrls.isNotEmpty ? Icons.camera_alt : Icons.camera_alt_outlined,
-                                isActive: entry.photoUrls.isNotEmpty,
-                                activeColor: const Color(0xFF3B82F6),
-                                onTap: _canEdit ? () => onCameraClick(index) : null,
-                              ),
-                              const SizedBox(width: 8),
-                              _buildCompactActionIcon(
-                                icon: entry.observations.isNotEmpty ? Icons.comment : Icons.comment_outlined,
-                                isActive: entry.observations.isNotEmpty,
-                                activeColor: const Color(0xFFF59E0B),
-                                onTap: _canEdit ? () => onObservationClick(index) : null,
-                              ),
-                            ],
+                          SizedBox(
+                            width: 110,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                _buildCompactActionIcon(
+                                  icon: entry.photoUrls.isNotEmpty ? Icons.camera_alt : Icons.camera_alt_outlined,
+                                  isActive: entry.photoUrls.isNotEmpty,
+                                  activeColor: const Color(0xFF3B82F6),
+                                  onTap: _canEdit ? () => onCameraClick(index) : null,
+                                ),
+                                const SizedBox(width: 8),
+                                _buildCompactActionIcon(
+                                  icon: entry.observations.isNotEmpty ? Icons.comment : Icons.comment_outlined,
+                                  isActive: entry.observations.isNotEmpty,
+                                  activeColor: const Color(0xFFF59E0B),
+                                  onTap: _canEdit ? () => onObservationClick(index) : null,
+                                ),
+                              ],
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   );
                 },
@@ -701,13 +706,19 @@ class DeviceSectionImproved extends StatelessWidget {
   Widget _buildHeaderCell(String text, double width) {
     return SizedBox(
       width: width,
-      child: Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
         child: Text(
           text,
-          style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: Color(0xFF1E293B)),
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFF1E293B),
+          ),
           textAlign: TextAlign.center,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
+          softWrap: true,       // ✅ Texto completo
+          maxLines: null,       // ✅ Sin límite
+          overflow: TextOverflow.visible,
         ),
       ),
     );
@@ -824,8 +835,11 @@ class DeviceSectionImproved extends StatelessWidget {
                                     fontSize: 12, 
                                     fontWeight: FontWeight.w600, 
                                     color: Color(0xFF334155),
-                                    height: 1.2, // Mejor interlineado
-                                  ), 
+                                    height: 1.4,
+                                  ),
+                                  softWrap: true,       // ✅ Permite salto de línea
+                                  maxLines: null,       // ✅ Sin límite de líneas
+                                  overflow: TextOverflow.visible, // ✅ No corta el texto
                                 ),
                               ),
                               const SizedBox(width: 6),
@@ -896,7 +910,7 @@ class DeviceSectionImproved extends StatelessWidget {
 
     switch (status) {
       case 'OK':
-        color = const Color(0xFF1E293B);
+        color = const Color(0xFF10B981); // ✅ Verde
         child = Container(
           width: 8,
           height: 8,
@@ -962,8 +976,8 @@ class DeviceSectionImproved extends StatelessWidget {
     
     switch (status) {
       case 'OK':
-        bgColor = const Color(0xFF1E293B);
-        borderColor = const Color(0xFF1E293B);
+        bgColor = const Color(0xFF10B981);   // ✅ Verde
+        borderColor = const Color(0xFF059669); // ✅ Verde oscuro para el borde
         child = Container(
           width: 8,
           height: 8,

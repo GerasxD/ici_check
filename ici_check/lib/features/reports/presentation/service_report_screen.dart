@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
+import 'package:ici_check/features/devices/data/devices_repository.dart';
+import 'package:ici_check/features/reports/services/device_location_service.dart';
 import 'package:ici_check/features/reports/services/photo_storage_service.dart';
 import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
 import 'package:ici_check/features/reports/widgets/report_controls.dart';
@@ -51,26 +53,41 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   final ReportsRepository _repo = ReportsRepository();
   final SettingsRepository _settingsRepo = SettingsRepository();
   final PoliciesRepository _policiesRepo = PoliciesRepository(); // NUEVO
+
+  final DevicesRepository _devicesRepo = DevicesRepository();
+  List<DeviceModel> _currentDevices =
+      []; // ← lista viva, se actualiza con Firebase
+  StreamSubscription? _devicesSubscription; // ← suscripción
+
+  // Getter: devuelve los dispositivos actualizados si ya se cargaron,
+  // o los que vinieron como parámetro si aún no llegó el stream.
+  List<DeviceModel> get _devicesEffective =>
+      _currentDevices.isNotEmpty ? _currentDevices : widget.devices;
+
   final ImagePicker _picker = ImagePicker();
   Timer? _autoSaveDebounce;
   final PhotoStorageService _photoService = PhotoStorageService();
   bool _isUploadingPhoto = false;
-  
+
   // Estado del Reporte
   ServiceReportModel? _report;
   CompanySettingsModel? _companySettings;
   PolicyModel? _currentPolicy; // NUEVO - Guardamos la póliza actual
   bool _isLoading = true;
-  
+
   // Estado de la UI
   bool _adminOverride = false;
   String? _currentUserId;
   UserModel? _currentUser;
-  
+
   // Suscripciones de streams
   StreamSubscription? _policySubscription; // NUEVO
   StreamSubscription? _reportSubscription; // NUEVO
-  
+
+  final DeviceLocationService _locationService = DeviceLocationService();
+  Map<String, Map<String, String>> _savedLocations = {};
+  Timer? _locationSaveDebounce;
+
   // Controladores de firma
   final SignatureController _providerSigController = SignatureController(
     penStrokeWidth: 2,
@@ -101,10 +118,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   @override
   void dispose() {
+    _locationSaveDebounce?.cancel(); // ✅ AGREGAR
     _providerSigController.dispose();
     _clientSigController.dispose();
     _policySubscription?.cancel(); // NUEVO
     _reportSubscription?.cancel(); // NUEVO
+    _devicesSubscription?.cancel(); // ← AGREGAR ESTA LÍNEA
     _autoSaveDebounce?.cancel();
     super.dispose();
   }
@@ -112,12 +131,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   // ==========================================
   // CARGA DE DATOS E INICIALIZACIÓN (MEJORADO)
   // ==========================================
-
   Future<void> _loadData() async {
     try {
       final companyData = await _settingsRepo.getSettings();
       final storedUserId = await _getCurrentUserId();
-      
+
       UserModel? currentU;
       if (storedUserId != null && widget.users.isNotEmpty) {
         currentU = widget.users.firstWhere(
@@ -126,20 +144,65 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         );
       }
 
+      final instanceIds = widget.policy.devices
+          .map((d) => d.instanceId)
+          .toList();
+
+      _savedLocations = await _locationService.getLocationsForPolicy(
+        widget.policyId,
+        instanceIds,
+      );
+
+      // ====================================================
+      // NUEVO: ESCUCHAR CAMBIOS EN LOS DEVICE MODELS EN TIEMPO REAL
+      // ====================================================
+      _devicesSubscription = _devicesRepo.getDevicesStream().listen((
+        updatedDevices,
+      ) {
+        if (mounted) {
+          final bool firstLoad = _currentDevices.isEmpty;
+
+          // Detectar si cambió algo relevante (frecuencias de actividades)
+          bool hasChanges =
+              firstLoad ||
+              _hasRelevantDeviceChanges(_currentDevices, updatedDevices);
+
+          setState(() {
+            _currentDevices = updatedDevices;
+          });
+
+          // Si ya tenemos el reporte cargado y los dispositivos cambiaron,
+          // re-sincronizar para quitar/agregar las actividades que correspondan
+          if (!firstLoad && hasChanges && _report != null) {
+            debugPrint(
+              "🔄 Dispositivos actualizados (frecuencias cambiadas). Re-sincronizando reporte...",
+            );
+            _resyncReportWithCurrentDevices();
+          }
+        }
+      });
+
       // ====================================================
       // NUEVO: ESCUCHAR CAMBIOS EN LA PÓLIZA EN TIEMPO REAL
       // ====================================================
-      _policySubscription = _policiesRepo.getPoliciesStream().listen((policies) {
+      _policySubscription = _policiesRepo.getPoliciesStream().listen((
+        policies,
+      ) {
         try {
-          final updatedPolicy = policies.firstWhere((p) => p.id == widget.policyId);
-          
+          final updatedPolicy = policies.firstWhere(
+            (p) => p.id == widget.policyId,
+          );
+
           // Si detectamos cambios en la póliza, re-sincronizamos el reporte
-          if (_currentPolicy != null && _hasRelevantPolicyChanges(_currentPolicy!, updatedPolicy)) {
-            debugPrint("🔄 Detectados cambios en la póliza. Re-sincronizando reporte...");
+          if (_currentPolicy != null &&
+              _hasRelevantPolicyChanges(_currentPolicy!, updatedPolicy)) {
+            debugPrint(
+              "🔄 Detectados cambios en la póliza. Re-sincronizando reporte...",
+            );
             setState(() {
               _currentPolicy = updatedPolicy;
             });
-            
+
             // Solo re-sincronizamos si ya tenemos un reporte cargado
             if (_report != null) {
               _syncReportWithPolicy(updatedPolicy);
@@ -158,13 +221,15 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       });
 
       // Escuchamos el stream del reporte
-      _reportSubscription = _repo.getReportStream(widget.policyId, widget.dateStr).listen((existingReport) {
-        if (existingReport != null) {
-          _syncAndLoadReport(existingReport);
-        } else {
-          _initializeNewReport();
-        }
-      });
+      _reportSubscription = _repo
+          .getReportStream(widget.policyId, widget.dateStr)
+          .listen((existingReport) {
+            if (existingReport != null) {
+              _syncAndLoadReport(existingReport);
+            } else {
+              _initializeNewReport();
+            }
+          });
 
       if (mounted) {
         setState(() {
@@ -180,22 +245,109 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   // ====================================================
+  // NUEVO: DETECTAR CAMBIOS RELEVANTES EN DEVICE MODELS
+  // ====================================================
+  bool _hasRelevantDeviceChanges(
+    List<DeviceModel> oldDevs,
+    List<DeviceModel> newDevs,
+  ) {
+    if (oldDevs.length != newDevs.length) return true;
+
+    for (final oldDev in oldDevs) {
+      try {
+        final newDev = newDevs.firstWhere((d) => d.id == oldDev.id);
+
+        // Comparar actividades (cantidad o frecuencias)
+        if (oldDev.activities.length != newDev.activities.length) return true;
+
+        for (int i = 0; i < oldDev.activities.length; i++) {
+          final oldAct = oldDev.activities[i];
+          final newAct = newDev.activities[i];
+          if (oldAct.id != newAct.id) return true;
+          if (oldAct.frequency != newAct.frequency)
+            return true; // ← el cambio clave
+        }
+      } catch (_) {
+        return true; // El dispositivo no existe en la nueva lista
+      }
+    }
+    return false;
+  }
+
+  // ====================================================
+  // NUEVO: RE-SINCRONIZAR REPORTE USANDO DISPOSITIVOS ACTUALIZADOS
+  // ====================================================
+  Future<void> _resyncReportWithCurrentDevices() async {
+    if (_report == null || _currentDevices.isEmpty) return;
+
+    final policyToUse = _currentPolicy ?? widget.policy;
+    bool isWeekly = widget.dateStr.contains('W');
+    int timeIndex = _calculateTimeIndex(isWeekly);
+
+    final idealEntries = _repo.generateEntriesForDate(
+      policyToUse,
+      widget.dateStr,
+      _currentDevices,
+      isWeekly,
+      timeIndex,
+    );
+
+    final mergedEntries = _mergeEntries(_report!.entries, idealEntries);
+
+    // ✅ FIX: Comparar el contenido real de results, no solo la longitud
+    bool changed = false;
+    if (mergedEntries.length != _report!.entries.length) {
+      changed = true;
+    } else {
+      for (int i = 0; i < mergedEntries.length; i++) {
+        final newResultKeys = mergedEntries[i].results.keys.toSet();
+        final oldResultKeys = _report!.entries[i].results.keys.toSet();
+        if (!newResultKeys.containsAll(oldResultKeys) ||
+            !oldResultKeys.containsAll(newResultKeys)) {
+          changed = true;
+          break;
+        }
+      }
+    }
+
+    if (!changed) {
+      debugPrint("✅ No hubo cambios reales en el reporte, omitiendo guardado.");
+      return;
+    }
+
+    final updatedReport = _report!.copyWith(entries: mergedEntries);
+    await _repo.saveReport(updatedReport);
+
+    if (mounted) {
+      setState(() => _report = updatedReport);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Actividades actualizadas según la nueva frecuencia'),
+          backgroundColor: Colors.blue,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  // ====================================================
   // NUEVO: DETECTAR SI HUBO CAMBIOS RELEVANTES EN LA PÓLIZA
   // ====================================================
   bool _hasRelevantPolicyChanges(PolicyModel old, PolicyModel updated) {
     // Comparar si cambiaron los dispositivos (cantidad o tipo)
     if (old.devices.length != updated.devices.length) return true;
-    
+
     // Verificar si algún dispositivo cambió su definitionId o cantidad
     for (int i = 0; i < old.devices.length; i++) {
       if (i >= updated.devices.length) return true;
-      if (old.devices[i].definitionId != updated.devices[i].definitionId) return true;
+      if (old.devices[i].definitionId != updated.devices[i].definitionId)
+        return true;
       if (old.devices[i].quantity != updated.devices[i].quantity) return true;
     }
-    
+
     // Verificar si cambió la frecuencia semanal (afecta qué actividades se muestran)
     if (old.includeWeekly != updated.includeWeekly) return true;
-    
+
     return false;
   }
 
@@ -212,7 +364,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     final idealEntries = _repo.generateEntriesForDate(
       updatedPolicy, // Usar la póliza actualizada
       widget.dateStr,
-      widget.devices,
+      _devicesEffective,
       isWeekly,
       timeIndex,
     );
@@ -222,14 +374,14 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
     // Guardar el reporte actualizado
     final updatedReport = _report!.copyWith(entries: mergedEntries);
-    
+
     await _repo.saveReport(updatedReport);
-    
+
     if (mounted) {
       setState(() {
         _report = updatedReport;
       });
-      
+
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Reporte actualizado con los cambios de la póliza'),
@@ -247,10 +399,15 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     int timeIndex = 0;
 
     if (!isWeekly) {
-      DateTime pStart = DateTime(widget.policy.startDate.year, widget.policy.startDate.month, 1);
+      DateTime pStart = DateTime(
+        widget.policy.startDate.year,
+        widget.policy.startDate.month,
+        1,
+      );
       try {
         DateTime rDate = DateFormat('yyyy-MM').parse(widget.dateStr);
-        timeIndex = (rDate.year - pStart.year) * 12 + (rDate.month - pStart.month);
+        timeIndex =
+            (rDate.year - pStart.year) * 12 + (rDate.month - pStart.month);
       } catch (e) {
         debugPrint("Error parsing date: $e");
       }
@@ -262,74 +419,104 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     return timeIndex;
   }
 
-  // ====================================================
-  // HELPER: FUSIONAR ENTRADAS (MANTENER DATOS EXISTENTES)
-  // ====================================================
-  List<ReportEntry> _mergeEntries(List<ReportEntry> existing, List<ReportEntry> ideal) {
+  List<ReportEntry> _mergeEntries(
+  List<ReportEntry> existing,
+  List<ReportEntry> ideal,
+  ) {
     List<ReportEntry> merged = [];
-    
-    // Mapa para búsqueda rápida
     Map<String, ReportEntry> existingMap = {
-      for (var e in existing) e.instanceId: e
+      for (var e in existing) e.instanceId: e,
     };
 
     for (var idealEntry in ideal) {
       if (existingMap.containsKey(idealEntry.instanceId)) {
-        // El dispositivo ya existía: Combinamos resultados
         var existingEntry = existingMap[idealEntry.instanceId]!;
-        Map<String, String?> mergedResults = Map.from(existingEntry.results);
         
-        // Agregar actividades nuevas
-        idealEntry.results.forEach((actId, _) {
-          if (!mergedResults.containsKey(actId)) {
+        // ✅ FIX CRÍTICO: La lista ideal es la FUENTE DE VERDAD para qué actividades
+        // deben aparecer en este periodo. Solo mantenemos actividades que están en ideal.
+        Map<String, String?> mergedResults = {};
+        
+        for (final actId in idealEntry.results.keys) {
+          // Si la actividad ya tenía respuesta en el reporte existente, la conservamos
+          if (existingEntry.results.containsKey(actId)) {
+            mergedResults[actId] = existingEntry.results[actId];
+          } else {
+            // Actividad nueva (no tenía respuesta aún)
             mergedResults[actId] = null;
           }
-        });
+        }
+        final saved = _savedLocations[existingEntry.instanceId];
+        final resolvedCustomId = (saved?['customId'] ?? '').isNotEmpty
+          ? saved!['customId']!
+          : existingEntry.customId;
+        final resolvedArea = (saved?['area'] ?? '').isNotEmpty
+          ? saved!['area']!
+          : existingEntry.area;
 
-        // Eliminar actividades que ya no tocan (solo si están vacías)
-        List<String> toRemove = [];
-        mergedResults.keys.forEach((actId) {
-          if (!idealEntry.results.containsKey(actId)) {
-            if (mergedResults[actId] == null) {
-              toRemove.add(actId);
-            }
-          }
-        });
-        
-        toRemove.forEach(mergedResults.remove);
-
-        merged.add(existingEntry.copyWith(results: mergedResults));
+        merged.add(existingEntry.copyWith(
+          results: mergedResults,
+          customId: resolvedCustomId,
+          area: resolvedArea,
+        ));
+            
       } else {
-        // Dispositivo nuevo
         merged.add(idealEntry);
       }
     }
-
     return merged;
   }
 
   void _syncAndLoadReport(ServiceReportModel existingReport) {
     bool isWeekly = widget.dateStr.contains('W');
     int timeIndex = _calculateTimeIndex(isWeekly);
-
-    // Usamos la póliza actual (que puede haber cambiado)
     final policyToUse = _currentPolicy ?? widget.policy;
 
     final idealEntries = _repo.generateEntriesForDate(
       policyToUse,
       widget.dateStr,
-      widget.devices,
+      _devicesEffective,
       isWeekly,
       timeIndex,
     );
 
     final mergedEntries = _mergeEntries(existingReport.entries, idealEntries);
-    bool hasChanges = mergedEntries.length != existingReport.entries.length;
 
-    if (hasChanges) {
-      debugPrint("🔄 Sincronizando reporte con cambios...");
+    // Cambios en actividades
+    bool hasChanges = mergedEntries.length != existingReport.entries.length;
+    if (!hasChanges) {
+      for (int i = 0; i < mergedEntries.length; i++) {
+        final newKeys = mergedEntries[i].results.keys.toSet();
+        final oldKeys = existingReport.entries[i].results.keys.toSet();
+        if (!newKeys.containsAll(oldKeys) || !oldKeys.containsAll(newKeys)) {
+          hasChanges = true;
+          break;
+        }
+      }
+    }
+
+    // ✅ NUEVO: Detectar si hay ubicaciones guardadas que aplicar
+    bool hasLocationChanges = false;
+    if (!hasChanges && _savedLocations.isNotEmpty) {
+      for (int i = 0; i < mergedEntries.length; i++) {
+        final original = existingReport.entries[i];
+        final merged = mergedEntries[i];
+        // Si el merge cambió customId o area, hay ubicaciones que aplicar
+        if (original.customId != merged.customId || original.area != merged.area) {
+          hasLocationChanges = true;
+          break;
+        }
+      }
+    }
+
+    if (hasChanges || hasLocationChanges) {
+      debugPrint("🔄 Sincronizando reporte ${hasLocationChanges ? '(ubicaciones)' : '(actividades)'}...");
       final updatedReport = existingReport.copyWith(entries: mergedEntries);
-      _repo.saveReport(updatedReport);
+      
+      // Solo guardar en Firebase si cambiaron actividades, no solo ubicaciones
+      // (las ubicaciones ya están guardadas en device_locations)
+      if (hasChanges) {
+        _repo.saveReport(updatedReport);
+      }
 
       if (mounted) {
         setState(() {
@@ -368,7 +555,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   Future<void> _processAndSaveSignatures() async {
     if (_report == null) return;
-    
+
     String? providerSigBase64 = _report!.providerSignature;
     String? clientSigBase64 = _report!.clientSignature;
 
@@ -425,13 +612,14 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     final newReport = _repo.initializeReport(
       policyToUse,
       widget.dateStr,
-      widget.devices,
+      _devicesEffective,
       isWeekly,
       timeIndex,
+      savedLocations: _savedLocations, // ← NUEVO
     );
 
     _repo.saveReport(newReport);
-    
+
     if (mounted) {
       setState(() {
         _report = newReport;
@@ -443,7 +631,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   // ==========================================
   // LÓGICA DE NEGOCIO (Sin cambios)
   // ==========================================
-  void _updateEntry(int index, {
+  void _updateEntry(
+    int index, {
     String? customId,
     String? area,
     Map<String, String?>? results,
@@ -468,12 +657,29 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     );
 
     final updatedReport = _report!.copyWith(entries: entries);
-    
+
     setState(() {
       _report = updatedReport;
     });
 
     _repo.saveReport(_report!);
+
+    // ✅ NUEVO: Auto-guardar ubicación cuando customId o area cambian
+    if (customId != null || area != null) {
+      final newCustomId = customId ?? entry.customId;
+      final newArea = area ?? entry.area;
+
+      _locationSaveDebounce?.cancel();
+      _locationSaveDebounce = Timer(const Duration(seconds: 2), () {
+        _locationService.saveLocation(
+          policyId: widget.policyId,
+          instanceId: entry.instanceId,
+          customId: newCustomId,
+          area: newArea,
+        );
+        debugPrint("📍 Ubicación guardada: ${entry.instanceId} → $newArea");
+      });
+    }
   }
 
   void _toggleStatus(int entryIndex, String activityId, String defId) {
@@ -485,11 +691,16 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     String? current = entry.results[activityId];
     String? next;
 
-    if (current == null) next = 'OK';
-    else if (current == 'OK') next = 'NOK';
-    else if (current == 'NOK') next = 'NA';
-    else if (current == 'NA') next = 'NR';
-    else next = null;
+    if (current == null)
+      next = 'OK';
+    else if (current == 'OK')
+      next = 'NOK';
+    else if (current == 'NOK')
+      next = 'NA';
+    else if (current == 'NA')
+      next = 'NR';
+    else
+      next = null;
 
     final newResults = Map<String, String?>.from(entry.results);
     newResults[activityId] = next;
@@ -501,9 +712,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     if (_report == null) return;
 
     // PASO 1: Obtener asignaciones actuales del dispositivo
-    final currentAssignments = List<String>.from(_report!.sectionAssignments[defId] ?? []);
-    
-    debugPrint("📋 ANTES: Dispositivo $defId tiene asignados: $currentAssignments");
+    final currentAssignments = List<String>.from(
+      _report!.sectionAssignments[defId] ?? [],
+    );
+
+    debugPrint(
+      "📋 ANTES: Dispositivo $defId tiene asignados: $currentAssignments",
+    );
     debugPrint("   Intentando toggle de usuario: $userId");
 
     // PASO 2: Agregar o quitar el usuario
@@ -515,16 +730,22 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       debugPrint("   ➕ AGREGANDO: Técnico $userId agregado");
     }
 
-    debugPrint("📋 DESPUÉS: Dispositivo $defId ahora tiene: $currentAssignments");
+    debugPrint(
+      "📋 DESPUÉS: Dispositivo $defId ahora tiene: $currentAssignments",
+    );
 
     // PASO 3: Actualizar mapa de asignaciones por dispositivo
-    final newSectionAssignments = Map<String, List<String>>.from(_report!.sectionAssignments);
+    final newSectionAssignments = Map<String, List<String>>.from(
+      _report!.sectionAssignments,
+    );
     newSectionAssignments[defId] = List<String>.from(currentAssignments);
 
     // ✅ PASO 4 CORREGIDO: Preservar técnicos globales existentes
     // Primero tomamos TODOS los técnicos que ya estaban asignados globalmente
-    final Set<String> allAssignedTechs = Set<String>.from(_report!.assignedTechnicianIds);
-    
+    final Set<String> allAssignedTechs = Set<String>.from(
+      _report!.assignedTechnicianIds,
+    );
+
     // Luego agregamos los técnicos de dispositivos específicos
     newSectionAssignments.forEach((defId, techIds) {
       debugPrint("   Device $defId → Tecnicos: $techIds");
@@ -538,7 +759,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       sectionAssignments: newSectionAssignments,
       assignedTechnicianIds: allAssignedTechs.toList(),
     );
-    
+
     // PASO 6: Actualizar estado
     setState(() => _report = updatedReport);
 
@@ -550,7 +771,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   bool _canEditSection(String defId) {
     if (!_isEditable()) return false;
     if (_isUserCoordinator() && _adminOverride) return true;
-    
+
     final assigned = _report?.sectionAssignments[defId] ?? [];
     if (assigned.isEmpty) return true;
     return _currentUserId != null && assigned.contains(_currentUserId);
@@ -569,25 +790,29 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   bool _isUserCoordinator() {
     if (_currentUser == null) return false;
-    
+
     // ✅ Usuarios SUPER_USER y ADMIN siempre tienen acceso
-    if (_currentUser!.role == UserRole.SUPER_USER || 
+    if (_currentUser!.role == UserRole.SUPER_USER ||
         _currentUser!.role == UserRole.ADMIN) {
-      debugPrint("✅ Usuario es ${_currentUser!.role} - Tiene permisos de coordinador");
+      debugPrint(
+        "✅ Usuario es ${_currentUser!.role} - Tiene permisos de coordinador",
+      );
       return true;
     }
-    
+
     // ✅ Usuarios asignados a la póliza también tienen acceso
     final isAssigned = widget.policy.assignedUserIds.contains(_currentUserId);
     if (isAssigned) {
-      debugPrint("✅ Usuario está asignado a la póliza - Tiene permisos de coordinador");
+      debugPrint(
+        "✅ Usuario está asignado a la póliza - Tiene permisos de coordinador",
+      );
     } else {
       debugPrint("❌ Usuario NO es coordinador - Sin permisos especiales");
     }
-    
+
     return isAssigned;
   }
-  
+
   bool _areAllSectionsAssigned() {
     if (_report == null) return false;
 
@@ -602,7 +827,9 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           );
           activeDefIds.add(deviceInstance.definitionId);
         } catch (e) {
-          debugPrint('Advertencia: Dispositivo ${entry.instanceId} no encontrado en la póliza.');
+          debugPrint(
+            'Advertencia: Dispositivo ${entry.instanceId} no encontrado en la póliza.',
+          );
         }
       }
     }
@@ -645,8 +872,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     final now = DateTime.now(); // 1. Capturamos el momento exacto
     final timeStr = DateFormat('HH:mm').format(DateTime.now());
     final updatedReport = _report!.copyWith(
-      startTime: timeStr,      // 2. Guardamos la hora (esto activa la condición verde en el cronograma)
-      serviceDate: now,        // 3. IMPORTANTÍSIMO: Actualizamos la fecha del reporte al día real de hoy
+      startTime:
+          timeStr, // 2. Guardamos la hora (esto activa la condición verde en el cronograma)
+      serviceDate:
+          now, // 3. IMPORTANTÍSIMO: Actualizamos la fecha del reporte al día real de hoy
     );
 
     setState(() {
@@ -659,14 +888,22 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   void _handleEndService() {
     if (_report == null || _currentUserId == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Debes seleccionar un usuario para registrar tiempos'), backgroundColor: Colors.orange),
+        const SnackBar(
+          content: Text('Debes seleccionar un usuario para registrar tiempos'),
+          backgroundColor: Colors.orange,
+        ),
       );
       return;
     }
 
     if (!_areAllSectionsAssigned()) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Asigna técnicos a todas las secciones antes de finalizar.'), backgroundColor: Colors.red),
+        const SnackBar(
+          content: Text(
+            'Asigna técnicos a todas las secciones antes de finalizar.',
+          ),
+          backgroundColor: Colors.red,
+        ),
       );
       return;
     }
@@ -705,7 +942,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     });
 
     if (existingPhotos.isEmpty) {
-      _showImageSourceSelection(); 
+      _showImageSourceSelection();
     }
   }
 
@@ -732,7 +969,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 },
               ),
               ListTile(
-                leading: const Icon(Icons.photo_library, color: Color(0xFF3B82F6)),
+                leading: const Icon(
+                  Icons.photo_library,
+                  color: Color(0xFF3B82F6),
+                ),
                 title: const Text('Seleccionar de Galería (Múltiple)'),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -788,7 +1028,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   // 4. Lógica unificada de subida (Procesa una lista de imágenes)
   Future<void> _processAndUploadImages(List<XFile> images) async {
-    if (_isUploadingPhoto || _photoContextEntryIdx == null || _report == null) return;
+    if (_isUploadingPhoto || _photoContextEntryIdx == null || _report == null)
+      return;
 
     setState(() => _isUploadingPhoto = true);
     int successCount = 0;
@@ -797,20 +1038,28 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       // Iteramos sobre todas las imágenes seleccionadas
       for (int i = 0; i < images.length; i++) {
         final image = images[i];
-        
+
         // Actualizar SnackBar para mostrar progreso
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Row(
               children: [
-                const SizedBox(width: 20, height: 20, 
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                ),
                 const SizedBox(width: 12),
                 Text('Subiendo ${i + 1} de ${images.length}...'),
               ],
             ),
-            duration: const Duration(seconds: 10), // Duración larga para que no se oculte
+            duration: const Duration(
+              seconds: 10,
+            ), // Duración larga para que no se oculte
           ),
         );
 
@@ -829,11 +1078,14 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         // Actualizar el estado local con la nueva URL
         final entry = _report!.entries[entryIdx];
         if (activityId != null) {
-          final currentData = entry.activityData[activityId] ?? 
+          final currentData =
+              entry.activityData[activityId] ??
               ActivityData(photoUrls: [], observations: '');
           final newPhotoUrls = [...currentData.photoUrls, photoUrl];
-          
-          final newActivityData = Map<String, ActivityData>.from(entry.activityData);
+
+          final newActivityData = Map<String, ActivityData>.from(
+            entry.activityData,
+          );
           newActivityData[activityId] = ActivityData(
             photoUrls: newPhotoUrls,
             observations: currentData.observations,
@@ -854,14 +1106,17 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             children: [
               const Icon(Icons.check_circle, color: Colors.white),
               const SizedBox(width: 12),
-              Text(successCount == 1 ? 'Foto subida' : '$successCount fotos subidas'),
+              Text(
+                successCount == 1
+                    ? 'Foto subida'
+                    : '$successCount fotos subidas',
+              ),
             ],
           ),
           backgroundColor: Colors.green,
           duration: const Duration(seconds: 2),
         ),
       );
-
     } catch (e) {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -885,18 +1140,20 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       final currentData = entry.activityData[activityId];
       if (currentData != null && photoIndex < currentData.photoUrls.length) {
         photoUrlToDelete = currentData.photoUrls[photoIndex];
-        
+
         final newPhotoUrls = List<String>.from(currentData.photoUrls);
         newPhotoUrls.removeAt(photoIndex);
-        
-        final newActivityData = Map<String, ActivityData>.from(entry.activityData);
+
+        final newActivityData = Map<String, ActivityData>.from(
+          entry.activityData,
+        );
         newActivityData[activityId] = ActivityData(
           photoUrls: newPhotoUrls,
           observations: currentData.observations,
         );
-        
+
         _updateEntry(entryIdx, activityData: newActivityData);
-        
+
         if (newPhotoUrls.isEmpty) {
           setState(() {
             _photoContextEntryIdx = null;
@@ -907,12 +1164,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     } else {
       if (photoIndex < entry.photoUrls.length) {
         photoUrlToDelete = entry.photoUrls[photoIndex];
-        
+
         final newPhotoUrls = List<String>.from(entry.photoUrls);
         newPhotoUrls.removeAt(photoIndex);
-        
+
         _updateEntry(entryIdx, photoUrls: newPhotoUrls);
-        
+
         if (newPhotoUrls.isEmpty) {
           setState(() {
             _photoContextEntryIdx = null;
@@ -936,10 +1193,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     if (_report == null) return {};
     final grouped = <String, List<ReportEntry>>{};
     final policyToUse = _currentPolicy ?? widget.policy;
-    
+
     for (var entry in _report!.entries) {
       try {
-        final deviceInstance = policyToUse.devices.firstWhere((d) => d.instanceId == entry.instanceId);
+        final deviceInstance = policyToUse.devices.firstWhere(
+          (d) => d.instanceId == entry.instanceId,
+        );
         final defId = deviceInstance.definitionId;
         if (!grouped.containsKey(defId)) grouped[defId] = [];
         grouped[defId]!.add(entry);
@@ -951,7 +1210,35 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   String _getFrequencies(Map<String, List<ReportEntry>> grouped) {
-    return "Mensual";
+    // ✅ Detectar si es reporte semanal/quincenal por el dateStr
+    final bool isWeekly = widget.dateStr.contains('W');
+    
+    if (!isWeekly) return "Mensual";
+
+    // En vista semanal, detectar qué frecuencias están presentes
+    final Set<String> frecuenciasPresentes = {};
+    final policyToUse = _currentPolicy ?? widget.policy;
+
+    for (final devInstance in policyToUse.devices) {
+      final def = _devicesEffective.firstWhere(
+        (d) => d.id == devInstance.definitionId,
+        orElse: () => DeviceModel(id: '', name: '', description: '', activities: []),
+      );
+      
+      for (final act in def.activities) {
+        if (act.frequency == Frequency.SEMANAL) {
+          frecuenciasPresentes.add('Semanal');
+        } else if (act.frequency == Frequency.QUINCENAL) {
+          frecuenciasPresentes.add('Quincenal');
+        }
+      }
+    }
+
+    if (frecuenciasPresentes.isEmpty) return "Semanal";
+    
+    // Ordenar para consistencia: Semanal primero, luego Quincenal
+    final lista = frecuenciasPresentes.toList()..sort();
+    return lista.join(' / ');
   }
 
   @override
@@ -966,20 +1253,21 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     final groupedEntries = _groupEntries();
     final groupedEntriesList = groupedEntries.entries.toList();
     final frequencies = _getFrequencies(groupedEntries);
-    final assignedUsers = widget.users.where((user) => 
-      _report!.assignedTechnicianIds.contains(user.id)
-    ).toList();
-    
+    final assignedUsers = widget.users
+        .where((user) => _report!.assignedTechnicianIds.contains(user.id))
+        .toList();
+
     debugPrint("👥 Usuarios asignados al reporte: ${assignedUsers.length}");
     String adminTooltip = 'Modo Admin';
     if (_isUserCoordinator()) {
-      if (_currentUser!.role == UserRole.SUPER_USER || _currentUser!.role == UserRole.ADMIN) {
-        adminTooltip = _adminOverride 
-            ? 'Modo Admin Activo (${_currentUser!.role})' 
+      if (_currentUser!.role == UserRole.SUPER_USER ||
+          _currentUser!.role == UserRole.ADMIN) {
+        adminTooltip = _adminOverride
+            ? 'Modo Admin Activo (${_currentUser!.role})'
             : 'Activar Modo Admin (${_currentUser!.role})';
       } else {
-        adminTooltip = _adminOverride 
-            ? 'Modo Admin Activo (Responsable de Póliza)' 
+        adminTooltip = _adminOverride
+            ? 'Modo Admin Activo (Responsable de Póliza)'
             : 'Activar Modo Admin (Responsable de Póliza)';
       }
     }
@@ -990,32 +1278,77 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         backgroundColor: Colors.white,
         elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new, color: Color(0xFF1E293B), size: 20),
+          icon: const Icon(
+            Icons.arrow_back_ios_new,
+            color: Color(0xFF1E293B),
+            size: 20,
+          ),
           onPressed: () => Navigator.pop(context),
         ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Reporte de Servicio', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF1E293B), letterSpacing: -0.3)),
+            const Text(
+              'Reporte de Servicio',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF1E293B),
+                letterSpacing: -0.3,
+              ),
+            ),
             Row(
               children: [
-                Icon(Icons.calendar_today, size: 11, color: Colors.grey.shade600),
+                Icon(
+                  Icons.calendar_today,
+                  size: 11,
+                  color: Colors.grey.shade600,
+                ),
                 const SizedBox(width: 4),
-                Text(widget.dateStr, style: TextStyle(fontSize: 12, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
+                Text(
+                  widget.dateStr,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade600,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
                 if (_report!.startTime != null) ...[
                   const SizedBox(width: 8),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
                     decoration: BoxDecoration(
-                      color: _report!.endTime == null ? const Color(0xFF10B981).withOpacity(0.1) : const Color(0xFF64748B).withOpacity(0.1),
+                      color: _report!.endTime == null
+                          ? const Color(0xFF10B981).withOpacity(0.1)
+                          : const Color(0xFF64748B).withOpacity(0.1),
                       borderRadius: BorderRadius.circular(4),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(_report!.endTime == null ? Icons.play_circle : Icons.check_circle, size: 10, color: _report!.endTime == null ? const Color(0xFF10B981) : const Color(0xFF64748B)),
+                        Icon(
+                          _report!.endTime == null
+                              ? Icons.play_circle
+                              : Icons.check_circle,
+                          size: 10,
+                          color: _report!.endTime == null
+                              ? const Color(0xFF10B981)
+                              : const Color(0xFF64748B),
+                        ),
                         const SizedBox(width: 4),
-                        Text(_report!.endTime == null ? 'En curso' : 'Finalizado', style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: _report!.endTime == null ? const Color(0xFF10B981) : const Color(0xFF64748B))),
+                        Text(
+                          _report!.endTime == null ? 'En curso' : 'Finalizado',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                            color: _report!.endTime == null
+                                ? const Color(0xFF10B981)
+                                : const Color(0xFF64748B),
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -1027,11 +1360,17 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         actions: [
           if (_isUserCoordinator())
             IconButton(
-              icon: Icon(_adminOverride ? Icons.admin_panel_settings : Icons.admin_panel_settings_outlined, 
-                  color: _adminOverride ? const Color(0xFFF59E0B) : const Color(0xFF94A3B8), 
-                  size: 22),
+              icon: Icon(
+                _adminOverride
+                    ? Icons.admin_panel_settings
+                    : Icons.admin_panel_settings_outlined,
+                color: _adminOverride
+                    ? const Color(0xFFF59E0B)
+                    : const Color(0xFF94A3B8),
+                size: 22,
+              ),
               onPressed: () => setState(() => _adminOverride = !_adminOverride),
-              tooltip: adminTooltip,  // ✅ TOOLTIP MEJORADO
+              tooltip: adminTooltip, // ✅ TOOLTIP MEJORADO
             ),
           const SizedBox(width: 8),
         ],
@@ -1053,7 +1392,9 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   report: _report!,
                   users: widget.users,
                   adminOverride: _adminOverride,
-                  isUserDesignated: _report!.assignedTechnicianIds.contains(_currentUserId),
+                  isUserDesignated: _report!.assignedTechnicianIds.contains(
+                    _currentUserId,
+                  ),
                   onStartService: _handleStartService,
                   onEndService: _handleEndService,
                   onResumeService: _handleResumeService,
@@ -1078,62 +1419,63 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           ),
 
           SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (context, index) {
-                final entryGroup = groupedEntriesList[index];
-                final defId = entryGroup.key;
-                final sectionEntries = entryGroup.value;
+            delegate: SliverChildBuilderDelegate((context, index) {
+              final entryGroup = groupedEntriesList[index];
+              final defId = entryGroup.key;
+              final sectionEntries = entryGroup.value;
 
-                final deviceDef = widget.devices.firstWhere(
-                  (d) => d.id == defId,
-                  orElse: () => DeviceModel(id: defId, name: 'Desconocido', description: '', activities: []),
-                );
+              final deviceDef = _devicesEffective.firstWhere(
+                (d) => d.id == defId,
+                orElse: () => DeviceModel(id: defId, name: 'Desconocido', description: '', activities: []),
+              );
 
-                return DeviceSectionImproved(
-                  defId: defId,
-                  deviceDef: deviceDef,
-                  entries: sectionEntries,
-                  users: assignedUsers, // ✅ PASAR SOLO USUARIOS ASIGNADOS
-                  sectionAssignments: _report!.sectionAssignments[defId] ?? [],
-                  isEditable: _isEditable(),
-                  allowedToEdit: _isEditable(),
-                  isUserCoordinator: _isUserCoordinator(),
-                  currentUserId: _currentUserId,
-                  onToggleAssignment: (uid) => _toggleSectionAssignment(defId, uid),
-                  onCustomIdChanged: (localIndex, val) {
-                    final entry = sectionEntries[localIndex];
-                    final globalIndex = _report!.entries.indexOf(entry);
-                    if (globalIndex != -1) _updateEntry(globalIndex, customId: val);
-                  },
-                  onAreaChanged: (localIndex, val) {
-                    final entry = sectionEntries[localIndex];
-                    final globalIndex = _report!.entries.indexOf(entry);
-                    if (globalIndex != -1) _updateEntry(globalIndex, area: val);
-                  },
-                  onToggleStatus: (localIndex, activityId) {
-                    final entry = sectionEntries[localIndex];
-                    final globalIndex = _report!.entries.indexOf(entry);
-                    if (globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
-                  },
-                  onCameraClick: (localIndex, {activityId}) {
-                    final entry = sectionEntries[localIndex];
-                    final globalIndex = _report!.entries.indexOf(entry);
-                    if (globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
-                  },
-                  onObservationClick: (localIndex, {activityId}) {
-                    final entry = sectionEntries[localIndex];
-                    final globalIndex = _report!.entries.indexOf(entry);
-                    if (globalIndex != -1) {
-                      setState(() {
-                        _activeObservationEntry = globalIndex.toString();
-                        _activeObservationActivityId = activityId;
-                      });
-                    }
-                  },
-                );
-              },
-              childCount: groupedEntriesList.length,
-            ),
+              return DeviceSectionImproved(
+                defId: defId,
+                deviceDef: deviceDef,
+                entries: sectionEntries,
+                users: assignedUsers, // ✅ PASAR SOLO USUARIOS ASIGNADOS
+                sectionAssignments: _report!.sectionAssignments[defId] ?? [],
+                isEditable: _isEditable(),
+                allowedToEdit: _isEditable(),
+                isUserCoordinator: _isUserCoordinator(),
+                currentUserId: _currentUserId,
+                onToggleAssignment: (uid) =>
+                    _toggleSectionAssignment(defId, uid),
+                onCustomIdChanged: (localIndex, val) {
+                  final entry = sectionEntries[localIndex];
+                  final globalIndex = _report!.entries.indexOf(entry);
+                  if (globalIndex != -1)
+                    _updateEntry(globalIndex, customId: val);
+                },
+                onAreaChanged: (localIndex, val) {
+                  final entry = sectionEntries[localIndex];
+                  final globalIndex = _report!.entries.indexOf(entry);
+                  if (globalIndex != -1) _updateEntry(globalIndex, area: val);
+                },
+                onToggleStatus: (localIndex, activityId) {
+                  final entry = sectionEntries[localIndex];
+                  final globalIndex = _report!.entries.indexOf(entry);
+                  if (globalIndex != -1)
+                    _toggleStatus(globalIndex, activityId, defId);
+                },
+                onCameraClick: (localIndex, {activityId}) {
+                  final entry = sectionEntries[localIndex];
+                  final globalIndex = _report!.entries.indexOf(entry);
+                  if (globalIndex != -1)
+                    _handleCameraClick(globalIndex, activityId: activityId);
+                },
+                onObservationClick: (localIndex, {activityId}) {
+                  final entry = sectionEntries[localIndex];
+                  final globalIndex = _report!.entries.indexOf(entry);
+                  if (globalIndex != -1) {
+                    setState(() {
+                      _activeObservationEntry = globalIndex.toString();
+                      _activeObservationActivityId = activityId;
+                    });
+                  }
+                },
+              );
+            }, childCount: groupedEntriesList.length),
           ),
 
           SliverToBoxAdapter(
@@ -1193,8 +1535,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       }
 
       if (deviceFindingsTexts.isNotEmpty) {
-        String distinctId = entry.customId.isNotEmpty ? entry.customId : 'Dispositivo #${entry.deviceIndex}';
-        
+        String distinctId = entry.customId.isNotEmpty
+            ? entry.customId
+            : 'Dispositivo #${entry.deviceIndex}';
+
         findings.add({
           'id': distinctId,
           'text': deviceFindingsTexts.join('\n—\n'),
@@ -1225,8 +1569,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSectionHeader(Icons.notes, 'OBSERVACIONES GENERALES DEL SERVICIO'),
-          
+          _buildSectionHeader(
+            Icons.notes,
+            'OBSERVACIONES GENERALES DEL SERVICIO',
+          ),
+
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: TextField(
@@ -1234,13 +1581,16 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
               controller: TextEditingController.fromValue(
                 TextEditingValue(
                   text: _report!.generalObservations,
-                  selection: TextSelection.collapsed(offset: _report!.generalObservations.length),
+                  selection: TextSelection.collapsed(
+                    offset: _report!.generalObservations.length,
+                  ),
                 ),
               ),
               maxLines: 3,
               style: const TextStyle(fontSize: 13, color: Color(0xFF334155)),
               decoration: InputDecoration(
-                hintText: 'Comentarios globales sobre la visita, accesos, estado general de las instalaciones...',
+                hintText:
+                    'Comentarios globales sobre la visita, accesos, estado general de las instalaciones...',
                 hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 12),
                 filled: true,
                 fillColor: const Color(0xFFF8FAFC),
@@ -1255,7 +1605,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+                  borderSide: const BorderSide(
+                    color: Color(0xFF3B82F6),
+                    width: 1.5,
+                  ),
                 ),
               ),
               onChanged: (val) {
@@ -1263,19 +1616,27 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   _report = _report!.copyWith(generalObservations: val);
                 });
 
-                if (_autoSaveDebounce?.isActive ?? false) _autoSaveDebounce!.cancel();
+                if (_autoSaveDebounce?.isActive ?? false)
+                  _autoSaveDebounce!.cancel();
 
-                _autoSaveDebounce = Timer(const Duration(milliseconds: 1500), () {
+                _autoSaveDebounce = Timer(
+                  const Duration(milliseconds: 1500),
+                  () {
                     _repo.saveReport(_report!);
                     debugPrint("Observaciones auto-guardadas");
-                });
+                  },
+                );
               },
             ),
           ),
 
           Divider(height: 1, color: Colors.grey.shade200),
 
-          _buildSectionHeader(Icons.find_in_page_outlined, 'HALLAZGOS REGISTRADOS EN DISPOSITIVOS', color: const Color(0xFFF59E0B)),
+          _buildSectionHeader(
+            Icons.find_in_page_outlined,
+            'HALLAZGOS REGISTRADOS EN DISPOSITIVOS',
+            color: const Color(0xFFF59E0B),
+          ),
 
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -1288,7 +1649,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                                vertical: 4,
+                              ),
                               decoration: BoxDecoration(
                                 color: const Color(0xFFE2E8F0),
                                 borderRadius: BorderRadius.circular(6),
@@ -1319,39 +1683,47 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     }).toList(),
                   )
                 : Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF8FAFC),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.grey.shade100)
-                  ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(Icons.check_circle_outline, size: 16, color: Colors.grey.shade400),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          "No se registraron observaciones individuales en los equipos.",
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey.shade500,
-                            fontStyle: FontStyle.italic
-                          ),
-                          overflow: TextOverflow.visible,
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.grey.shade100),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          Icons.check_circle_outline,
+                          size: 16,
+                          color: Colors.grey.shade400,
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            "No se registraron observaciones individuales en los equipos.",
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.grey.shade500,
+                              fontStyle: FontStyle.italic,
+                            ),
+                            overflow: TextOverflow.visible,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildSectionHeader(IconData icon, String title, {Color color = const Color(0xFF3B82F6)}) {
+  Widget _buildSectionHeader(
+    IconData icon,
+    String title, {
+    Color color = const Color(0xFF3B82F6),
+  }) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
       child: Row(
@@ -1374,10 +1746,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   Widget _buildObservationModal() {
     if (_activeObservationEntry == null) return const SizedBox();
-    
+
     final entryIdx = int.parse(_activeObservationEntry!);
     final entry = _report!.entries[entryIdx];
-    
+
     String currentObservation;
     String title;
     String subtitle;
@@ -1399,257 +1771,47 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       accentColor = const Color(0xFF3B82F6);
     }
 
-    final textController = TextEditingController(text: currentObservation);
-    final characterCount = ValueNotifier<int>(currentObservation.length);
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 30,
-            offset: const Offset(0, -5),
-          )
-        ],
-      ),
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-        left: 24,
-        right: 24,
-        top: 12
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 36,
-              height: 4,
-              margin: const EdgeInsets.only(bottom: 20),
-              decoration: BoxDecoration(
-                color: Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(2)
-              ),
-            ),
-          ),
-
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [accentColor.withOpacity(0.1), accentColor.withOpacity(0.05)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: accentColor.withOpacity(0.2)),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(10),
-                    boxShadow: [
-                      BoxShadow(color: accentColor.withOpacity(0.15), blurRadius: 8, offset: const Offset(0, 2))
-                    ],
-                  ),
-                  child: Icon(icon, color: accentColor, size: 24),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 15,
-                          color: Color(0xFF1E293B),
-                          letterSpacing: -0.3,
-                        )
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        subtitle,
-                        style: const TextStyle(
-                          color: Color(0xFF64748B),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8), size: 22),
-                  onPressed: () => setState(() {
-                    _activeObservationEntry = null;
-                    _activeObservationActivityId = null;
-                  }),
-                  style: IconButton.styleFrom(
-                    backgroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          
-          const SizedBox(height: 24),
-          
-          const Row(
-            children: [
-              Icon(Icons.edit_note, size: 16, color: Color(0xFF64748B)),
-              SizedBox(width: 8),
-              Text(
-                'DETALLES Y HALLAZGOS',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF64748B),
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ],
-          ),
-          
-          const SizedBox(height: 12),
-          
-          Stack(
-            children: [
-              TextField(
-                controller: textController,
-                maxLines: 6,
-                maxLength: 500,
-                autofocus: true,
-                style: const TextStyle(fontSize: 14, height: 1.5, color: Color(0xFF334155)),
-                decoration: InputDecoration(
-                  hintText: 'Describa cualquier anomalía, condición especial o recomendación técnica...',
-                  hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
-                  filled: true,
-                  fillColor: const Color(0xFFF8FAFC),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: Colors.grey.shade200),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: Colors.grey.shade200),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: accentColor, width: 2),
-                  ),
-                  contentPadding: const EdgeInsets.all(16),
-                  counterText: '',
-                ),
-                onChanged: (value) => characterCount.value = value.length,
-              ),
-              Positioned(
-                bottom: 8,
-                right: 12,
-                child: ValueListenableBuilder<int>(
-                  valueListenable: characterCount,
-                  builder: (context, count, _) {
-                    return Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: count > 450 ? Colors.red.shade50 : Colors.white,
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(
-                          color: count > 450 ? Colors.red.shade200 : Colors.grey.shade200
-                        ),
-                      ),
-                      child: Text(
-                        '$count/500',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: count > 450 ? Colors.red.shade700 : const Color(0xFF94A3B8),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-          
-          const SizedBox(height: 24),
-          
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => setState(() {
-                    _activeObservationEntry = null;
-                    _activeObservationActivityId = null;
-                  }),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    foregroundColor: const Color(0xFF64748B),
-                    side: BorderSide(color: Colors.grey.shade300),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
-                  child: const Text("Cancelar", style: TextStyle(fontWeight: FontWeight.w600)),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                flex: 2,
-                child: ElevatedButton.icon(
-                  icon: const Icon(Icons.check_circle_outline, size: 18),
-                  label: const Text('Guardar', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: accentColor,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                    elevation: 0,
-                    shadowColor: accentColor.withOpacity(0.3),
-                  ),
-                  onPressed: () {
-                    if (_activeObservationActivityId != null) {
-                      final currentData = entry.activityData[_activeObservationActivityId!] ??
-                          ActivityData(photoUrls: [], observations: '');
-                      final newActivityData = Map<String, ActivityData>.from(entry.activityData);
-                      newActivityData[_activeObservationActivityId!] = ActivityData(
-                        photoUrls: currentData.photoUrls,
-                        observations: textController.text
-                      );
-                      _updateEntry(entryIdx, activityData: newActivityData);
-                    } else {
-                      _updateEntry(entryIdx, observations: textController.text);
-                    }
-                    setState(() {
-                      _activeObservationEntry = null;
-                      _activeObservationActivityId = null;
-                    });
-                  },
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
+    // ✅ Usamos el widget estable que conserva su estado internamente
+    return _ObservationModal(
+      // ✅ KEY con el entryIdx + activityId para que se recree SOLO cuando cambia de entrada
+      key: ValueKey('obs_${entryIdx}_${_activeObservationActivityId ?? 'device'}'),
+      initialText: currentObservation,
+      title: title,
+      subtitle: subtitle,
+      icon: icon,
+      accentColor: accentColor,
+      onClose: () => setState(() {
+        _activeObservationEntry = null;
+        _activeObservationActivityId = null;
+      }),
+      onSave: (text) {
+        if (_activeObservationActivityId != null) {
+          final currentData = entry.activityData[_activeObservationActivityId!] ??
+              ActivityData(photoUrls: [], observations: '');
+          final newActivityData = Map<String, ActivityData>.from(entry.activityData);
+          newActivityData[_activeObservationActivityId!] = ActivityData(
+            photoUrls: currentData.photoUrls,
+            observations: text,
+          );
+          _updateEntry(entryIdx, activityData: newActivityData);
+        } else {
+          _updateEntry(entryIdx, observations: text);
+        }
+        setState(() {
+          _activeObservationEntry = null;
+          _activeObservationActivityId = null;
+        });
+      },
     );
   }
 
   Widget _buildPhotoModal() {
     if (_photoContextEntryIdx == null) return const SizedBox();
     final entry = _report!.entries[_photoContextEntryIdx!];
-    
+
     List<String> photos;
     String contextTitle;
-    
+
     if (_photoContextActivityId != null) {
       photos = entry.activityData[_photoContextActivityId]?.photoUrls ?? [];
       contextTitle = 'Fotos de Actividad • ${entry.customId}';
@@ -1668,7 +1830,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             color: Colors.black.withOpacity(0.1),
             blurRadius: 30,
             offset: const Offset(0, -5),
-          )
+          ),
         ],
       ),
       child: Column(
@@ -1684,7 +1846,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
               ),
             ),
           ),
-          
+
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
             child: Row(
@@ -1695,7 +1857,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     color: const Color(0xFFF1F5F9),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(Icons.photo_library, color: Color(0xFF3B82F6), size: 22),
+                  child: const Icon(
+                    Icons.photo_library,
+                    color: Color(0xFF3B82F6),
+                    size: 22,
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -1723,33 +1889,39 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8)),
+                  icon: const Icon(
+                    Icons.close_rounded,
+                    color: Color(0xFF94A3B8),
+                  ),
                   onPressed: () => setState(() {
                     _photoContextEntryIdx = null;
                     _photoContextActivityId = null;
                   }),
                   style: IconButton.styleFrom(
                     backgroundColor: const Color(0xFFF1F5F9),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                   ),
                 ),
               ],
             ),
           ),
-          
+
           const Divider(height: 1),
-          
+
           Expanded(
             child: photos.isEmpty
                 ? _buildEmptyPhotoState()
                 : Padding(
                     padding: const EdgeInsets.all(16),
                     child: GridView.builder(
-                      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 3,
-                        crossAxisSpacing: 12,
-                        mainAxisSpacing: 12,
-                      ),
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 12,
+                            mainAxisSpacing: 12,
+                          ),
                       itemCount: photos.length + 1,
                       itemBuilder: (ctx, idx) {
                         if (idx == photos.length) {
@@ -1760,14 +1932,15 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     ),
                   ),
           ),
-          
+
           if (photos.isEmpty)
             Padding(
               padding: const EdgeInsets.all(24),
               child: SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
-                  onPressed: _showImageSourceSelection, // <--- CAMBIO AQUÍ (antes era _pickImage)
+                  onPressed:
+                      _showImageSourceSelection, // <--- CAMBIO AQUÍ (antes era _pickImage)
                   icon: const Icon(Icons.add_a_photo, size: 20),
                   label: const Text(
                     'Agregar Fotos', // <--- CAMBIAR TEXTO (para que sea genérico)
@@ -1777,7 +1950,9 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     backgroundColor: const Color(0xFF3B82F6),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                     elevation: 0,
                   ),
                 ),
@@ -1817,10 +1992,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           const SizedBox(height: 8),
           Text(
             'Toca el botón para agregar evidencia fotográfica',
-            style: TextStyle(
-              fontSize: 13,
-              color: Colors.grey.shade500,
-            ),
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
             textAlign: TextAlign.center,
           ),
         ],
@@ -1870,7 +2042,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             color: Colors.black.withOpacity(0.1),
             blurRadius: 8,
             offset: const Offset(0, 2),
-          )
+          ),
         ],
       ),
       child: ClipRRect(
@@ -1890,7 +2062,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     child: CircularProgressIndicator(
                       value: loadingProgress.expectedTotalBytes != null
                           ? loadingProgress.cumulativeBytesLoaded /
-                              loadingProgress.expectedTotalBytes!
+                                loadingProgress.expectedTotalBytes!
                           : null,
                       strokeWidth: 2,
                       color: const Color(0xFF3B82F6),
@@ -1905,16 +2077,26 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.error_outline, color: Color(0xFFEF4444), size: 24),
+                        Icon(
+                          Icons.error_outline,
+                          color: Color(0xFFEF4444),
+                          size: 24,
+                        ),
                         SizedBox(height: 4),
-                        Text('Error', style: TextStyle(fontSize: 10, color: Color(0xFFEF4444))),
+                        Text(
+                          'Error',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Color(0xFFEF4444),
+                          ),
+                        ),
                       ],
                     ),
                   ),
                 );
               },
             ),
-            
+
             // Botón eliminar
             Positioned(
               top: 6,
@@ -1926,13 +2108,20 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 ),
                 child: IconButton(
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                  constraints: const BoxConstraints(
+                    minWidth: 32,
+                    minHeight: 32,
+                  ),
                   onPressed: () => _showDeleteConfirmation(index),
-                  icon: const Icon(Icons.delete_outline, color: Colors.white, size: 18),
+                  icon: const Icon(
+                    Icons.delete_outline,
+                    color: Colors.white,
+                    size: 18,
+                  ),
                 ),
               ),
             ),
-            
+
             // Badge número
             Positioned(
               bottom: 6,
@@ -1966,7 +2155,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Row(
           children: [
-            Icon(Icons.warning_amber_rounded, color: Color(0xFFF59E0B), size: 24),
+            Icon(
+              Icons.warning_amber_rounded,
+              color: Color(0xFFF59E0B),
+              size: 24,
+            ),
             SizedBox(width: 12),
             Text('Confirmar Eliminación', style: TextStyle(fontSize: 16)),
           ],
@@ -1978,7 +2171,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar', style: TextStyle(color: Color(0xFF64748B))),
+            child: const Text(
+              'Cancelar',
+              style: TextStyle(color: Color(0xFF64748B)),
+            ),
           ),
           ElevatedButton(
             onPressed: () {
@@ -1987,9 +2183,287 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
             child: const Text('Eliminar'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ObservationModal extends StatefulWidget {
+  final String initialText;
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final Color accentColor;
+  final VoidCallback onClose;
+  final Function(String) onSave;
+
+  const _ObservationModal({
+    required this.initialText,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.accentColor,
+    required this.onClose,
+    required this.onSave, required ValueKey<String> key,
+  });
+
+  @override
+  State<_ObservationModal> createState() => _ObservationModalState();
+}
+
+class _ObservationModalState extends State<_ObservationModal> {
+  late final TextEditingController _controller;
+  late int _charCount;
+
+  @override
+  void initState() {
+    super.initState();
+    // ✅ El controller se crea UNA SOLA VEZ y sobrevive los rebuilds del padre
+    _controller = TextEditingController(text: widget.initialText);
+    _charCount = widget.initialText.length;
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 30,
+            offset: const Offset(0, -5),
+          ),
+        ],
+      ),
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        left: 24,
+        right: 24,
+        top: 12,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Handle bar
+          Center(
+            child: Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 20),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+
+          // Header del modal
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  widget.accentColor.withOpacity(0.1),
+                  widget.accentColor.withOpacity(0.05),
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: widget.accentColor.withOpacity(0.2)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    boxShadow: [
+                      BoxShadow(
+                        color: widget.accentColor.withOpacity(0.15),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Icon(widget.icon, color: widget.accentColor, size: 24),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.title,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                          color: Color(0xFF1E293B),
+                          letterSpacing: -0.3,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        widget.subtitle,
+                        style: const TextStyle(
+                          color: Color(0xFF64748B),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8), size: 22),
+                  onPressed: widget.onClose,
+                  style: IconButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          const Row(
+            children: [
+              Icon(Icons.edit_note, size: 16, color: Color(0xFF64748B)),
+              SizedBox(width: 8),
+              Text(
+                'DETALLES Y HALLAZGOS',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF64748B),
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 12),
+
+          // ✅ TextField con controller estable
+          Stack(
+            children: [
+              TextField(
+                controller: _controller,
+                maxLines: 6,
+                maxLength: 500,
+                autofocus: true,
+                // ✅ CLAVE para Apple Pencil: aceptar cualquier tipo de entrada
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
+                style: const TextStyle(
+                  fontSize: 14,
+                  height: 1.5,
+                  color: Color(0xFF334155),
+                ),
+                decoration: InputDecoration(
+                  hintText: 'Describa cualquier anomalía, condición especial o recomendación técnica...',
+                  hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                  filled: true,
+                  fillColor: const Color(0xFFF8FAFC),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.grey.shade200),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.grey.shade200),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: widget.accentColor, width: 2),
+                  ),
+                  contentPadding: const EdgeInsets.all(16),
+                  counterText: '',
+                ),
+                onChanged: (value) {
+                  setState(() => _charCount = value.length);
+                },
+              ),
+              Positioned(
+                bottom: 8,
+                right: 12,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _charCount > 450 ? Colors.red.shade50 : Colors.white,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: _charCount > 450 ? Colors.red.shade200 : Colors.grey.shade200,
+                    ),
+                  ),
+                  child: Text(
+                    '$_charCount/500',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: _charCount > 450 ? Colors.red.shade700 : const Color(0xFF94A3B8),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 24),
+
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: widget.onClose,
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    foregroundColor: const Color(0xFF64748B),
+                    side: BorderSide(color: Colors.grey.shade300),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  child: const Text("Cancelar", style: TextStyle(fontWeight: FontWeight.w600)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                flex: 2,
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.check_circle_outline, size: 18),
+                  label: const Text('Guardar', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: widget.accentColor,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    elevation: 0,
+                  ),
+                  // ✅ Lee el texto del controller en el momento exacto del tap
+                  onPressed: () => widget.onSave(_controller.text),
+                ),
+              ),
+            ],
           ),
         ],
       ),

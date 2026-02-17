@@ -193,42 +193,50 @@ class ReportHeader extends StatelessWidget {
         const SizedBox(height: 6),
         _buildDetailRow('Periodo:', _getPeriodLabel()),
         const SizedBox(height: 6),
-        _buildDetailRow('Frecuencia:', frequencies, isBadge: true),
+        _buildDetailRow('Frecuencia:', frequencies, isBadge: true, isWeekly: frequencies != 'Mensual'),
       ],
     );
   }
 
   // [CORRECCIÓN CLAVE]: Usamos Expanded y TextAlign.end para evitar el overflow en el texto
-  Widget _buildDetailRow(String label, String value, {bool isBadge = false}) {
+  Widget _buildDetailRow(String label, String value, {bool isBadge = false, bool isWeekly = false}) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      crossAxisAlignment: CrossAxisAlignment.start, // Alineación superior por si el texto se envuelve
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
           style: const TextStyle(fontSize: 11, color: Color(0xFF64748B), fontWeight: FontWeight.w500),
         ),
-        const SizedBox(width: 8), // Espacio mínimo seguro
+        const SizedBox(width: 8),
         if (isBadge)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
             decoration: BoxDecoration(
-              color: const Color(0xFFEFF6FF),
+              // ✅ Verde para semanal/quincenal, azul para mensual
+              color: isWeekly
+                  ? const Color(0xFFECFDF5)   // verde suave
+                  : const Color(0xFFEFF6FF),  // azul suave
               borderRadius: BorderRadius.circular(4),
             ),
             child: Text(
               value,
-              style: const TextStyle(fontSize: 10, color: Color(0xFF2563EB), fontWeight: FontWeight.bold),
+              style: TextStyle(
+                fontSize: 10,
+                color: isWeekly
+                    ? const Color(0xFF059669)   // verde
+                    : const Color(0xFF2563EB),  // azul
+                fontWeight: FontWeight.bold,
+              ),
             ),
           )
         else
-          // Expanded obliga al texto a respetar el ancho disponible
-          Expanded( 
+          Expanded(
             child: Text(
               value,
-              textAlign: TextAlign.end, // Alinear a la derecha
+              textAlign: TextAlign.end,
               style: const TextStyle(fontSize: 11, color: Color(0xFF0F172A), fontWeight: FontWeight.w600),
-              overflow: TextOverflow.visible, // Permitir que baje al siguiente renglón si es necesario
+              overflow: TextOverflow.visible,
             ),
           ),
       ],
