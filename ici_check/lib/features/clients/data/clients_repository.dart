@@ -73,13 +73,15 @@ class ClientsRepository {
       
       // Actualizar el modelo con la nueva URL
       client = ClientModel(
-        id: clientId,
-        name: client.name,
-        address: client.address,
-        contact: client.contact,
-        email: client.email,
-        logoUrl: logoUrl,
-      );
+      id: clientId,
+      name: client.name,
+      razonSocial: client.razonSocial,       // ← AGREGAR
+      nombreContacto: client.nombreContacto, // ← AGREGAR
+      address: client.address,
+      contact: client.contact,
+      email: client.email,
+      logoUrl: logoUrl,
+    );
     }
 
     // Guardar en Firestore

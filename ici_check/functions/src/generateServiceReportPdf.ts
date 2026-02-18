@@ -136,14 +136,28 @@ async function downloadImage(url: string): Promise<Buffer | null> {
   }
 }
 
+// ─── HELPER: Verifica si un instanceId de entry corresponde a un PolicyDevice ───
+function instanceIdMatchesBase(entryInstanceId: string, baseInstanceId: string): boolean {
+  if (entryInstanceId === baseInstanceId) return true;
+  if (entryInstanceId.startsWith(`${baseInstanceId}_`)) {
+    const suffix = entryInstanceId.substring(baseInstanceId.length + 1);
+    return /^\d+$/.test(suffix);
+  }
+  return false;
+}
+
 function groupByDef(
   entries: ReportEntry[],
   policyDevices: PolicyDevice[]
 ): Map<string, ReportEntry[]> {
   const map = new Map<string, ReportEntry[]>();
   for (const entry of entries) {
-    const pd = policyDevices.find((p) => p.instanceId === entry.instanceId);
-    if (!pd) continue;
+    // ✅ Buscar por coincidencia de base, no exacta
+    const pd = policyDevices.find((p) => instanceIdMatchesBase(entry.instanceId, p.instanceId));
+    if (!pd) {
+      logger.warn(`Entry sin PolicyDevice: ${entry.instanceId}`);
+      continue;
+    }
     if (!map.has(pd.definitionId)) map.set(pd.definitionId, []);
     map.get(pd.definitionId)!.push(entry);
   }

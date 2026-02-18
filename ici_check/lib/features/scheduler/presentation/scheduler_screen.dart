@@ -23,6 +23,7 @@ import 'package:ici_check/features/devices/data/devices_repository.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:printing/printing.dart';
+import 'package:sticky_headers/sticky_headers/widget.dart';
 
 class SchedulerScreen extends StatefulWidget {
   final String policyId;
@@ -64,6 +65,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   List<Map<String, dynamic>> _reports = []; // LISTA PARA GUARDAR REPORTES
   StreamSubscription? _reportsSub;
 
+  final ScrollController _verticalScrollCtrl = ScrollController();
+
   // Paleta de colores
   final Color _primaryDark = const Color(0xFF1E293B);
   final Color _primaryBlue = const Color(0xFF3B82F6);
@@ -101,6 +104,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     _headerScrollCtrl.dispose();
     _bodyScrollCtrl.dispose();
     _reportsSub?.cancel(); // IMPORTANTE: Cancelar al salir
+    _verticalScrollCtrl.dispose();
     super.dispose();
   }
 
@@ -194,45 +198,47 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     PolicyDevice devInstance,
     ActivityConfig activity,
   ) {
-    // Paso 1: Si no hay reporte, está vacío
     if (report == null) return 'empty';
 
-    // Paso 2: Verificar si el servicio fue iniciado
     final String? startTime = report['startTime'];
     final bool serviceInitiated = startTime != null && startTime.isNotEmpty;
     if (!serviceInitiated) return 'empty';
 
-    // Paso 3: Verificar entries
     if (report['entries'] == null || report['entries'] is! List) {
       return 'partial';
     }
 
     final entries = report['entries'] as List;
 
-    // Filtrar TODAS las entradas que corresponden a este tipo de dispositivo
-    final entryList = entries
-        .where((e) => e['instanceId'] == devInstance.instanceId)
-        .toList();
+    // ✅ NUEVO: Contar cuántas unidades ESPERADAS hay según la póliza (quantity)
+    final int expectedUnits = devInstance.quantity;
 
-    if (entryList.isEmpty) return 'partial';
+    // ✅ NUEVO: Buscar todas las entries que corresponden a este devInstance
+    // usando matching de sufijos igual que el resto del sistema
+    final entryList = entries.where((e) {
+      final entryId = e['instanceId'] as String? ?? '';
+      final baseId = devInstance.instanceId;
+      if (entryId == baseId) return true;
+      if (entryId.startsWith('${baseId}_')) {
+        final suffix = entryId.substring(baseId.length + 1);
+        return RegExp(r'^\d+$').hasMatch(suffix);
+      }
+      return false;
+    }).toList();
 
-    // ✅ FIX: Contadores para el estado REAL
+    // ✅ CLAVE: Si hay menos entries que unidades esperadas → incompleto
+    if (entryList.length < expectedUnits) return 'partial';
+
     int totalWithActivity = 0;
     int answeredCount = 0;
 
     for (var entry in entryList) {
       if (entry['results'] == null || entry['results'] is! Map) continue;
-
       final results = entry['results'] as Map;
-
-      // Solo contar si esta actividad existe en los results de esta entrada
       if (!results.containsKey(activity.id)) continue;
 
       totalWithActivity++;
-
       final resValue = results[activity.id];
-
-      // Verificación estricta: null y 'NR' NO son respuestas válidas
       if (resValue != null &&
           resValue != 'NR' &&
           (resValue == 'OK' || resValue == 'NOK' || resValue == 'NA')) {
@@ -240,16 +246,10 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       }
     }
 
-    // Paso 4: Estado basado en contadores
     if (totalWithActivity == 0) return 'partial';
-
-    if (answeredCount == 0) {
-      return 'partial';                          // Ninguna respondida
-    } else if (answeredCount == totalWithActivity) {
-      return 'full';                             // ✅ TODAS respondidas → completo
-    } else {
-      return 'partial';                          // Algunas respondidas → incompleto
-    }
+    if (answeredCount == 0) return 'partial';
+    if (answeredCount == totalWithActivity) return 'full';
+    return 'partial';
   }
 
   double _getFrequencyMonths(Frequency freq) {
@@ -1637,6 +1637,11 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     int duration = _policy.durationMonths;
     int colCount = _viewMode == 'monthly' ? duration : duration * 4;
 
+    // 1. CALCULO DEL ANCHO TOTAL EXACTO
+    // 280px (Columna Nombres) + (100px * Numero de columnas de tiempo)
+    // Esto es vital para que el scroll horizontal mueva TODO (header y contenido)
+    double totalWidth = 280.0 + (colCount * 100.0);
+
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       height: 600,
@@ -1655,11 +1660,11 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         borderRadius: BorderRadius.circular(16),
         child: Column(
           children: [
-            // --- ENCABEZADO (HEADER) ---
+            // --- HEADER SUPERIOR (FECHAS) ---
+            // Este se queda fijo arriba de todo
             Container(
               color: _primaryDark,
               child: ScrollConfiguration(
-                // ✅ Habilitar scroll con mouse drag en web
                 behavior: _WebScrollBehavior(),
                 child: Scrollbar(
                   controller: _headerScrollCtrl,
@@ -1705,42 +1710,33 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
               ),
             ),
 
-            // --- CUERPO (BODY) ---
+            // --- CUERPO (LISTA CON STICKY HEADERS) ---
             Expanded(
               child: ScrollConfiguration(
-                // ✅ Habilitar scroll con mouse drag en web
                 behavior: _WebScrollBehavior(),
                 child: Scrollbar(
+                  // Scrollbar Horizontal
                   controller: _bodyScrollCtrl,
                   thumbVisibility: true,
                   trackVisibility: true,
                   thickness: 10,
                   radius: const Radius.circular(10),
                   child: SingleChildScrollView(
-                    scrollDirection: Axis.vertical,
-                    child: ScrollConfiguration(
-                      behavior: _WebScrollBehavior(),
-                      child: Scrollbar(
-                        controller: _bodyScrollCtrl,
-                        thumbVisibility: true,
-                        trackVisibility: true,
-                        thickness: 8,
-                        notificationPredicate: (notification) =>
-                            notification.depth == 1,
-                        child: SingleChildScrollView(
-                          controller: _bodyScrollCtrl,
-                          scrollDirection: Axis.horizontal,
-                          physics: const ClampingScrollPhysics(),
-                          child: Table(
-                            defaultColumnWidth: const FixedColumnWidth(100),
-                            columnWidths: const {0: FixedColumnWidth(280)},
-                            border: TableBorder.all(
-                              color: _borderLight,
-                              width: 1,
-                            ),
-                            children: _buildDataRows(),
-                          ),
-                        ),
+                    controller: _bodyScrollCtrl,
+                    scrollDirection: Axis.horizontal,
+                    physics: const ClampingScrollPhysics(),
+                    child: SizedBox(
+                      // Forzamos el ancho para que coincida con el header de arriba
+                      width: totalWidth,
+                      child: ListView.builder(
+                        // Scroll Vertical Principal
+                        controller: _verticalScrollCtrl,
+                        physics: const ClampingScrollPhysics(),
+                        itemCount: _policy.devices.length,
+                        itemBuilder: (context, index) {
+                          // Construimos cada sección (Dispositivo + sus actividades)
+                          return _buildDeviceSection(index, colCount);
+                        },
                       ),
                     ),
                   ),
@@ -1752,6 +1748,327 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       ),
     );
   }
+
+  // ✅ ESTE ES EL NUEVO MÉTODO QUE MANTIENE TU LÓGICA
+  Widget _buildDeviceSection(int dIdx, int colCount) {
+    final devInstance = _policy.devices[dIdx];
+    final def = _deviceDefinitions.firstWhere(
+      (d) => d.id == devInstance.definitionId,
+      orElse: () => DeviceModel(
+          id: 'err', name: 'Unknown', description: '', activities: []),
+    );
+
+    // 1. HEADER PEGAJOSO (El renglón gris del dispositivo)
+    Widget stickyHeader = Container(
+      // Usamos un color sólido (no transparente) para tapar lo que pasa por debajo al scrollear
+      color: const Color(0xFFF1F5F9), // slate-100
+      child: Table(
+        defaultColumnWidth: const FixedColumnWidth(100),
+        columnWidths: const {0: FixedColumnWidth(280)},
+        border: TableBorder(
+          top: BorderSide(color: _borderLight, width: 1),
+          bottom: BorderSide(color: _borderLight, width: 1),
+        ),
+        children: [
+          TableRow(
+            children: [
+              // Columna del Nombre del Dispositivo
+              TableCell(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: _primaryBlue.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Icon(
+                          Icons.devices_outlined,
+                          size: 16,
+                          color: _primaryBlue,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              def.name,
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13,
+                                color: _textPrimary,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: _borderLight),
+                              ),
+                              child: Text(
+                                "${devInstance.quantity} UNIDADES",
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                  color: _textSecondary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              // Celdas vacías para completar la fila del header
+              ...List.generate(
+                colCount,
+                (index) => TableCell(
+                  child: Container(height: 50, color: Colors.transparent),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+
+    // 2. CONTENIDO (Las filas de actividades con tu lógica original)
+    List<TableRow> activityRows = [];
+
+    for (var activity in def.activities) {
+      bool isWeeklyFreq = activity.frequency == Frequency.SEMANAL ||
+          activity.frequency == Frequency.QUINCENAL;
+      
+      // Filtros de vista
+      if (_viewMode == 'monthly' && isWeeklyFreq) continue;
+      if (_viewMode == 'weekly' && !isWeeklyFreq) continue;
+
+      activityRows.add(
+        TableRow(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border(bottom: BorderSide(color: _borderLight, width: 0.5)),
+          ),
+          children: [
+            // --- CELDA DE NOMBRE DE ACTIVIDAD (AQUI ESTA TU LOGICA DE FRECUENCIA) ---
+            TableCell(
+              child: Container(
+                padding: const EdgeInsets.only(
+                  left: 48,
+                  top: 8,
+                  bottom: 8,
+                  right: 12,
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(
+                            activity.name,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: _textPrimary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: _getActivityColor(activity.type),
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                activity.type
+                                        .toString()
+                                        .split('.')
+                                        .last
+                                        .substring(0, 1)
+                                        .toUpperCase() +
+                                    activity.type
+                                        .toString()
+                                        .split('.')
+                                        .last
+                                        .substring(1)
+                                        .toLowerCase(),
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: _textSecondary,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    
+                    // ✅ AQUI MANTENEMOS TU BOTON DE CAMBIAR FRECUENCIA
+                    if (isWeeklyFreq)
+                      GestureDetector(
+                        onTap: _isEditing
+                            ? () => _showFrequencyChangeDialog(
+                                  devInstance,
+                                  activity,
+                                )
+                            : null,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: activity.frequency == Frequency.QUINCENAL
+                                ? Colors.purple.shade50
+                                : Colors.blue.shade50,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: activity.frequency == Frequency.QUINCENAL
+                                  ? Colors.purple.shade300
+                                  : Colors.blue.shade300,
+                              width: _isEditing ? 1.5 : 1,
+                            ),
+                            boxShadow: _isEditing
+                                ? [
+                                    BoxShadow(
+                                      color: activity.frequency ==
+                                              Frequency.QUINCENAL
+                                          ? Colors.purple.withOpacity(0.2)
+                                          : Colors.blue.withOpacity(0.2),
+                                      blurRadius: 4,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ]
+                                : [],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                activity.frequency == Frequency.QUINCENAL
+                                    ? Icons.repeat
+                                    : Icons.repeat_one,
+                                size: 11,
+                                color: activity.frequency == Frequency.QUINCENAL
+                                    ? Colors.purple.shade600
+                                    : Colors.blue.shade600,
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                activity.frequency == Frequency.QUINCENAL
+                                    ? 'QUINCENAL'
+                                    : 'SEMANAL',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w900,
+                                  color:
+                                      activity.frequency == Frequency.QUINCENAL
+                                          ? Colors.purple.shade600
+                                          : Colors.blue.shade600,
+                                  letterSpacing: 0.3,
+                                ),
+                              ),
+                              if (_isEditing) ...[
+                                const SizedBox(width: 4),
+                                Icon(
+                                  Icons.swap_horiz_rounded,
+                                  size: 11,
+                                  color:
+                                      activity.frequency == Frequency.QUINCENAL
+                                          ? Colors.purple.shade400
+                                          : Colors.blue.shade400,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+
+            // --- CELDAS DE TIEMPO (PUNTOS) ---
+            ...List.generate(colCount, (tIdx) {
+              bool active = _isScheduled(devInstance, activity.id, tIdx);
+              String status = 'empty';
+
+              if (active) {
+                final report = _getReportForColumn(tIdx);
+                status = _getActivityStatusForReport(
+                  report,
+                  devInstance,
+                  activity,
+                );
+              }
+
+              return TableCell(
+                child: InkWell(
+                  onTap: () => _handleCellClick(dIdx, activity.id, tIdx),
+                  hoverColor: _isEditing
+                      ? _primaryBlue.withOpacity(0.05)
+                      : Colors.transparent,
+                  child: Container(
+                    height: 48,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: active
+                          ? _getActivityColor(activity.type).withOpacity(0.08)
+                          : Colors.transparent,
+                    ),
+                    child: active
+                        ? _buildStatusCircle(activity.type, status)
+                        : (_isEditing
+                            ? Icon(
+                                Icons.add_circle_outline,
+                                size: 14,
+                                color: _textSecondary.withOpacity(0.3),
+                              )
+                            : null),
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+      );
+    }
+
+    return StickyHeader(
+      header: stickyHeader,
+      content: Table(
+        defaultColumnWidth: const FixedColumnWidth(100),
+        columnWidths: const {0: FixedColumnWidth(280)},
+        children: activityRows,
+      ),
+    );
+  }
+  
   // --- MODIFICADO: AHORA INCLUYE LOS BOTONES DE ACCIÓN ---
   Widget _buildTimeHeader(int index) {
     DateTime date;
@@ -2178,302 +2495,6 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         ],
       ),
     );
-  }
-
-  List<TableRow> _buildDataRows() {
-    List<TableRow> rows = [];
-    int colCount = _viewMode == 'monthly'
-        ? _policy.durationMonths
-        : _policy.durationMonths * 4;
-
-    for (int dIdx = 0; dIdx < _policy.devices.length; dIdx++) {
-      final devInstance = _policy.devices[dIdx];
-      final def = _deviceDefinitions.firstWhere(
-        (d) => d.id == devInstance.definitionId,
-      );
-
-      // Fila de dispositivo (Encabezado gris) - SE QUEDA IGUAL
-      rows.add(
-        TableRow(
-          decoration: BoxDecoration(
-            color: _primaryDark.withOpacity(0.05),
-            border: Border(top: BorderSide(color: _borderLight, width: 2)),
-          ),
-          children: [
-            TableCell(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 14,
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        color: _primaryBlue.withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Icon(
-                        Icons.devices_outlined,
-                        size: 16,
-                        color: _primaryBlue,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            def.name,
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13,
-                              color: _textPrimary,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 6,
-                              vertical: 2,
-                            ),
-                            decoration: BoxDecoration(
-                              color: _textSecondary.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(4),
-                              border: Border.all(color: _borderLight),
-                            ),
-                            child: Text(
-                              "${devInstance.quantity} UNIDADES",
-                              style: TextStyle(
-                                fontSize: 9,
-                                fontWeight: FontWeight.bold,
-                                color: _textSecondary,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            ...List.generate(
-              colCount,
-              (index) => TableCell(
-                child: Container(color: _primaryDark.withOpacity(0.02)),
-              ),
-            ),
-          ],
-        ),
-      );
-
-      // Filas de actividades
-      for (var activity in def.activities) {
-        bool isWeeklyFreq = activity.frequency == Frequency.SEMANAL || activity.frequency == Frequency.QUINCENAL;
-        if (_viewMode == 'monthly' && isWeeklyFreq) continue;
-        if (_viewMode == 'weekly' && !isWeeklyFreq) continue;
-
-        rows.add(
-          TableRow(
-            children: [
-              // Celda del Nombre de la Actividad
-              // Celda del Nombre de la Actividad
-              TableCell(
-                child: Container(
-                  padding: const EdgeInsets.only(
-                    left: 48,
-                    top: 8,
-                    bottom: 8,
-                    right: 12,
-                  ),
-                  child: Row(
-                    children: [
-                      // Columna izquierda: nombre + tipo
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Text(
-                              activity.name,
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: _textPrimary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Container(
-                                  width: 6,
-                                  height: 6,
-                                  decoration: BoxDecoration(
-                                    color: _getActivityColor(activity.type),
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                Text(
-                                  activity.type
-                                          .toString()
-                                          .split('.')
-                                          .last
-                                          .substring(0, 1)
-                                          .toUpperCase() +
-                                      activity.type
-                                          .toString()
-                                          .split('.')
-                                          .last
-                                          .substring(1)
-                                          .toLowerCase(),
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: _textSecondary,
-                                    fontWeight: FontWeight.w500,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-
-                      // ✅ NUEVO: Botón visible de frecuencia (siempre visible en vista semanal)
-                      if (isWeeklyFreq)
-                        GestureDetector(
-                          onTap: _isEditing
-                              ? () => _showFrequencyChangeDialog(devInstance, activity)
-                              : null,
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                            decoration: BoxDecoration(
-                              // Color distinto según la frecuencia actual
-                              color: activity.frequency == Frequency.QUINCENAL
-                                  ? Colors.purple.shade50
-                                  : Colors.blue.shade50,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                color: activity.frequency == Frequency.QUINCENAL
-                                    ? Colors.purple.shade300
-                                    : Colors.blue.shade300,
-                                width: _isEditing ? 1.5 : 1,
-                              ),
-                              // Sombra sutil si está en modo edición para indicar que es clickeable
-                              boxShadow: _isEditing
-                                  ? [
-                                      BoxShadow(
-                                        color: activity.frequency == Frequency.QUINCENAL
-                                            ? Colors.purple.withOpacity(0.2)
-                                            : Colors.blue.withOpacity(0.2),
-                                        blurRadius: 4,
-                                        offset: const Offset(0, 2),
-                                      ),
-                                    ]
-                                  : [],
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  activity.frequency == Frequency.QUINCENAL
-                                      ? Icons.repeat        // Quincenal: repeat normal
-                                      : Icons.repeat_one,   // Semanal: repeat_one
-                                  size: 11,
-                                  color: activity.frequency == Frequency.QUINCENAL
-                                      ? Colors.purple.shade600
-                                      : Colors.blue.shade600,
-                                ),
-                                const SizedBox(width: 4),
-                                Text(
-                                  activity.frequency == Frequency.QUINCENAL
-                                      ? 'QUINCENAL'
-                                      : 'SEMANAL',
-                                  style: TextStyle(
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.w900,
-                                    color: activity.frequency == Frequency.QUINCENAL
-                                        ? Colors.purple.shade600
-                                        : Colors.blue.shade600,
-                                    letterSpacing: 0.3,
-                                  ),
-                                ),
-                                // ✅ Ícono de edición solo cuando está en modo edición
-                                if (_isEditing) ...[
-                                  const SizedBox(width: 4),
-                                  Icon(
-                                    Icons.swap_horiz_rounded,
-                                    size: 11,
-                                    color: activity.frequency == Frequency.QUINCENAL
-                                        ? Colors.purple.shade400
-                                        : Colors.blue.shade400,
-                                  ),
-                                ],
-                              ],
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-
-              // Celdas de Tiempo (Puntos)
-              ...List.generate(colCount, (tIdx) {
-                bool active = _isScheduled(devInstance, activity.id, tIdx);
-
-                String status = 'empty'; // Por defecto: Vacío (no programado)
-
-                if (active) {
-                  final report = _getReportForColumn(tIdx);
-
-                  // ✅ Usar el nuevo método simplificado
-                  status = _getActivityStatusForReport(
-                    report,
-                    devInstance,
-                    activity,
-                  );
-                }
-
-                return TableCell(
-                  child: InkWell(
-                    onTap: () => _handleCellClick(dIdx, activity.id, tIdx),
-                    hoverColor: _isEditing
-                        ? _primaryBlue.withOpacity(0.05)
-                        : Colors.transparent,
-                    child: Container(
-                      height: 48,
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: active
-                            ? _getActivityColor(activity.type).withOpacity(0.08)
-                            : Colors.transparent,
-                      ),
-                      child: active
-                          ? _buildStatusCircle(activity.type, status)
-                          : (_isEditing
-                                ? Icon(
-                                    Icons.add_circle_outline,
-                                    size: 14,
-                                    color: _textSecondary.withOpacity(0.3),
-                                  )
-                                : null),
-                    ),
-                  ),
-                );
-              }),
-            ],
-          ),
-        );
-      }
-    }
-    return rows;
   }
 
   Color _getActivityColor(ActivityType type) {

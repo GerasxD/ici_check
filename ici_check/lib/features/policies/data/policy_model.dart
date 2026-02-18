@@ -4,9 +4,7 @@ class PolicyDevice {
   String instanceId;
   String definitionId;
   int quantity;
-  // NUEVO: Mapa para guardar el desplazamiento de cada actividad
-  // Key: ID de la actividad, Value: mes/semana de inicio (offset)
-  Map<String, int> scheduleOffsets; 
+  Map<String, int> scheduleOffsets;
 
   PolicyDevice({
     required this.instanceId,
@@ -19,16 +17,21 @@ class PolicyDevice {
     'instanceId': instanceId,
     'definitionId': definitionId,
     'quantity': quantity,
-    'scheduleOffsets': scheduleOffsets, // Se guarda en Firestore
+    // Cast explícito para Flutter Web
+    'scheduleOffsets': Map<String, dynamic>.from(
+      scheduleOffsets.map((k, v) => MapEntry(k, v)),
+    ),
   };
 
   factory PolicyDevice.fromMap(Map<String, dynamic> map) {
     return PolicyDevice(
-      instanceId: map['instanceId'] ?? '',
-      definitionId: map['definitionId'] ?? '',
-      quantity: map['quantity'] ?? 1,
-      // Mapeo seguro del JSON/Map a Map<String, int>
-      scheduleOffsets: Map<String, int>.from(map['scheduleOffsets'] ?? {}),
+      instanceId: map['instanceId'] as String? ?? '',
+      definitionId: map['definitionId'] as String? ?? '',
+      quantity: map['quantity'] as int? ?? 1,
+      scheduleOffsets: Map<String, int>.from(
+        (map['scheduleOffsets'] as Map<String, dynamic>? ?? {})
+            .map((k, v) => MapEntry(k, (v as num).toInt())),
+      ),
     );
   }
 }
@@ -41,7 +44,7 @@ class PolicyModel {
   bool includeWeekly;
   List<String> assignedUserIds;
   List<PolicyDevice> devices;
-  bool isLocked; // NUEVO: Para saber si el cronograma ya fue guardado/bloqueado
+  bool isLocked;
 
   PolicyModel({
     required this.id,
@@ -51,7 +54,7 @@ class PolicyModel {
     this.includeWeekly = false,
     this.assignedUserIds = const [],
     this.devices = const [],
-    this.isLocked = false, // Por defecto está abierto a edición
+    this.isLocked = false,
   });
 
   DateTime get endDate {
@@ -65,23 +68,27 @@ class PolicyModel {
       'startDate': Timestamp.fromDate(startDate),
       'durationMonths': durationMonths,
       'includeWeekly': includeWeekly,
-      'assignedUserIds': assignedUserIds,
+      // Cast explícito de listas para Flutter Web
+      'assignedUserIds': List<String>.from(assignedUserIds),
       'isLocked': isLocked,
-      'devices': devices.map((d) => d.toMap()).toList(),
+      'devices': List<Map<String, dynamic>>.from(
+        devices.map((d) => d.toMap()),
+      ),
     };
   }
 
   factory PolicyModel.fromMap(Map<String, dynamic> map, String docId) {
     return PolicyModel(
       id: docId,
-      clientId: map['clientId'] ?? '',
+      clientId: map['clientId'] as String? ?? '',
       startDate: (map['startDate'] as Timestamp).toDate(),
-      durationMonths: map['durationMonths'] ?? 12,
-      includeWeekly: map['includeWeekly'] ?? false,
-      isLocked: map['isLocked'] ?? false,
+      durationMonths: map['durationMonths'] as int? ?? 12,
+      includeWeekly: map['includeWeekly'] as bool? ?? false,
+      isLocked: map['isLocked'] as bool? ?? false,
       assignedUserIds: List<String>.from(map['assignedUserIds'] ?? []),
       devices: List<PolicyDevice>.from(
-        (map['devices'] ?? []).map((x) => PolicyDevice.fromMap(x)),
+        (map['devices'] as List<dynamic>? ?? [])
+            .map((x) => PolicyDevice.fromMap(x as Map<String, dynamic>)),
       ),
     );
   }

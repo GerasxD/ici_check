@@ -248,7 +248,7 @@ class _MainLayoutScreenState extends State<MainLayoutScreen> {
                         letterSpacing: 1.2,
                       ),
                     ),
-                    Text('v2.0.0', style: TextStyle(color: Colors.white54, fontSize: 10)),
+                    Text('v0.6.0', style: TextStyle(color: Colors.white54, fontSize: 10)),
                   ],
                 ),
               ],

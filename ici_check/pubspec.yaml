@@ -1,7 +1,7 @@
 name: ici_check
 description: "A new Flutter project."
 publish_to: 'none'
-version: 0.2.0
+version: 0.6.0
 
 environment:
   sdk: ^3.10.4
@@ -33,6 +33,7 @@ dependencies:
   cloud_functions: ^6.0.6 # O la versión compatible con tu firebase_core
   url_launcher: ^6.2.5
   http: ^1.2.0
+  sticky_headers: ^0.3.0+2
   
 dev_dependencies:
   flutter_test:

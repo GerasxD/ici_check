@@ -81,8 +81,8 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
       );
     } else {
       Navigator.push(
-        context, 
-        MaterialPageRoute(builder: (context) => const NewPolicyScreen())
+        context,
+        MaterialPageRoute(builder: (context) => const NewPolicyScreen()),
       );
     }
   }
@@ -483,6 +483,8 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
 
   String? _selectedDeviceDefId;
   final TextEditingController _searchController = TextEditingController();
+  final Map<String, TextEditingController> _qtyControllers = {};
+
 
   @override
   void initState() {
@@ -496,7 +498,11 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
     
     // NUEVO: Inicializar usuario seleccionado desde la póliza
     _selectedUserId = (p?.assignedUserIds.isNotEmpty == true) ? p!.assignedUserIds.first : null;
-    
+
+    for (final d in _devices) {
+      _qtyControllers[d.instanceId] = TextEditingController(text: '${d.quantity}');
+    }
+  
     _loadUsers();
   }
 
@@ -504,6 +510,10 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
   void dispose() {
     _isDisposed = true;
     _searchController.dispose();
+    // Liberar todos los controladores de cantidad
+    for (final c in _qtyControllers.values) {
+      c.dispose();
+    }
     super.dispose();
   }
 
@@ -534,27 +544,38 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
   void _addDevice() {
     if (_selectedDeviceDefId == null) return;
     setState(() {
-      _devices.add(
-        PolicyDevice(
-          instanceId: _uuid.v4(),
-          definitionId: _selectedDeviceDefId!,
-          quantity: 1,
-          scheduleOffsets: {},
-        ),
-      );
+      final instanceId = _uuid.v4();
+      _devices.add(PolicyDevice(
+        instanceId: instanceId,
+        definitionId: _selectedDeviceDefId!,
+        quantity: 1,
+        scheduleOffsets: {},
+      ));
+      // Crear controlador para este dispositivo
+      _qtyControllers[instanceId] = TextEditingController(text: '1');
       _selectedDeviceDefId = null;
       _searchController.clear();
     });
   }
 
   void _removeDevice(int index) {
-    setState(() => _devices.removeAt(index));
+    setState(() {
+      final instanceId = _devices[index].instanceId;
+      _qtyControllers[instanceId]?.dispose();
+      _qtyControllers.remove(instanceId);
+      _devices.removeAt(index);
+    });
   }
 
   void _updateQuantity(int index, int delta) {
     setState(() {
       int newQ = _devices[index].quantity + delta;
-      if (newQ > 0) _devices[index].quantity = newQ;
+      if (newQ > 0) {
+        _devices[index].quantity = newQ;
+        // Sincronizar el controlador
+        final ctrl = _qtyControllers[_devices[index].instanceId];
+        if (ctrl != null) ctrl.text = newQ.toString();
+      }
     });
   }
 
@@ -906,7 +927,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                                           width: 50,
                                           padding: const EdgeInsets.symmetric(horizontal: 4),
                                           child: TextField(
-                                            controller: TextEditingController(text: '${item.quantity}')
+                                            controller: _qtyControllers[item.instanceId] ?? TextEditingController(text: '${item.quantity}')
                                               ..selection = TextSelection.fromPosition(
                                                   TextPosition(offset: '${item.quantity}'.length)),
                                             textAlign: TextAlign.center,
@@ -964,7 +985,7 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                   ),
                   const SizedBox(width: 12),
                   ElevatedButton(
-                    onPressed: () {
+                    onPressed: () async {
                       if (_clientId.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('Selecciona un cliente')),
@@ -982,9 +1003,8 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                             ? [_selectedUserId!]
                             : (widget.policyToEdit?.assignedUserIds ?? []),
                       );
-                      final onSave = widget.onSave;
+                      await widget.onSave(newPolicy);
                       Navigator.pop(context);
-                      onSave(newPolicy);
                     },
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF2563EB),

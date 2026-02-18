@@ -185,40 +185,25 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       // ====================================================
       // NUEVO: ESCUCHAR CAMBIOS EN LA PÓLIZA EN TIEMPO REAL
       // ====================================================
-      _policySubscription = _policiesRepo.getPoliciesStream().listen((
-        policies,
-      ) {
+      _policySubscription = _policiesRepo.getPoliciesStream().listen((policies) {
         try {
-          final updatedPolicy = policies.firstWhere(
-            (p) => p.id == widget.policyId,
-          );
+        final updatedPolicy = policies.firstWhere((p) => p.id == widget.policyId);
+        final previousPolicy = _currentPolicy;
 
-          // Si detectamos cambios en la póliza, re-sincronizamos el reporte
-          if (_currentPolicy != null &&
-              _hasRelevantPolicyChanges(_currentPolicy!, updatedPolicy)) {
-            debugPrint(
-              "🔄 Detectados cambios en la póliza. Re-sincronizando reporte...",
-            );
-            setState(() {
-              _currentPolicy = updatedPolicy;
-            });
+        // Actualizar _currentPolicy primero
+        if (mounted) setState(() => _currentPolicy = updatedPolicy);
 
-            // Solo re-sincronizamos si ya tenemos un reporte cargado
-            if (_report != null) {
-              _syncReportWithPolicy(updatedPolicy);
-            }
-          } else {
-            // Primera carga o sin cambios relevantes
-            if (mounted) {
-              setState(() {
-                _currentPolicy = updatedPolicy;
-              });
-            }
-          }
-        } catch (e) {
-          debugPrint("Error actualizando póliza: $e");
+       // Solo re-sincronizar si hubo cambios reales Y ya tenemos reporte
+        if (previousPolicy != null &&
+            _hasRelevantPolicyChanges(previousPolicy, updatedPolicy) &&
+            _report != null) {
+         debugPrint("🔄 Cambios en póliza detectados. Re-sincronizando...");
+         _syncReportWithPolicy(updatedPolicy);
         }
-      });
+      } catch (e) {
+        debugPrint("Error actualizando póliza: $e");
+      }
+    });
 
       // Escuchamos el stream del reporte
       _reportSubscription = _repo
@@ -330,24 +315,23 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     }
   }
 
-  // ====================================================
-  // NUEVO: DETECTAR SI HUBO CAMBIOS RELEVANTES EN LA PÓLIZA
-  // ====================================================
   bool _hasRelevantPolicyChanges(PolicyModel old, PolicyModel updated) {
-    // Comparar si cambiaron los dispositivos (cantidad o tipo)
+    if (old.includeWeekly != updated.includeWeekly) return true;
     if (old.devices.length != updated.devices.length) return true;
 
-    // Verificar si algún dispositivo cambió su definitionId o cantidad
-    for (int i = 0; i < old.devices.length; i++) {
-      if (i >= updated.devices.length) return true;
-      if (old.devices[i].definitionId != updated.devices[i].definitionId)
-        return true;
-      if (old.devices[i].quantity != updated.devices[i].quantity) return true;
+    final oldMap = { for (final d in old.devices)     d.instanceId: d };
+    final newMap = { for (final d in updated.devices) d.instanceId: d };
+
+    for (final id in newMap.keys) {
+      if (!oldMap.containsKey(id)) return true; // dispositivo agregado
     }
-
-    // Verificar si cambió la frecuencia semanal (afecta qué actividades se muestran)
-    if (old.includeWeekly != updated.includeWeekly) return true;
-
+    for (final id in oldMap.keys) {
+      if (!newMap.containsKey(id)) return true; // dispositivo removido
+      final o = oldMap[id]!;
+      final n = newMap[id]!;
+      if (o.quantity      != n.quantity)      return true;
+      if (o.definitionId  != n.definitionId)  return true;
+    }
     return false;
   }
 
@@ -420,121 +404,125 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   List<ReportEntry> _mergeEntries(
-  List<ReportEntry> existing,
-  List<ReportEntry> ideal,
+    List<ReportEntry> existing,
+    List<ReportEntry> ideal,
   ) {
-    List<ReportEntry> merged = [];
-    Map<String, ReportEntry> existingMap = {
-      for (var e in existing) e.instanceId: e,
-    };
-
-    for (var idealEntry in ideal) {
-      if (existingMap.containsKey(idealEntry.instanceId)) {
-        var existingEntry = existingMap[idealEntry.instanceId]!;
-        
-        // ✅ FIX CRÍTICO: La lista ideal es la FUENTE DE VERDAD para qué actividades
-        // deben aparecer en este periodo. Solo mantenemos actividades que están en ideal.
-        Map<String, String?> mergedResults = {};
-        
-        for (final actId in idealEntry.results.keys) {
-          // Si la actividad ya tenía respuesta en el reporte existente, la conservamos
-          if (existingEntry.results.containsKey(actId)) {
-            mergedResults[actId] = existingEntry.results[actId];
-          } else {
-            // Actividad nueva (no tenía respuesta aún)
-            mergedResults[actId] = null;
-          }
-        }
-        final saved = _savedLocations[existingEntry.instanceId];
-        final resolvedCustomId = (saved?['customId'] ?? '').isNotEmpty
-          ? saved!['customId']!
-          : existingEntry.customId;
-        final resolvedArea = (saved?['area'] ?? '').isNotEmpty
-          ? saved!['area']!
-          : existingEntry.area;
-
-        merged.add(existingEntry.copyWith(
-          results: mergedResults,
-          customId: resolvedCustomId,
-          area: resolvedArea,
-        ));
-            
-      } else {
-        merged.add(idealEntry);
-      }
-    }
-    return merged;
+    return _repo.mergeEntries(existing, ideal, _savedLocations);
   }
 
   void _syncAndLoadReport(ServiceReportModel existingReport) {
-    bool isWeekly = widget.dateStr.contains('W');
-    int timeIndex = _calculateTimeIndex(isWeekly);
-    final policyToUse = _currentPolicy ?? widget.policy;
+  // ✅ PASO 1: Migración automática del esquema viejo (instanceIds duplicados) al nuevo
+  final migratedEntries = _repo.migrateOldEntries(existingReport.entries);
+  final bool wasMigrated = migratedEntries.length != existingReport.entries.length ||
+      _entriesHaveInstanceIdChanges(existingReport.entries, migratedEntries);
 
-    final idealEntries = _repo.generateEntriesForDate(
-      policyToUse,
-      widget.dateStr,
-      _devicesEffective,
-      isWeekly,
-      timeIndex,
-    );
+  final reportToSync = wasMigrated
+      ? existingReport.copyWith(entries: migratedEntries)
+      : existingReport;
 
-    final mergedEntries = _mergeEntries(existingReport.entries, idealEntries);
+  if (wasMigrated) {
+    debugPrint("✅ Reporte migrado al nuevo esquema de instanceIds únicos");
+  }
 
-    // Cambios en actividades
-    bool hasChanges = mergedEntries.length != existingReport.entries.length;
-    if (!hasChanges) {
-      for (int i = 0; i < mergedEntries.length; i++) {
-        final newKeys = mergedEntries[i].results.keys.toSet();
-        final oldKeys = existingReport.entries[i].results.keys.toSet();
-        if (!newKeys.containsAll(oldKeys) || !oldKeys.containsAll(newKeys)) {
-          hasChanges = true;
-          break;
-        }
-      }
+  // ✅ PASO 2: Si no hay dispositivos cargados aún, guardar lo que tenemos y salir
+  if (_devicesEffective.isEmpty) {
+    if (mounted) {
+      setState(() {
+        _report = reportToSync;
+        _isLoading = false;
+        _loadSignatures();
+      });
+      // Si fue migrado, persistir inmediatamente en Firebase
+      if (wasMigrated) _repo.saveReport(reportToSync);
     }
+    return;
+  }
 
-    // ✅ NUEVO: Detectar si hay ubicaciones guardadas que aplicar
-    bool hasLocationChanges = false;
-    if (!hasChanges && _savedLocations.isNotEmpty) {
-      for (int i = 0; i < mergedEntries.length; i++) {
-        final original = existingReport.entries[i];
-        final merged = mergedEntries[i];
-        // Si el merge cambió customId o area, hay ubicaciones que aplicar
-        if (original.customId != merged.customId || original.area != merged.area) {
-          hasLocationChanges = true;
-          break;
-        }
-      }
-    }
+  // ✅ PASO 3: Generar entradas ideales según la póliza y dispositivos actuales
+  bool isWeekly = widget.dateStr.contains('W');
+  int timeIndex = _calculateTimeIndex(isWeekly);
+  final policyToUse = _currentPolicy ?? widget.policy;
 
-    if (hasChanges || hasLocationChanges) {
-      debugPrint("🔄 Sincronizando reporte ${hasLocationChanges ? '(ubicaciones)' : '(actividades)'}...");
-      final updatedReport = existingReport.copyWith(entries: mergedEntries);
-      
-      // Solo guardar en Firebase si cambiaron actividades, no solo ubicaciones
-      // (las ubicaciones ya están guardadas en device_locations)
-      if (hasChanges) {
-        _repo.saveReport(updatedReport);
-      }
+  final idealEntries = _repo.generateEntriesForDate(
+    policyToUse,
+    widget.dateStr,
+    _devicesEffective,
+    isWeekly,
+    timeIndex,
+  );
 
-      if (mounted) {
-        setState(() {
-          _report = updatedReport;
-          _isLoading = false;
-          _loadSignatures();
-        });
-      }
-    } else {
-      if (mounted) {
-        setState(() {
-          _report = existingReport;
-          _isLoading = false;
-          _loadSignatures();
-        });
+  // ✅ PASO 4: Merge usando el reporte ya migrado
+  final mergedEntries = _mergeEntries(reportToSync.entries, idealEntries);
+
+  // ✅ PASO 5: Detectar cambios en actividades
+  // La migración por sí sola ya cuenta como cambio que hay que guardar
+  bool hasChanges = wasMigrated || mergedEntries.length != reportToSync.entries.length;
+
+  if (!hasChanges) {
+    for (int i = 0; i < mergedEntries.length; i++) {
+      final newKeys = mergedEntries[i].results.keys.toSet();
+      final oldKeys = reportToSync.entries[i].results.keys.toSet();
+      if (!newKeys.containsAll(oldKeys) || !oldKeys.containsAll(newKeys)) {
+        hasChanges = true;
+        break;
       }
     }
   }
+
+  // ✅ PASO 6: Detectar cambios solo de ubicaciones (no requieren guardar en Firebase)
+  bool hasLocationChanges = false;
+  if (!hasChanges && _savedLocations.isNotEmpty) {
+    for (int i = 0; i < mergedEntries.length; i++) {
+      final original = reportToSync.entries[i];
+      final merged = mergedEntries[i];
+      if (original.customId != merged.customId || original.area != merged.area) {
+        hasLocationChanges = true;
+        break;
+      }
+    }
+  }
+
+  // ✅ PASO 7: Aplicar cambios y guardar si corresponde
+  if (hasChanges || hasLocationChanges) {
+    debugPrint("🔄 Sincronizando reporte ${hasLocationChanges ? '(ubicaciones)' : '(actividades/migración)'}...");
+    final updatedReport = reportToSync.copyWith(entries: mergedEntries);
+
+    // Solo guardar en Firebase si hubo cambios reales de estructura o migración
+    // Las ubicaciones ya están persistidas en device_locations, no necesitan guardarse aquí
+    if (hasChanges) {
+      _repo.saveReport(updatedReport);
+    }
+
+    if (mounted) {
+      setState(() {
+        _report = updatedReport;
+        _isLoading = false;
+        _loadSignatures();
+      });
+    }
+  } else {
+    // Sin cambios: cargar tal cual
+    if (mounted) {
+      setState(() {
+        _report = reportToSync; // Usar reportToSync por si hubo migración sin merge
+        _isLoading = false;
+        _loadSignatures();
+      });
+    }
+  }
+}
+
+  // Helper para detectar si la migración cambió algún instanceId
+bool _entriesHaveInstanceIdChanges(
+    List<ReportEntry> original,
+    List<ReportEntry> migrated,
+  ) {
+    if (original.length != migrated.length) return true;
+    for (int i = 0; i < original.length; i++) {
+      if (original[i].instanceId != migrated[i].instanceId) return true;
+    }
+    return false;
+  } 
 
   Future<String?> _getCurrentUserId() async {
     try {
@@ -817,30 +805,18 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     if (_report == null) return false;
 
     final activeDefIds = <String>{};
-
-    for (var entry in _report!.entries) {
-      if (entry.results.isNotEmpty) {
-        try {
-          final policyToUse = _currentPolicy ?? widget.policy;
-          final deviceInstance = policyToUse.devices.firstWhere(
-            (d) => d.instanceId == entry.instanceId,
-          );
-          activeDefIds.add(deviceInstance.definitionId);
-        } catch (e) {
-          debugPrint(
-            'Advertencia: Dispositivo ${entry.instanceId} no encontrado en la póliza.',
-          );
-        }
+    for (final entry in _report!.entries) {
+      if (entry.results.isEmpty) continue;
+      final deviceInstance = _findPolicyDevice(entry.instanceId);
+      if (deviceInstance != null) {
+        activeDefIds.add(deviceInstance.definitionId);
       }
     }
 
-    for (var defId in activeDefIds) {
-      final assignedTechnicians = _report!.sectionAssignments[defId];
-      if (assignedTechnicians == null || assignedTechnicians.isEmpty) {
-        return false;
-      }
+    for (final defId in activeDefIds) {
+      final assigned = _report!.sectionAssignments[defId];
+      if (assigned == null || assigned.isEmpty) return false;
     }
-
     return true;
   }
 
@@ -1189,22 +1165,39 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     }
   }
 
+  bool _instanceIdMatchesBase(String entryInstanceId, String baseInstanceId) {
+    if (entryInstanceId == baseInstanceId) return true;
+    if (entryInstanceId.startsWith('${baseInstanceId}_')) {
+      final suffix = entryInstanceId.substring(baseInstanceId.length + 1);
+      return RegExp(r'^\d+$').hasMatch(suffix);
+    }
+    return false;
+  }
+  // Helper para obtener el PolicyDevice de una entry (con soporte de sufijos)
+  PolicyDevice? _findPolicyDevice(String entryInstanceId) {
+    final policyToUse = _currentPolicy ?? widget.policy;
+     try {
+      return policyToUse.devices.firstWhere(
+        (d) => _instanceIdMatchesBase(entryInstanceId, d.instanceId),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   Map<String, List<ReportEntry>> _groupEntries() {
     if (_report == null) return {};
     final grouped = <String, List<ReportEntry>>{};
-    final policyToUse = _currentPolicy ?? widget.policy;
 
-    for (var entry in _report!.entries) {
-      try {
-        final deviceInstance = policyToUse.devices.firstWhere(
-          (d) => d.instanceId == entry.instanceId,
-        );
-        final defId = deviceInstance.definitionId;
-        if (!grouped.containsKey(defId)) grouped[defId] = [];
-        grouped[defId]!.add(entry);
-      } catch (e) {
-        debugPrint('Warning: Device ${entry.instanceId} not found in policy');
+    for (final entry in _report!.entries) {
+     final deviceInstance = _findPolicyDevice(entry.instanceId);
+       if (deviceInstance == null) {
+         debugPrint('Warning: Device ${entry.instanceId} not found in policy');
+        continue;
       }
+      final defId = deviceInstance.definitionId;
+      if (!grouped.containsKey(defId)) grouped[defId] = [];
+      grouped[defId]!.add(entry);
     }
     return grouped;
   }
@@ -1438,35 +1431,43 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 isEditable: _isEditable(),
                 allowedToEdit: _isEditable(),
                 isUserCoordinator: _isUserCoordinator(),
+                adminOverride: _adminOverride,  // ← AGREGAR ESTO
                 currentUserId: _currentUserId,
                 onToggleAssignment: (uid) =>
                     _toggleSectionAssignment(defId, uid),
                 onCustomIdChanged: (localIndex, val) {
                   final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexOf(entry);
-                  if (globalIndex != -1)
-                    _updateEntry(globalIndex, customId: val);
+                  final globalIndex = _report!.entries.indexWhere(
+                    (e) => e.instanceId == entry.instanceId,
+                  );
+                  if (globalIndex != -1) _updateEntry(globalIndex, customId: val);
                 },
                 onAreaChanged: (localIndex, val) {
                   final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexOf(entry);
+                  final globalIndex = _report!.entries.indexWhere(
+                    (e) => e.instanceId == entry.instanceId,
+                  );
                   if (globalIndex != -1) _updateEntry(globalIndex, area: val);
                 },
                 onToggleStatus: (localIndex, activityId) {
                   final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexOf(entry);
-                  if (globalIndex != -1)
-                    _toggleStatus(globalIndex, activityId, defId);
+                  final globalIndex = _report!.entries.indexWhere(
+                    (e) => e.instanceId == entry.instanceId,
+                  );
+                  if (globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
                 },
                 onCameraClick: (localIndex, {activityId}) {
                   final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexOf(entry);
-                  if (globalIndex != -1)
-                    _handleCameraClick(globalIndex, activityId: activityId);
+                  final globalIndex = _report!.entries.indexWhere(
+                    (e) => e.instanceId == entry.instanceId,
+                  );
+                  if (globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
                 },
                 onObservationClick: (localIndex, {activityId}) {
                   final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexOf(entry);
+                  final globalIndex = _report!.entries.indexWhere(
+                    (e) => e.instanceId == entry.instanceId,
+                  );
                   if (globalIndex != -1) {
                     setState(() {
                       _activeObservationEntry = globalIndex.toString();
@@ -1634,7 +1635,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
           _buildSectionHeader(
             Icons.find_in_page_outlined,
-            'HALLAZGOS REGISTRADOS EN DISPOSITIVOS',
+            'COMENTARIOS / HALLAZGOS REGISTRADOS EN DISPOSITIVOS',
             color: const Color(0xFFF59E0B),
           ),
 

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/auth/data/models/user_model.dart';
+import 'package:sticky_headers/sticky_headers/widget.dart';
 
 class DeviceSectionImproved extends StatelessWidget {
   final String defId;
@@ -13,14 +14,16 @@ class DeviceSectionImproved extends StatelessWidget {
   final bool allowedToEdit;
   final bool isUserCoordinator;
   final String? currentUserId;
-  
-  // Callbacks
+
+  // Callbacks — el índice que reciben es LOCAL (posición dentro de `entries`)
   final Function(String userId) onToggleAssignment;
   final Function(int index, String customId) onCustomIdChanged;
   final Function(int index, String area) onAreaChanged;
   final Function(int index, String activityId) onToggleStatus;
   final Function(int index, {String? activityId}) onCameraClick;
   final Function(int index, {String? activityId}) onObservationClick;
+  final bool adminOverride;  // ← NUEVO
+
 
   const DeviceSectionImproved({
     super.key,
@@ -39,38 +42,32 @@ class DeviceSectionImproved extends StatelessWidget {
     required this.onToggleStatus,
     required this.onCameraClick,
     required this.onObservationClick,
+    required this.adminOverride,  // ← NUEVO
   });
 
   bool get _canEdit {
     if (!isEditable || !allowedToEdit) return false;
-    
+    if (adminOverride && isUserCoordinator) return true;  // ← Admin bypasea todo
     if (sectionAssignments.isNotEmpty) {
       return currentUserId != null && sectionAssignments.contains(currentUserId);
     }
-    
     return true;
   }
 
-  // ✅ NUEVO: Calcular progreso de la sección
   Map<String, dynamic> _calculateProgress() {
     int totalActivities = 0;
     int completedActivities = 0;
-
     for (var entry in entries) {
       for (var activityId in entry.results.keys) {
         totalActivities++;
         final value = entry.results[activityId];
-        // Consideramos completo si tiene OK, NOK o NA (respuestas válidas)
         if (value == 'OK' || value == 'NOK' || value == 'NA') {
           completedActivities++;
         }
       }
     }
-
-    double percentage = totalActivities > 0 
-        ? (completedActivities / totalActivities) * 100 
-        : 0.0;
-
+    final percentage =
+        totalActivities > 0 ? (completedActivities / totalActivities) * 100 : 0.0;
     return {
       'total': totalActivities,
       'completed': completedActivities,
@@ -79,11 +76,7 @@ class DeviceSectionImproved extends StatelessWidget {
   }
 
   void _showAssignmentDialog(BuildContext context) {
-    // ✅ IMPORTANTE: Crear una COPIA de la lista para el modal local
     final Set<String> localAssignments = Set<String>.from(sectionAssignments);
-
-    debugPrint("🔓 Dialog: Abriendo para dispositivo: $defId");
-    debugPrint("   Asignaciones iniciales: ${localAssignments.toList()}");
 
     showDialog(
       context: context,
@@ -93,7 +86,8 @@ class DeviceSectionImproved extends StatelessWidget {
             return Dialog(
               backgroundColor: Colors.white,
               surfaceTintColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
               child: Container(
                 constraints: BoxConstraints(
                   maxHeight: MediaQuery.of(context).size.height * 0.7,
@@ -103,9 +97,11 @@ class DeviceSectionImproved extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 16),
                       decoration: const BoxDecoration(
-                        border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
+                        border: Border(
+                            bottom: BorderSide(color: Color(0xFFF1F5F9))),
                       ),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -123,13 +119,13 @@ class DeviceSectionImproved extends StatelessWidget {
                             borderRadius: BorderRadius.circular(20),
                             child: const Padding(
                               padding: EdgeInsets.all(4.0),
-                              child: Icon(Icons.close, size: 20, color: Color(0xFF94A3B8)),
+                              child: Icon(Icons.close,
+                                  size: 20, color: Color(0xFF94A3B8)),
                             ),
                           ),
                         ],
                       ),
                     ),
-
                     Flexible(
                       child: users.isEmpty
                           ? Padding(
@@ -137,67 +133,84 @@ class DeviceSectionImproved extends StatelessWidget {
                               child: Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
-                                  Icon(Icons.group_off_outlined, size: 48, color: Colors.grey.shade300),
+                                  Icon(Icons.group_off_outlined,
+                                      size: 48, color: Colors.grey.shade300),
                                   const SizedBox(height: 16),
                                   Text(
                                     "No hay personal disponible",
-                                    style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+                                    style: TextStyle(
+                                        color: Colors.grey.shade500,
+                                        fontSize: 14),
                                     textAlign: TextAlign.center,
                                   ),
                                 ],
                               ),
                             )
                           : ListView.separated(
-                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 8),
                               shrinkWrap: true,
                               itemCount: users.length,
-                              separatorBuilder: (ctx, i) => const Divider(height: 1, indent: 60, endIndent: 20, color: Color(0xFFF1F5F9)),
+                              separatorBuilder: (ctx, i) => const Divider(
+                                  height: 1,
+                                  indent: 60,
+                                  endIndent: 20,
+                                  color: Color(0xFFF1F5F9)),
                               itemBuilder: (ctx, i) {
                                 final user = users[i];
-                                final isAssigned = localAssignments.contains(user.id);
-
+                                final isAssigned =
+                                    localAssignments.contains(user.id);
                                 return Material(
                                   color: Colors.transparent,
                                   child: CheckboxListTile(
-                                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                                    contentPadding:
+                                        const EdgeInsets.symmetric(
+                                            horizontal: 16, vertical: 4),
                                     dense: true,
                                     activeColor: const Color(0xFF3B82F6),
-                                    checkboxShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-                                    
+                                    checkboxShape: RoundedRectangleBorder(
+                                        borderRadius:
+                                            BorderRadius.circular(4)),
                                     secondary: CircleAvatar(
-                                      backgroundColor: isAssigned ? const Color(0xFFEFF6FF) : const Color(0xFFF1F5F9),
-                                      foregroundColor: isAssigned ? const Color(0xFF3B82F6) : const Color(0xFF64748B),
+                                      backgroundColor: isAssigned
+                                          ? const Color(0xFFEFF6FF)
+                                          : const Color(0xFFF1F5F9),
+                                      foregroundColor: isAssigned
+                                          ? const Color(0xFF3B82F6)
+                                          : const Color(0xFF64748B),
                                       child: Text(
-                                        user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
-                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                        user.name.isNotEmpty
+                                            ? user.name[0].toUpperCase()
+                                            : '?',
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 14),
                                       ),
                                     ),
-                                    
                                     title: Text(
                                       user.name,
                                       style: TextStyle(
-                                        fontWeight: isAssigned ? FontWeight.w700 : FontWeight.w500,
+                                        fontWeight: isAssigned
+                                            ? FontWeight.w700
+                                            : FontWeight.w500,
                                         fontSize: 14,
                                         color: const Color(0xFF1E293B),
                                       ),
                                     ),
                                     subtitle: Text(
                                       user.email,
-                                      style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8)),
+                                      style: const TextStyle(
+                                          fontSize: 12,
+                                          color: Color(0xFF94A3B8)),
                                     ),
                                     value: isAssigned,
                                     onChanged: (val) {
-                                      // ✅ SOLO actualizar el estado local del modal
-                                      // NO llamar a onToggleAssignment() aquí para evitar conflictos
                                       setModalState(() {
                                         if (isAssigned) {
                                           localAssignments.remove(user.id);
-                                          debugPrint("   ✂️ Dialog: Removiendo ${user.name} (${user.id})");
                                         } else {
                                           localAssignments.add(user.id);
-                                          debugPrint("   ➕ Dialog: Agregando ${user.name} (${user.id})");
                                         }
-                                        debugPrint("   Estado local del dialog: ${localAssignments.toList()}");
                                       });
                                     },
                                   ),
@@ -205,50 +218,42 @@ class DeviceSectionImproved extends StatelessWidget {
                               },
                             ),
                     ),
-
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: const BoxDecoration(
-                        border: Border(top: BorderSide(color: Color(0xFFF1F5F9))),
+                        border: Border(
+                            top: BorderSide(color: Color(0xFFF1F5F9))),
                       ),
                       child: SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
                           onPressed: () {
-                            debugPrint("🔒 Cerrando dialog - Sincronizando cambios");
-                            debugPrint("   Asignaciones iniciales: $sectionAssignments");
-                            debugPrint("   Asignaciones finales en dialog: ${localAssignments.toList()}");
-                            
-                            // ✅ Calcular diferencias y SOLO actualizar los que cambiaron
-                            final initialSet = Set<String>.from(sectionAssignments);
-                            final finalSet = Set<String>.from(localAssignments);
-                            
-                            // Usuarios removidos
+                            final initialSet =
+                                Set<String>.from(sectionAssignments);
+                            final finalSet =
+                                Set<String>.from(localAssignments);
                             final removed = initialSet.difference(finalSet);
-                            // Usuarios agregados
                             final added = finalSet.difference(initialSet);
-                            
-                            debugPrint("   Removidos: ${removed.toList()}");
-                            debugPrint("   Agregados: ${added.toList()}");
-                            
-                            // ✅ Aplicar cambios de forma sincronizada
                             for (var userId in removed) {
                               onToggleAssignment(userId);
                             }
                             for (var userId in added) {
                               onToggleAssignment(userId);
                             }
-                            
                             Navigator.pop(ctx);
                           },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: const Color(0xFF0F172A),
                             foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            padding:
+                                const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(10)),
                             elevation: 0,
                           ),
-                          child: const Text("LISTO", style: TextStyle(fontWeight: FontWeight.bold)),
+                          child: const Text("LISTO",
+                              style:
+                                  TextStyle(fontWeight: FontWeight.bold)),
                         ),
                       ),
                     ),
@@ -264,13 +269,14 @@ class DeviceSectionImproved extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheduledActivityIds = entries.expand((e) => e.results.keys).toSet();
+    final scheduledActivityIds =
+        entries.expand((e) => e.results.keys).toSet();
     final relevantActivities = deviceDef.activities
-      .where((a) => scheduledActivityIds.contains(a.id))
-      .toList();
+        .where((a) => scheduledActivityIds.contains(a.id))
+        .toList();
 
     if (relevantActivities.isEmpty) return const SizedBox();
-    
+
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       decoration: BoxDecoration(
@@ -285,13 +291,17 @@ class DeviceSectionImproved extends StatelessWidget {
           ),
         ],
       ),
-      child: Column(
-        children: [
-          _buildHeader(context),
-          deviceDef.viewMode == 'table'
-              ? _buildTableViewOptimized(context, relevantActivities)
-              : _buildListViewOptimized(context, relevantActivities),
-        ],
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: StickyHeader(
+          header: _buildHeader(context),
+          content: Container(
+            color: Colors.white,
+            child: deviceDef.viewMode == 'table'
+                ? _buildTableViewOptimized(context, relevantActivities)
+                : _buildListViewOptimized(context, relevantActivities),
+          ),
+        ),
       ),
     );
   }
@@ -305,8 +315,6 @@ class DeviceSectionImproved extends StatelessWidget {
     }).toList();
 
     final isSmallScreen = MediaQuery.of(context).size.width < 600;
-    
-    // ✅ CALCULAR PROGRESO
     final progress = _calculateProgress();
 
     return Container(
@@ -318,38 +326,20 @@ class DeviceSectionImproved extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // Primera fila: Nombre y badge de cantidad
-          isSmallScreen 
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Flexible(
-                        child: Text(
-                          deviceDef.name.toUpperCase(),
-                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      _buildCountBadge(entries.length),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  _buildResponsiblesRow(context, assignedUsersList, isSmall: true),
-                ],
-              )
-            : Row(
-                children: [
-                  Expanded(
-                    child: Row(
+          isSmallScreen
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Flexible(
                           child: Text(
                             deviceDef.name.toUpperCase(),
-                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 14),
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                                fontSize: 14),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -357,12 +347,35 @@ class DeviceSectionImproved extends StatelessWidget {
                         _buildCountBadge(entries.length),
                       ],
                     ),
-                  ),
-                  _buildResponsiblesRow(context, assignedUsersList, isSmall: false),
-                ],
-              ),
-          
-          // ✅ NUEVA SEGUNDA FILA: BARRA DE PROGRESO
+                    const SizedBox(height: 12),
+                    _buildResponsiblesRow(context, assignedUsersList,
+                        isSmall: true),
+                  ],
+                )
+              : Row(
+                  children: [
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              deviceDef.name.toUpperCase(),
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 14),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          _buildCountBadge(entries.length),
+                        ],
+                      ),
+                    ),
+                    _buildResponsiblesRow(context, assignedUsersList,
+                        isSmall: false),
+                  ],
+                ),
           const SizedBox(height: 12),
           _buildProgressBar(progress),
         ],
@@ -370,24 +383,22 @@ class DeviceSectionImproved extends StatelessWidget {
     );
   }
 
-  // ✅ NUEVO WIDGET: Barra de progreso
   Widget _buildProgressBar(Map<String, dynamic> progress) {
     final percentage = progress['percentage'] as double;
     final completed = progress['completed'] as int;
     final total = progress['total'] as int;
-    
-    // Determinar color según el progreso
+
     Color progressColor;
     if (percentage == 0) {
-      progressColor = const Color(0xFF64748B); // Gris - Sin iniciar
+      progressColor = const Color(0xFF64748B);
     } else if (percentage < 50) {
-      progressColor = const Color(0xFFEF4444); // Rojo - Bajo
+      progressColor = const Color(0xFFEF4444);
     } else if (percentage < 80) {
-      progressColor = const Color(0xFFF59E0B); // Amarillo - Medio
+      progressColor = const Color(0xFFF59E0B);
     } else if (percentage < 100) {
-      progressColor = const Color(0xFF3B82F6); // Azul - Alto
+      progressColor = const Color(0xFF3B82F6);
     } else {
-      progressColor = const Color(0xFF10B981); // Verde - Completo
+      progressColor = const Color(0xFF10B981);
     }
 
     return Column(
@@ -408,7 +419,8 @@ class DeviceSectionImproved extends StatelessWidget {
             ),
             const Spacer(),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
               decoration: BoxDecoration(
                 color: progressColor.withOpacity(0.2),
                 borderRadius: BorderRadius.circular(6),
@@ -418,7 +430,9 @@ class DeviceSectionImproved extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    percentage == 100 ? Icons.check_circle : Icons.schedule,
+                    percentage == 100
+                        ? Icons.check_circle
+                        : Icons.schedule,
                     size: 11,
                     color: progressColor,
                   ),
@@ -450,12 +464,9 @@ class DeviceSectionImproved extends StatelessWidget {
                   borderRadius: BorderRadius.circular(4),
                   child: Stack(
                     children: [
-                      // Barra de fondo (vacía)
                       Container(color: const Color(0xFF334155)),
-                      
-                      // Barra de progreso (relleno)
                       FractionallySizedBox(
-                        widthFactor: percentage / 100,
+                        widthFactor: (percentage / 100).clamp(0.0, 1.0),
                         child: Container(
                           decoration: BoxDecoration(
                             gradient: LinearGradient(
@@ -476,7 +487,8 @@ class DeviceSectionImproved extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(
                 color: Colors.white.withOpacity(0.15),
                 borderRadius: BorderRadius.circular(4),
@@ -506,12 +518,17 @@ class DeviceSectionImproved extends StatelessWidget {
       ),
       child: Text(
         '$count UNIDADES',
-        style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 10, fontWeight: FontWeight.w800),
+        style: const TextStyle(
+            color: Color(0xFF94A3B8),
+            fontSize: 10,
+            fontWeight: FontWeight.w800),
       ),
     );
   }
 
-  Widget _buildResponsiblesRow(BuildContext context, List<UserModel> assignedUsersList, {required bool isSmall}) {
+  Widget _buildResponsiblesRow(
+      BuildContext context, List<UserModel> assignedUsersList,
+      {required bool isSmall}) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -520,10 +537,12 @@ class DeviceSectionImproved extends StatelessWidget {
             padding: EdgeInsets.only(right: 8.0),
             child: Text(
               "RESPONSABLES:",
-              style: TextStyle(color: Color(0xFF64748B), fontSize: 10, fontWeight: FontWeight.bold),
+              style: TextStyle(
+                  color: Color(0xFF64748B),
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold),
             ),
           ),
-        
         Flexible(
           fit: isSmall ? FlexFit.loose : FlexFit.tight,
           flex: isSmall ? 1 : 0,
@@ -532,36 +551,43 @@ class DeviceSectionImproved extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ...assignedUsersList.take(3).map((user) => _buildUserChip(user)),
-                
+                ...assignedUsersList
+                    .take(3)
+                    .map((user) => _buildUserChip(user)),
                 if (assignedUsersList.length > 3)
                   Padding(
                     padding: const EdgeInsets.only(right: 6),
                     child: Text(
                       "+${assignedUsersList.length - 3}",
-                      style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold),
+                      style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold),
                     ),
                   ),
               ],
             ),
           ),
         ),
-
         const SizedBox(width: 4),
         InkWell(
           onTap: () => _showAssignmentDialog(context),
           borderRadius: BorderRadius.circular(6),
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             decoration: BoxDecoration(
               color: const Color(0xFF334155).withOpacity(0.5),
               borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Colors.white.withOpacity(0.2)),
+              border:
+                  Border.all(color: Colors.white.withOpacity(0.2)),
             ),
             child: Icon(
-              assignedUsersList.isEmpty ? Icons.person_add_alt_1 : Icons.edit, 
-              color: Colors.white70, 
-              size: 14
+              assignedUsersList.isEmpty
+                  ? Icons.person_add_alt_1
+                  : Icons.edit,
+              color: Colors.white70,
+              size: 14,
             ),
           ),
         ),
@@ -585,7 +611,10 @@ class DeviceSectionImproved extends StatelessWidget {
             backgroundColor: Colors.white,
             child: Text(
               user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
-              style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Color(0xFF2563EB)),
+              style: const TextStyle(
+                  fontSize: 9,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF2563EB)),
             ),
           ),
           const SizedBox(width: 6),
@@ -602,25 +631,29 @@ class DeviceSectionImproved extends StatelessWidget {
     );
   }
 
- Widget _buildTableViewOptimized(BuildContext context, List<ActivityConfig> activities) {
-    // 1. Creamos un controlador local para vincular la barra con la vista
-    final ScrollController horizontalScrollController = ScrollController(); // <--- IMPORTANTE
-
-    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0; 
+  // ─────────────────────────────────────────────────────────────────────────
+  // TABLE VIEW
+  // FIX: _buildInputCell ahora recibe entry directamente para usar
+  //      entry.instanceId como key estable.
+  // ─────────────────────────────────────────────────────────────────────────
+  Widget _buildTableViewOptimized(
+      BuildContext context, List<ActivityConfig> activities) {
+    final ScrollController horizontalScrollController = ScrollController();
+    final double totalWidth =
+        230.0 + (activities.length * 100.0) + 110.0;
 
     return Scrollbar(
-      controller: horizontalScrollController, // <--- ASIGNAR AQUÍ
+      controller: horizontalScrollController,
       thumbVisibility: true,
       trackVisibility: true,
       child: SingleChildScrollView(
-        controller: horizontalScrollController, // <--- Y ASIGNAR EL MISMO AQUÍ
+        controller: horizontalScrollController,
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.only(bottom: 12),
         child: SizedBox(
           width: totalWidth,
           child: Column(
             children: [
-              // DESPUÉS: Sin height fija, se adapta al contenido
               IntrinsicHeight(
                 child: Container(
                   color: const Color(0xFFF1F5F9),
@@ -629,63 +662,105 @@ class DeviceSectionImproved extends StatelessWidget {
                     children: [
                       _buildHeaderCell('ID', 80),
                       _buildHeaderCell('UBICACIÓN', 150),
-                      ...activities.map((act) => _buildHeaderCell(act.name, 100)),
+                      ...activities
+                          .map((act) => _buildHeaderCell(act.name, 100)),
                       _buildHeaderCell('FOTO/OBS', 110),
                     ],
                   ),
                 ),
               ),
-              // Lista (sin cambios)
               ListView.builder(
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: entries.length,
-                itemBuilder: (context, index) {
-                  final entry = entries[index];
-                 // DESPUÉS: altura dinámica con IntrinsicHeight
+                itemBuilder: (context, localIndex) {
+                  final entry = entries[localIndex];
                   return IntrinsicHeight(
+                    // ── KEY ESTABLE por instanceId ──────────────────────
+                    key: ValueKey('row_${entry.instanceId}'),
                     child: Container(
-                      constraints: const BoxConstraints(minHeight: 52), // ✅ Mínimo 52, crece si necesita
+                      constraints:
+                          const BoxConstraints(minHeight: 52),
                       decoration: const BoxDecoration(
-                        border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
+                        border: Border(
+                            bottom: BorderSide(color: Color(0xFFF1F5F9))),
                       ),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
-                          SizedBox(width: 80, child: Center(child: _buildInputCell(index, entry.customId, 'id', 60, onCustomIdChanged))),
-                          SizedBox(width: 150, child: Center(child: _buildInputCell(index, entry.area, 'area', 130, onAreaChanged, hint: '...'))),
-                          
+                          SizedBox(
+                            width: 80,
+                            child: Center(
+                              child: _buildInputCell(
+                                localIndex,
+                                entry,
+                                entry.customId,
+                                'id',
+                                60,
+                                onCustomIdChanged,
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 150,
+                            child: Center(
+                              child: _buildInputCell(
+                                localIndex,
+                                entry,
+                                entry.area,
+                                'area',
+                                130,
+                                onAreaChanged,
+                                hint: '...',
+                              ),
+                            ),
+                          ),
                           ...activities.map((act) {
-                            if (!entry.results.containsKey(act.id)) return const SizedBox(width: 100);
+                            if (!entry.results.containsKey(act.id)) {
+                              return const SizedBox(width: 100);
+                            }
                             return SizedBox(
                               width: 100,
                               child: Center(
                                 child: InkWell(
-                                  onTap: _canEdit ? () => onToggleStatus(index, act.id) : null,
+                                  onTap: _canEdit
+                                      ? () => onToggleStatus(
+                                          localIndex, act.id)
+                                      : null,
                                   borderRadius: BorderRadius.circular(12),
-                                  child: _buildStatusBadge(entry.results[act.id]),
+                                  child: _buildStatusBadge(
+                                      entry.results[act.id]),
                                 ),
                               ),
                             );
                           }),
-
                           SizedBox(
                             width: 110,
                             child: Row(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
                                 _buildCompactActionIcon(
-                                  icon: entry.photoUrls.isNotEmpty ? Icons.camera_alt : Icons.camera_alt_outlined,
+                                  icon: entry.photoUrls.isNotEmpty
+                                      ? Icons.camera_alt
+                                      : Icons.camera_alt_outlined,
                                   isActive: entry.photoUrls.isNotEmpty,
                                   activeColor: const Color(0xFF3B82F6),
-                                  onTap: _canEdit ? () => onCameraClick(index) : null,
+                                  onTap: _canEdit
+                                      ? () => onCameraClick(localIndex)
+                                      : null,
                                 ),
                                 const SizedBox(width: 8),
                                 _buildCompactActionIcon(
-                                  icon: entry.observations.isNotEmpty ? Icons.comment : Icons.comment_outlined,
-                                  isActive: entry.observations.isNotEmpty,
+                                  icon: entry.observations.isNotEmpty
+                                      ? Icons.comment
+                                      : Icons.comment_outlined,
+                                  isActive:
+                                      entry.observations.isNotEmpty,
                                   activeColor: const Color(0xFFF59E0B),
-                                  onTap: _canEdit ? () => onObservationClick(index) : null,
+                                  onTap: _canEdit
+                                      ? () =>
+                                          onObservationClick(localIndex)
+                                      : null,
                                 ),
                               ],
                             ),
@@ -716,73 +791,101 @@ class DeviceSectionImproved extends StatelessWidget {
             color: Color(0xFF1E293B),
           ),
           textAlign: TextAlign.center,
-          softWrap: true,       // ✅ Texto completo
-          maxLines: null,       // ✅ Sin límite
+          softWrap: true,
+          maxLines: null,
           overflow: TextOverflow.visible,
         ),
       ),
     );
   }
 
-  Widget _buildInputCell(int index, String? value, String keyPrefix, double width, Function(int, String) onChanged, {String? hint}) {
+  // ─────────────────────────────────────────────────────────────────────────
+  // FIX CRÍTICO: Key ahora usa entry.instanceId (estable) en lugar del
+  // índice numérico (cambia al agregar/quitar entradas).
+  // ─────────────────────────────────────────────────────────────────────────
+  Widget _buildInputCell(
+    int localIndex,
+    ReportEntry entry,
+    String? value,
+    String keyPrefix,
+    double width,
+    Function(int, String) onChanged, {
+    String? hint,
+  }) {
     return SizedBox(
       width: width,
       height: 32,
       child: TextFormField(
-        key: ValueKey('${keyPrefix}_$index'), 
+        // ✅ KEY ESTABLE: usa instanceId, no el índice numérico
+        key: ValueKey('${keyPrefix}_${entry.instanceId}'),
         initialValue: value,
         enabled: _canEdit,
         textAlign: TextAlign.center,
-        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
+        style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF1E293B)),
         decoration: InputDecoration(
           isDense: true,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
           hintText: hint,
           hintStyle: const TextStyle(color: Color(0xFFCBD5E1)),
           filled: true,
           fillColor: const Color(0xFFF8FAFC),
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none),
-          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5)),
+          border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(6),
+              borderSide: BorderSide.none),
+          focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(6),
+              borderSide:
+                  const BorderSide(color: Color(0xFF3B82F6), width: 1.5)),
         ),
-        onChanged: (val) => onChanged(index, val),
+        onChanged: (val) => onChanged(localIndex, val),
       ),
     );
   }
 
-  Widget _buildListViewOptimized(BuildContext context, List<ActivityConfig> activities) {
+  // ─────────────────────────────────────────────────────────────────────────
+  // LIST VIEW
+  // FIX: Usar índice explícito del loop en lugar de entries.indexOf(entry)
+  //      para evitar O(n²) y bugs con entradas de mismo contenido.
+  // ─────────────────────────────────────────────────────────────────────────
+  Widget _buildListViewOptimized(
+      BuildContext context, List<ActivityConfig> activities) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        // 1. Calculamos cuántas columnas caben según el ancho disponible
-        double width = constraints.maxWidth;
+        final double width = constraints.maxWidth;
         int columns = 1;
-        
-        // Si hay más de 700px, usamos 2 columnas. Si hay más de 1100, usamos 3.
         if (width > 700) columns = 2;
         if (width > 1100) columns = 3;
 
-        // 2. Calculamos el ancho exacto de cada tarjeta
-        // Restamos el padding total (16 a los lados + huecos entre cards)
         final double spacing = 12.0;
-        final double cardWidth = (width - (32) - (spacing * (columns - 1))) / columns;
+        final double cardWidth =
+            (width - 32 - (spacing * (columns - 1))) / columns;
 
         return Padding(
           padding: const EdgeInsets.all(16),
           child: Wrap(
-            spacing: spacing,      // Espacio horizontal entre cuadros
-            runSpacing: spacing,   // Espacio vertical entre cuadros
-            children: entries.map((entry) {
-              
-              // Filtramos actividades para esta entrada
-              final entryActivities = activities.where((act) => entry.results.containsKey(act.id)).toList();
+            spacing: spacing,
+            runSpacing: spacing,
+            children: List.generate(entries.length, (localIndex) {
+              final entry = entries[localIndex];
+              final entryActivities = activities
+                  .where((act) => entry.results.containsKey(act.id))
+                  .toList();
 
               return SizedBox(
-                width: cardWidth, // ✅ Ancho forzado para que quepan varias
+                // ── KEY ESTABLE por instanceId ────────────────────────
+                key: ValueKey('card_${entry.instanceId}'),
+                width: cardWidth,
                 child: Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
+                    border: Border.all(
+                        color: const Color(0xFFE2E8F0), width: 1.5),
                     boxShadow: [
                       BoxShadow(
                         color: Colors.black.withOpacity(0.04),
@@ -792,78 +895,108 @@ class DeviceSectionImproved extends StatelessWidget {
                     ],
                   ),
                   child: Column(
-                    mainAxisSize: MainAxisSize.min, // Se ajusta a la altura del contenido
+                    mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // --- CABECERA: ID Y ÁREA ---
+                      // Cabecera: ID y Área
                       Row(
                         children: [
                           SizedBox(
-                            width: 60, 
-                            child: _buildInputCell(entries.indexOf(entry), entry.customId, 'grid_id', 60, onCustomIdChanged, hint: 'ID')
+                            width: 60,
+                            child: _buildInputCell(
+                              localIndex,
+                              entry,
+                              entry.customId,
+                              'grid_id',
+                              60,
+                              onCustomIdChanged,
+                              hint: 'ID',
+                            ),
                           ),
                           const SizedBox(width: 8),
                           Expanded(
-                            child: _buildInputCell(entries.indexOf(entry), entry.area, 'grid_area', 100, onAreaChanged, hint: 'Ubicación...')
+                            child: _buildInputCell(
+                              localIndex,
+                              entry,
+                              entry.area,
+                              'grid_area',
+                              100,
+                              onAreaChanged,
+                              hint: 'Ubicación...',
+                            ),
                           ),
                         ],
                       ),
-                      
+
                       if (entryActivities.isNotEmpty) ...[
                         const SizedBox(height: 12),
-                        const Divider(height: 1, color: Color(0xFFF1F5F9)),
+                        const Divider(
+                            height: 1, color: Color(0xFFF1F5F9)),
                         const SizedBox(height: 12),
                       ],
 
-                      // --- LISTA DE ACTIVIDADES ---
+                      // Lista de actividades
                       ...entryActivities.map((act) {
-                        final index = entries.indexOf(entry); // Necesitamos el índice real
                         final status = entry.results[act.id];
-                        final hasPhotos = (entry.activityData[act.id]?.photoUrls.length ?? 0) > 0;
-                        final hasObs = (entry.activityData[act.id]?.observations ?? '').isNotEmpty;
+                        final hasPhotos =
+                            (entry.activityData[act.id]?.photoUrls.length ??
+                                    0) >
+                                0;
+                        final hasObs =
+                            (entry.activityData[act.id]?.observations ??
+                                    '')
+                                .isNotEmpty;
 
                         return Padding(
                           padding: const EdgeInsets.only(bottom: 10),
                           child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.center, // Alinear verticalmente al centro
+                            crossAxisAlignment:
+                                CrossAxisAlignment.center,
                             children: [
-                              // Texto del enunciado
                               Expanded(
                                 child: Text(
-                                  act.name, 
+                                  act.name,
                                   style: const TextStyle(
-                                    fontSize: 12, 
-                                    fontWeight: FontWeight.w600, 
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
                                     color: Color(0xFF334155),
                                     height: 1.4,
                                   ),
-                                  softWrap: true,       // ✅ Permite salto de línea
-                                  maxLines: null,       // ✅ Sin límite de líneas
-                                  overflow: TextOverflow.visible, // ✅ No corta el texto
+                                  softWrap: true,
+                                  maxLines: null,
+                                  overflow: TextOverflow.visible,
                                 ),
                               ),
                               const SizedBox(width: 6),
-                              
-                              // Iconos compactos
                               _buildCompactActionIcon(
-                                icon: hasPhotos ? Icons.camera_alt : Icons.camera_alt_outlined,
+                                icon: hasPhotos
+                                    ? Icons.camera_alt
+                                    : Icons.camera_alt_outlined,
                                 isActive: hasPhotos,
                                 activeColor: const Color(0xFF3B82F6),
-                                onTap: _canEdit ? () => onCameraClick(index, activityId: act.id) : null,
+                                onTap: _canEdit
+                                    ? () => onCameraClick(localIndex,
+                                        activityId: act.id)
+                                    : null,
                               ),
-                              
                               _buildCompactActionIcon(
-                                icon: hasObs ? Icons.comment : Icons.comment_outlined,
+                                icon: hasObs
+                                    ? Icons.comment
+                                    : Icons.comment_outlined,
                                 isActive: hasObs,
                                 activeColor: const Color(0xFFF59E0B),
-                                onTap: _canEdit ? () => onObservationClick(index, activityId: act.id) : null,
+                                onTap: _canEdit
+                                    ? () => onObservationClick(
+                                        localIndex,
+                                        activityId: act.id)
+                                    : null,
                               ),
-                              
                               const SizedBox(width: 6),
-                              
-                              // Estado
                               InkWell(
-                                onTap: _canEdit ? () => onToggleStatus(index, act.id) : null,
+                                onTap: _canEdit
+                                    ? () =>
+                                        onToggleStatus(localIndex, act.id)
+                                    : null,
                                 child: _buildCompactStatusBadge(status),
                               ),
                             ],
@@ -874,7 +1007,7 @@ class DeviceSectionImproved extends StatelessWidget {
                   ),
                 ),
               );
-            }).toList(),
+            }),
           ),
         );
       },
@@ -885,20 +1018,19 @@ class DeviceSectionImproved extends StatelessWidget {
     required IconData icon,
     required bool isActive,
     required Color activeColor,
-    VoidCallback? onTap
+    VoidCallback? onTap,
   }) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(6), // Borde un poco más redondeado
+      borderRadius: BorderRadius.circular(6),
       child: Container(
-        // Agregamos un contenedor invisible para garantizar área de toque mínima sin padding excesivo
-        width: 32, 
+        width: 32,
         height: 32,
         alignment: Alignment.center,
         child: Icon(
           icon,
-          size: 18, // Tamaño controlado
-          color: isActive ? activeColor : const Color(0xFF94A3B8), // Color gris más suave si está inactivo
+          size: 18,
+          color: isActive ? activeColor : const Color(0xFF94A3B8),
         ),
       ),
     );
@@ -910,14 +1042,12 @@ class DeviceSectionImproved extends StatelessWidget {
 
     switch (status) {
       case 'OK':
-        color = const Color(0xFF10B981); // ✅ Verde
+        color = const Color(0xFF10B981);
         child = Container(
           width: 8,
           height: 8,
           decoration: const BoxDecoration(
-            color: Colors.white,
-            shape: BoxShape.circle,
-          ),
+              color: Colors.white, shape: BoxShape.circle),
         );
         break;
       case 'NOK':
@@ -926,17 +1056,22 @@ class DeviceSectionImproved extends StatelessWidget {
         break;
       case 'NA':
         color = const Color(0xFFE2E8F0);
-        child = const SizedBox();
+        child = const Text(           // ✅ AGREGAR EL TEXTO
+          'N/A',
+          style: TextStyle(
+              fontSize: 7,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF64748B)),
+        );
         break;
       case 'NR':
         color = const Color(0xFFFBBF24);
         child = const Text(
           "N/R",
           style: TextStyle(
-            fontSize: 8,
-            fontWeight: FontWeight.bold,
-            color: Colors.white,
-          ),
+              fontSize: 7,
+              fontWeight: FontWeight.bold,
+              color: Colors.white),
         );
         break;
       default:
@@ -959,10 +1094,9 @@ class DeviceSectionImproved extends StatelessWidget {
         shape: BoxShape.circle,
         boxShadow: [
           BoxShadow(
-            color: color.withOpacity(0.3),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          )
+              color: color.withOpacity(0.3),
+              blurRadius: 4,
+              offset: const Offset(0, 2))
         ],
       ),
       child: Center(child: child),
@@ -973,18 +1107,16 @@ class DeviceSectionImproved extends StatelessWidget {
     Color bgColor;
     Color borderColor;
     Widget? child;
-    
+
     switch (status) {
       case 'OK':
-        bgColor = const Color(0xFF10B981);   // ✅ Verde
-        borderColor = const Color(0xFF059669); // ✅ Verde oscuro para el borde
+        bgColor = const Color(0xFF10B981);
+        borderColor = const Color(0xFF059669);
         child = Container(
           width: 8,
           height: 8,
           decoration: const BoxDecoration(
-            color: Colors.white,
-            shape: BoxShape.circle,
-          ),
+              color: Colors.white, shape: BoxShape.circle),
         );
         break;
       case 'NOK':
@@ -998,10 +1130,9 @@ class DeviceSectionImproved extends StatelessWidget {
         child = const Text(
           'N/A',
           style: TextStyle(
-            fontSize: 8,
-            fontWeight: FontWeight.w900,
-            color: Color(0xFF64748B),
-          ),
+              fontSize: 8,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF64748B)),
         );
         break;
       case 'NR':
@@ -1010,10 +1141,9 @@ class DeviceSectionImproved extends StatelessWidget {
         child = const Text(
           'N/R',
           style: TextStyle(
-            fontSize: 8,
-            fontWeight: FontWeight.w900,
-            color: Colors.white,
-          ),
+              fontSize: 8,
+              fontWeight: FontWeight.w900,
+              color: Colors.white),
         );
         break;
       default:
@@ -1027,7 +1157,7 @@ class DeviceSectionImproved extends StatelessWidget {
           ),
         );
     }
-    
+
     return Container(
       width: 24,
       height: 24,
@@ -1037,10 +1167,9 @@ class DeviceSectionImproved extends StatelessWidget {
         border: Border.all(color: borderColor, width: 2),
         boxShadow: [
           BoxShadow(
-            color: borderColor.withOpacity(0.3),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
+              color: borderColor.withOpacity(0.3),
+              blurRadius: 4,
+              offset: const Offset(0, 2)),
         ],
       ),
       child: Center(child: child),
