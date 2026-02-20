@@ -1,7 +1,13 @@
+// ═══════════════════════════════════════════════════════════════════════
+// ServiceReportScreen — Refactorizado con Riverpod
+//   - _adminOverride, _currentUserId → estado local de UI
+// ═══════════════════════════════════════════════════════════════════════
+
 import 'dart:async';
 import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gal/gal.dart';
 import 'package:ici_check/features/devices/data/devices_repository.dart';
 import 'package:ici_check/features/reports/services/device_location_service.dart';
@@ -11,6 +17,8 @@ import 'package:ici_check/features/reports/widgets/report_controls.dart';
 import 'package:ici_check/features/reports/widgets/report_header.dart';
 import 'package:ici_check/features/reports/widgets/report_signatures.dart';
 import 'package:ici_check/features/reports/widgets/report_summary.dart';
+import 'package:ici_check/features/reports/state/report_providers.dart';
+import 'package:ici_check/features/reports/state/report_state.dart';
 import 'package:intl/intl.dart';
 import 'package:signature/signature.dart';
 import 'package:image_picker/image_picker.dart';
@@ -25,7 +33,7 @@ import 'package:ici_check/features/settings/data/settings_repository.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/reports/data/reports_repository.dart';
 
-class ServiceReportScreen extends StatefulWidget {
+class ServiceReportScreen extends ConsumerStatefulWidget {
   final String policyId;
   final String dateStr;
   final PolicyModel policy;
@@ -44,10 +52,11 @@ class ServiceReportScreen extends StatefulWidget {
   });
 
   @override
-  State<ServiceReportScreen> createState() => _ServiceReportScreenState();
+  ConsumerState<ServiceReportScreen> createState() =>
+      _ServiceReportScreenState();
 }
 
-class _ServiceReportScreenState extends State<ServiceReportScreen> {
+class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   // ══════════════════════════════════════════════════════════════════════
   // REPOSITORIOS Y SERVICIOS
   // ══════════════════════════════════════════════════════════════════════
@@ -60,48 +69,21 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   final DeviceLocationService _locationService = DeviceLocationService();
 
   // ══════════════════════════════════════════════════════════════════════
-  // ESTADO PRINCIPAL
+  // ESTADO LOCAL DE UI (no pertenece al Notifier)
   // ══════════════════════════════════════════════════════════════════════
-  ServiceReportModel? _report;
   CompanySettingsModel? _companySettings;
   PolicyModel? _currentPolicy;
   List<DeviceModel> _currentDevices = [];
   bool _isLoading = true;
   bool _isUploadingPhoto = false;
-
-  // Estado de usuario
   bool _adminOverride = false;
   String? _currentUserId;
   UserModel? _currentUser;
 
-  // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #1: MAPA DE ÍNDICES GLOBALES PRE-CALCULADO
-  // Elimina los costosos `indexWhere` en O(n) que se ejecutaban en cada
-  // callback de cada celda. Ahora es O(1) por lookup.
-  // ══════════════════════════════════════════════════════════════════════
-  Map<String, int> _instanceIdToGlobalIndex = {};
-
-  // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #2: CACHÉ DE DATOS DERIVADOS
-  // Se recalculan SOLO cuando cambian las entries, no en cada build().
-  // ══════════════════════════════════════════════════════════════════════
-  List<MapEntry<String, List<ReportEntry>>> _cachedGroupedEntries = [];
-  String _cachedFrequencies = "";
-  List<UserModel> _cachedAssignedUsers = [];
-
-  // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #3: DEBOUNCE UNIFICADO PARA FIREBASE
-  // En lugar de guardar en Firebase en cada tecla o toggle, acumulamos
-  // los cambios y hacemos UN SOLO write cada 800ms.
-  // ══════════════════════════════════════════════════════════════════════
-  Timer? _saveDebounce;
-  bool _hasPendingChanges = false;
-
-  // Suscripciones
+  // Suscripciones a Firebase
   StreamSubscription? _policySubscription;
   StreamSubscription? _reportSubscription;
   StreamSubscription? _devicesSubscription;
-  Timer? _locationSaveDebounce;
 
   // Ubicaciones guardadas
   Map<String, Map<String, String>> _savedLocations = {};
@@ -115,17 +97,20 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     penStrokeWidth: 2,
     penColor: Colors.black,
   );
+  Timer? _signatureDebounce;
 
   // Estados para Modales
-  String? _activeObservationEntry;
+  int? _activeObservationEntryIdx;
   String? _activeObservationActivityId;
   int? _photoContextEntryIdx;
   String? _photoContextActivityId;
 
-  // ✅ OPTIMIZACIÓN #4: Controller estable para observaciones generales
-  // Evita recrear TextEditingController en cada build().
+  // Controller estable para observaciones generales
   late final TextEditingController _generalObsController;
   Timer? _generalObsDebounce;
+
+  // Location save debounce
+  Timer? _locationSaveDebounce;
 
   // Colores
   static const Color _bgLight = Color(0xFFF8FAFC);
@@ -133,6 +118,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   List<DeviceModel> get _devicesEffective =>
       _currentDevices.isNotEmpty ? _currentDevices : widget.devices;
+
+  // Acceso rápido al notifier
+  ReportNotifier get _notifier =>
+      ref.read(reportNotifierProvider.notifier);
 
   // ══════════════════════════════════════════════════════════════════════
   // LIFECYCLE
@@ -149,69 +138,17 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   @override
   void dispose() {
-    // Guardar cambios pendientes antes de destruir
-    _flushPendingChanges();
+    _notifier.flushBeforeDispose();
     _locationSaveDebounce?.cancel();
+    _signatureDebounce?.cancel();
     _providerSigController.dispose();
     _clientSigController.dispose();
     _policySubscription?.cancel();
     _reportSubscription?.cancel();
     _devicesSubscription?.cancel();
-    _saveDebounce?.cancel();
     _generalObsDebounce?.cancel();
     _generalObsController.dispose();
     super.dispose();
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #5: RECALCULAR DATOS DERIVADOS EN UN SOLO LUGAR
-  // Se llama SOLO cuando _report.entries cambia, NO en build().
-  // ══════════════════════════════════════════════════════════════════════
-  void _updateDerivedData() {
-    if (_report == null) return;
-
-    // 1. Reconstruir mapa de índices globales
-    final newIndexMap = <String, int>{};
-    for (int i = 0; i < _report!.entries.length; i++) {
-      newIndexMap[_report!.entries[i].instanceId] = i;
-    }
-    _instanceIdToGlobalIndex = newIndexMap;
-
-    // 2. Recalcular agrupación
-    final grouped = _groupEntries();
-    _cachedGroupedEntries = grouped.entries.toList();
-    _cachedFrequencies = _getFrequencies(grouped);
-
-    // 3. Recalcular usuarios asignados
-    _cachedAssignedUsers = widget.users
-        .where((user) => _report!.assignedTechnicianIds.contains(user.id))
-        .toList();
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #6: GUARDADO DIFERIDO (DEBOUNCED)
-  // Acumula cambios y hace UN write a Firebase cada 800ms.
-  // ══════════════════════════════════════════════════════════════════════
-  void _scheduleSave() {
-    _hasPendingChanges = true;
-    _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 800), () {
-      _flushPendingChanges();
-    });
-  }
-
-  void _flushPendingChanges() {
-    if (_hasPendingChanges && _report != null) {
-      _hasPendingChanges = false;
-      _repo.saveReport(_report!);
-    }
-  }
-
-  /// Guarda inmediatamente (para acciones críticas como start/end service)
-  void _saveImmediate() {
-    _saveDebounce?.cancel();
-    _hasPendingChanges = false;
-    if (_report != null) _repo.saveReport(_report!);
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -239,18 +176,16 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       );
 
       // Stream de dispositivos
-      _devicesSubscription = _devicesRepo.getDevicesStream().listen((
-        updatedDevices,
-      ) {
+      _devicesSubscription =
+          _devicesRepo.getDevicesStream().listen((updatedDevices) {
         if (!mounted) return;
         final bool firstLoad = _currentDevices.isEmpty;
-        bool hasChanges =
-            firstLoad ||
+        bool hasChanges = firstLoad ||
             _hasRelevantDeviceChanges(_currentDevices, updatedDevices);
 
         setState(() => _currentDevices = updatedDevices);
 
-        if (!firstLoad && hasChanges && _report != null) {
+        if (!firstLoad && hasChanges) {
           _resyncReportWithCurrentDevices();
         }
       });
@@ -266,8 +201,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           if (mounted) setState(() => _currentPolicy = updatedPolicy);
 
           if (previousPolicy != null &&
-              _hasRelevantPolicyChanges(previousPolicy, updatedPolicy) &&
-              _report != null) {
+              _hasRelevantPolicyChanges(previousPolicy, updatedPolicy)) {
             _syncReportWithPolicy(updatedPolicy);
           }
         } catch (e) {
@@ -308,7 +242,6 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     List<DeviceModel> newDevs,
   ) {
     if (oldDevs.length != newDevs.length) return true;
-    // ✅ Usar mapa para comparación O(n) en vez de O(n²)
     final oldMap = {for (final d in oldDevs) d.id: d};
     for (final newDev in newDevs) {
       final oldDev = oldMap[newDev.id];
@@ -345,11 +278,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // SINCRONIZACIÓN
+  // SINCRONIZACIÓN CON FIREBASE
   // ══════════════════════════════════════════════════════════════════════
 
   Future<void> _resyncReportWithCurrentDevices() async {
-    if (_report == null || _currentDevices.isEmpty) return;
+    final state = ref.read(reportNotifierProvider);
+    if (state == null || _currentDevices.isEmpty) return;
 
     final policyToUse = _currentPolicy ?? widget.policy;
     bool isWeekly = widget.dateStr.contains('W');
@@ -363,26 +297,27 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       timeIndex,
     );
 
-    final mergedEntries = _mergeEntries(_report!.entries, idealEntries);
-    if (!_entriesStructureChanged(_report!.entries, mergedEntries)) return;
+    final mergedEntries = _mergeEntries(state.report.entries, idealEntries);
+    if (!_entriesStructureChanged(state.report.entries, mergedEntries)) return;
 
-    final updatedReport = _report!.copyWith(entries: mergedEntries);
+    final updatedReport = state.report.copyWith(entries: mergedEntries);
     await _repo.saveReport(updatedReport);
 
-    if (mounted) {
-      setState(() {
-        _report = updatedReport;
-        _updateDerivedData();
-      });
-      _showSnackBar(
-        'Actividades actualizadas según la nueva frecuencia',
-        Colors.blue,
-      );
-    }
+    _notifier.syncFromFirebase(
+      updatedReport,
+      groupedEntries: _buildGroupedEntries(updatedReport),
+      frequencies: _computeFrequencies(),
+    );
+
+    _showSnackBar(
+      'Actividades actualizadas según la nueva frecuencia',
+      Colors.blue,
+    );
   }
 
   Future<void> _syncReportWithPolicy(PolicyModel updatedPolicy) async {
-    if (_report == null) return;
+    final state = ref.read(reportNotifierProvider);
+    if (state == null) return;
 
     bool isWeekly = widget.dateStr.contains('W');
     int timeIndex = _calculateTimeIndex(isWeekly);
@@ -395,24 +330,22 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       timeIndex,
     );
 
-    final mergedEntries = _mergeEntries(_report!.entries, idealEntries);
-    final updatedReport = _report!.copyWith(entries: mergedEntries);
-
+    final mergedEntries = _mergeEntries(state.report.entries, idealEntries);
+    final updatedReport = state.report.copyWith(entries: mergedEntries);
     await _repo.saveReport(updatedReport);
 
-    if (mounted) {
-      setState(() {
-        _report = updatedReport;
-        _updateDerivedData();
-      });
-      _showSnackBar(
-        'Reporte actualizado con los cambios de la póliza',
-        Colors.blue,
-      );
-    }
+    _notifier.syncFromFirebase(
+      updatedReport,
+      groupedEntries: _buildGroupedEntries(updatedReport),
+      frequencies: _computeFrequencies(),
+    );
+
+    _showSnackBar(
+      'Reporte actualizado con los cambios de la póliza',
+      Colors.blue,
+    );
   }
 
-  /// ✅ Comparación eficiente de estructura de entries
   bool _entriesStructureChanged(
     List<ReportEntry> oldEntries,
     List<ReportEntry> newEntries,
@@ -429,19 +362,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   void _syncAndLoadReport(ServiceReportModel existingReport) {
-    // ✅ AÑADIDO: Si hay cambios locales pendientes, no pisar con snapshot de Firebase
-    if (_hasPendingChanges) return;
+    // No pisar cambios locales pendientes
+    if (_notifier.hasPendingChanges) return;
 
     if (_devicesEffective.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _report = existingReport;
-          _syncGeneralObsController(existingReport.generalObservations);
-          _updateDerivedData();
-          _isLoading = false;
-          _loadSignatures();
-        });
-      }
+      _initializeNotifier(existingReport);
       return;
     }
 
@@ -465,6 +390,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     bool hasLocationChanges = false;
     if (!hasStructureChanges && _savedLocations.isNotEmpty) {
       for (int i = 0; i < mergedEntries.length; i++) {
+        if (i >= existingReport.entries.length) break;
         final original = existingReport.entries[i];
         final merged = mergedEntries[i];
         if (original.customId != merged.customId ||
@@ -480,32 +406,9 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       if (hasStructureChanges) {
         _repo.saveReport(updatedReport);
       }
-      if (mounted) {
-        setState(() {
-          _report = updatedReport;
-          _syncGeneralObsController(updatedReport.generalObservations);
-          _updateDerivedData();
-          _isLoading = false;
-          _loadSignatures();
-        });
-      }
+      _initializeNotifier(updatedReport);
     } else {
-      if (mounted) {
-        setState(() {
-          _report = existingReport;
-          _syncGeneralObsController(existingReport.generalObservations);
-          _updateDerivedData();
-          _isLoading = false;
-          _loadSignatures();
-        });
-      }
-    }
-  }
-
-  /// ✅ Sincroniza el controller de observaciones generales solo si cambió externamente
-  void _syncGeneralObsController(String newText) {
-    if (_generalObsController.text != newText) {
-      _generalObsController.text = newText;
+      _initializeNotifier(existingReport);
     }
   }
 
@@ -524,20 +427,94 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     );
 
     _repo.saveReport(newReport);
+    _initializeNotifier(newReport);
+  }
 
-    if (mounted) {
-      setState(() {
-        _report = newReport;
-        _syncGeneralObsController(newReport.generalObservations);
-        _updateDerivedData();
-        _isLoading = false;
-      });
+  /// Inicializa el Notifier con un report y marca la carga como completada
+  void _initializeNotifier(ServiceReportModel report) {
+    final grouped = _buildGroupedEntries(report);
+    final frequencies = _computeFrequencies();
+
+    _notifier.initialize(
+      ReportState.fromReport(
+        report,
+        groupedEntries: grouped,
+        frequencies: frequencies,
+      ),
+    );
+
+    _syncGeneralObsController(report.generalObservations);
+
+    if (mounted && _isLoading) {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  void _syncGeneralObsController(String newText) {
+    if (_generalObsController.text != newText) {
+      _generalObsController.text = newText;
     }
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // HELPERS
+  // HELPERS DE AGRUPACIÓN (solo usados en sync, NO en build)
   // ══════════════════════════════════════════════════════════════════════
+
+  List<MapEntry<String, List<ReportEntry>>> _buildGroupedEntries(
+    ServiceReportModel report,
+  ) {
+    final policyToUse = _currentPolicy ?? widget.policy;
+    final Map<String, PolicyDevice> policyDevicesMap = {
+      for (final d in policyToUse.devices) d.instanceId: d,
+    };
+
+    final grouped = <String, List<ReportEntry>>{};
+
+    for (final entry in report.entries) {
+      String baseId = entry.instanceId;
+      final lastUnderscore = baseId.lastIndexOf('_');
+      if (lastUnderscore != -1) {
+        final suffix = baseId.substring(lastUnderscore + 1);
+        if (int.tryParse(suffix) != null) {
+          baseId = baseId.substring(0, lastUnderscore);
+        }
+      }
+
+      final deviceInstance =
+          policyDevicesMap[baseId] ?? policyDevicesMap[entry.instanceId];
+      if (deviceInstance == null) continue;
+
+      final defId = deviceInstance.definitionId;
+      (grouped[defId] ??= []).add(entry);
+    }
+
+    return grouped.entries.toList();
+  }
+
+  String _computeFrequencies() {
+    final bool isWeekly = widget.dateStr.contains('W');
+    if (!isWeekly) return "Mensual";
+
+    final Set<String> frecuenciasPresentes = {};
+    final policyToUse = _currentPolicy ?? widget.policy;
+    final defMap = {for (final d in _devicesEffective) d.id: d};
+
+    for (final devInstance in policyToUse.devices) {
+      final def = defMap[devInstance.definitionId];
+      if (def == null) continue;
+      for (final act in def.activities) {
+        if (act.frequency == Frequency.SEMANAL) {
+          frecuenciasPresentes.add('Semanal');
+        } else if (act.frequency == Frequency.QUINCENAL) {
+          frecuenciasPresentes.add('Quincenal');
+        }
+      }
+    }
+
+    if (frecuenciasPresentes.isEmpty) return "Semanal";
+    final lista = frecuenciasPresentes.toList()..sort();
+    return lista.join(' / ');
+  }
 
   int _calculateTimeIndex(bool isWeekly) {
     if (!isWeekly) {
@@ -566,6 +543,19 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     return _repo.mergeEntries(existing, ideal, _savedLocations);
   }
 
+  PolicyDevice? _findPolicyDevice(String entryInstanceId) {
+    final policyToUse = _currentPolicy ?? widget.policy;
+    try {
+      return policyToUse.devices.firstWhere(
+        (d) =>
+            entryInstanceId == d.instanceId ||
+            entryInstanceId.startsWith('${d.instanceId}_'),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<String?> _getCurrentUserId() async {
     try {
       return FirebaseAuth.instance.currentUser?.uid;
@@ -587,10 +577,99 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // FIRMAS
+  // PERMISOS (estado local de UI)
   // ══════════════════════════════════════════════════════════════════════
 
-  Timer? _signatureDebounce;
+  bool _isEditable(ReportState state) {
+    if (_adminOverride) return true;
+    return state.report.startTime != null && state.report.endTime == null;
+  }
+
+  bool _canSignReport() =>
+      ref.read(reportNotifierProvider) != null;
+
+  bool _isUserCoordinator() {
+    if (_currentUser == null) return false;
+    if (_currentUser!.role == UserRole.SUPER_USER ||
+        _currentUser!.role == UserRole.ADMIN) {
+      return true;
+    }
+    return widget.policy.assignedUserIds.contains(_currentUserId);
+  }
+
+  bool _areAllSectionsAssigned(ReportState state) {
+    final activeDefIds = <String>{};
+    for (final entry in state.report.entries) {
+      if (entry.results.isEmpty) continue;
+      final deviceInstance = _findPolicyDevice(entry.instanceId);
+      if (deviceInstance != null) {
+        activeDefIds.add(deviceInstance.definitionId);
+      }
+    }
+    for (final defId in activeDefIds) {
+      final assigned = state.report.sectionAssignments[defId];
+      if (assigned == null || assigned.isEmpty) return false;
+    }
+    return true;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ACCIONES DE SERVICIO
+  // ══════════════════════════════════════════════════════════════════════
+
+  void _handleStartService() {
+    final state = ref.read(reportNotifierProvider);
+    if (state == null || _currentUserId == null) {
+      _showSnackBar(
+        'Debes seleccionar un usuario para registrar tiempos',
+        Colors.orange,
+      );
+      return;
+    }
+
+    if (!_areAllSectionsAssigned(state)) {
+      _showSnackBar(
+        'No se puede iniciar: Hay tipos de dispositivos sin responsable asignado.',
+        Colors.red,
+        seconds: 3,
+      );
+      return;
+    }
+
+    final now = DateTime.now();
+    final timeStr = DateFormat('HH:mm').format(now);
+    _notifier.startService(timeStr, now);
+  }
+
+  void _handleEndService() {
+    final state = ref.read(reportNotifierProvider);
+    if (state == null || _currentUserId == null) {
+      _showSnackBar(
+        'Debes seleccionar un usuario para registrar tiempos',
+        Colors.orange,
+      );
+      return;
+    }
+
+    if (!_areAllSectionsAssigned(state)) {
+      _showSnackBar(
+        'Asigna técnicos a todas las secciones antes de finalizar.',
+        Colors.red,
+      );
+      return;
+    }
+
+    final timeStr = DateFormat('HH:mm').format(DateTime.now());
+    _notifier.endService(timeStr);
+  }
+
+  void _handleResumeService() {
+    _notifier.resumeService();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // FIRMAS
+  // ══════════════════════════════════════════════════════════════════════
 
   void _onSignatureChanged() {
     _signatureDebounce?.cancel();
@@ -600,10 +679,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   Future<void> _processAndSaveSignatures() async {
-    if (_report == null) return;
+    final state = ref.read(reportNotifierProvider);
+    if (state == null) return;
 
-    String? providerSigBase64 = _report!.providerSignature;
-    String? clientSigBase64 = _report!.clientSignature;
+    String? providerSigBase64 = state.report.providerSignature;
+    String? clientSigBase64 = state.report.clientSignature;
     bool hasChanges = false;
 
     if (_providerSigController.isNotEmpty) {
@@ -629,258 +709,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     }
 
     if (hasChanges && mounted) {
-      _report = _report!.copyWith(
+      _notifier.updateSignatures(
         providerSignature: providerSigBase64,
         clientSignature: clientSigBase64,
       );
-      _saveImmediate();
     }
-  }
-
-  void _loadSignatures() {
-    // Carga de firmas si es necesaria
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #7: _updateEntry SIN setState PARA TOGGLES RÁPIDOS
-  // El problema principal: cada toggle hacía setState → rebuild de 600+
-  // widgets → lag visible. Ahora _updateEntryQuiet modifica el modelo
-  // sin rebuild, y solo recalcular el caché de frecuencias mínimo.
-  // ══════════════════════════════════════════════════════════════════════
-
-  /// Actualiza una entry y programa un guardado diferido.
-  /// `rebuild`: si false, no hace setState (para toggles rápidos en tabla).
-  void _updateEntry(
-    int index, {
-    String? customId,
-    String? area,
-    Map<String, String?>? results,
-    String? observations,
-    List<String>? photoUrls,
-    Map<String, ActivityData>? activityData,
-    bool rebuild = true,
-  }) {
-    if (_report == null || index < 0 || index >= _report!.entries.length) return;
-
-    final entries = List<ReportEntry>.from(_report!.entries);
-    final entry = entries[index];
-
-    entries[index] = ReportEntry(
-      instanceId: entry.instanceId,
-      deviceIndex: entry.deviceIndex,
-      customId: customId ?? entry.customId,
-      area: area ?? entry.area,
-      results: results ?? entry.results,
-      observations: observations ?? entry.observations,
-      photoUrls: photoUrls ?? entry.photoUrls,
-      activityData: activityData ?? entry.activityData,
-    );
-
-    _report = _report!.copyWith(entries: entries);
-
-    if (rebuild) {
-      setState(() {
-        _updateDerivedData();
-      });
-    }
-
-    _scheduleSave();
-
-    // Auto-guardar ubicación
-    if (customId != null || area != null) {
-      _locationSaveDebounce?.cancel();
-      _locationSaveDebounce = Timer(const Duration(seconds: 2), () {
-        _locationService.saveLocation(
-          policyId: widget.policyId,
-          instanceId: entry.instanceId,
-          customId: customId ?? entry.customId,
-          area: area ?? entry.area,
-        );
-      });
-    }
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #8: TOGGLE STATUS OPTIMIZADO
-  // Usa setState MÍNIMO: solo el badge cambia visualmente.
-  // ══════════════════════════════════════════════════════════════════════
-  void _toggleStatus(int entryIndex, String activityId, String defId) {
-    if (_report == null || !_canEditSection(defId)) return;
-
-    final entry = _report!.entries[entryIndex];
-    if (!entry.results.containsKey(activityId)) return;
-
-    String? current = entry.results[activityId];
-    String? next;
-    if (current == null)
-      next = 'OK';
-    else if (current == 'OK')
-      next = 'NOK';
-    else if (current == 'NOK')
-      next = 'NA';
-    else if (current == 'NA')
-      next = 'NR';
-    else
-      next = null;
-
-    final newResults = Map<String, String?>.from(entry.results);
-    newResults[activityId] = next;
-
-    _updateEntry(entryIndex, results: newResults);
-    _saveImmediate(); // ← AÑADIDO: guarda inmediato para evitar race condition con Firebase stream
-  }
-
-  void _toggleSectionAssignment(String defId, String userId) {
-    if (_report == null) return;
-
-    final currentAssignments = List<String>.from(
-      _report!.sectionAssignments[defId] ?? [],
-    );
-
-    if (currentAssignments.contains(userId)) {
-      currentAssignments.remove(userId);
-    } else {
-      currentAssignments.add(userId);
-    }
-
-    final newSectionAssignments = Map<String, List<String>>.from(
-      _report!.sectionAssignments,
-    );
-    newSectionAssignments[defId] = List<String>.from(currentAssignments);
-
-    final Set<String> allAssignedTechs = Set<String>.from(
-      _report!.assignedTechnicianIds,
-    );
-    newSectionAssignments.forEach((_, techIds) {
-      allAssignedTechs.addAll(techIds);
-    });
-
-    final updatedReport = _report!.copyWith(
-      sectionAssignments: newSectionAssignments,
-      assignedTechnicianIds: allAssignedTechs.toList(),
-    );
-
-    setState(() {
-      _report = updatedReport;
-      _updateDerivedData();
-    });
-
-    _saveImmediate();
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // PERMISOS
-  // ══════════════════════════════════════════════════════════════════════
-
-  bool _canEditSection(String defId) {
-    if (!_isEditable()) return false;
-    if (_isUserCoordinator() && _adminOverride) return true;
-    final assigned = _report?.sectionAssignments[defId] ?? [];
-    if (assigned.isEmpty) return true;
-    return _currentUserId != null && assigned.contains(_currentUserId);
-  }
-
-  bool _isEditable() {
-    if (_report == null) return false;
-    if (_adminOverride) return true;
-    return _report!.startTime != null && _report!.endTime == null;
-  }
-
-  bool _canSignReport() => _report != null;
-
-  bool _isUserCoordinator() {
-    if (_currentUser == null) return false;
-    if (_currentUser!.role == UserRole.SUPER_USER ||
-        _currentUser!.role == UserRole.ADMIN) {
-      return true;
-    }
-    return widget.policy.assignedUserIds.contains(_currentUserId);
-  }
-
-  bool _areAllSectionsAssigned() {
-    if (_report == null) return false;
-    final activeDefIds = <String>{};
-    for (final entry in _report!.entries) {
-      if (entry.results.isEmpty) continue;
-      final deviceInstance = _findPolicyDevice(entry.instanceId);
-      if (deviceInstance != null) {
-        activeDefIds.add(deviceInstance.definitionId);
-      }
-    }
-    for (final defId in activeDefIds) {
-      final assigned = _report!.sectionAssignments[defId];
-      if (assigned == null || assigned.isEmpty) return false;
-    }
-    return true;
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // ACCIONES DE SERVICIO
-  // ══════════════════════════════════════════════════════════════════════
-
-  void _handleStartService() {
-    if (_report == null || _currentUserId == null) {
-      _showSnackBar(
-        'Debes seleccionar un usuario para registrar tiempos',
-        Colors.orange,
-      );
-      return;
-    }
-
-    if (!_areAllSectionsAssigned()) {
-      _showSnackBar(
-        'No se puede iniciar: Hay tipos de dispositivos sin responsable asignado.',
-        Colors.red,
-        seconds: 3,
-      );
-      return;
-    }
-
-    final now = DateTime.now();
-    final timeStr = DateFormat('HH:mm').format(now);
-    final updatedReport = _report!.copyWith(
-      startTime: timeStr,
-      serviceDate: now,
-    );
-
-    setState(() {
-      _report = updatedReport;
-      _updateDerivedData();
-    });
-    _saveImmediate();
-  }
-
-  void _handleEndService() {
-    if (_report == null || _currentUserId == null) {
-      _showSnackBar(
-        'Debes seleccionar un usuario para registrar tiempos',
-        Colors.orange,
-      );
-      return;
-    }
-
-    if (!_areAllSectionsAssigned()) {
-      _showSnackBar(
-        'Asigna técnicos a todas las secciones antes de finalizar.',
-        Colors.red,
-      );
-      return;
-    }
-
-    final timeStr = DateFormat('HH:mm').format(DateTime.now());
-    final updatedReport = _report!.copyWith(endTime: timeStr);
-
-    setState(() {
-      _report = updatedReport;
-      _updateDerivedData();
-    });
-    _saveImmediate();
-  }
-
-  void _handleResumeService() {
-    _report = _report!.copyWith(endTime: null, forceNullEndTime: true);
-    setState(() {});
-    _saveImmediate();
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -888,9 +721,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   // ══════════════════════════════════════════════════════════════════════
 
   Future<void> _handleCameraClick(int entryIdx, {String? activityId}) async {
-    if (_report == null) return;
+    final state = ref.read(reportNotifierProvider);
+    if (state == null) return;
 
-    final entry = _report!.entries[entryIdx];
+    final entry = state.report.entries[entryIdx];
     List<String> existingPhotos;
 
     if (activityId != null) {
@@ -921,7 +755,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           child: Wrap(
             children: [
               ListTile(
-                leading: const Icon(Icons.camera_alt, color: Color(0xFF3B82F6)),
+                leading:
+                    const Icon(Icons.camera_alt, color: Color(0xFF3B82F6)),
                 title: const Text('Tomar Foto'),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -929,10 +764,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 },
               ),
               ListTile(
-                leading: const Icon(
-                  Icons.photo_library,
-                  color: Color(0xFF3B82F6),
-                ),
+                leading: const Icon(Icons.photo_library,
+                    color: Color(0xFF3B82F6)),
                 title: const Text('Seleccionar de Galería (Múltiple)'),
                 onTap: () {
                   Navigator.pop(ctx);
@@ -981,8 +814,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   Future<void> _processAndUploadImages(List<XFile> images) async {
-    if (_isUploadingPhoto || _photoContextEntryIdx == null || _report == null)
+    final state = ref.read(reportNotifierProvider);
+    if (_isUploadingPhoto || _photoContextEntryIdx == null || state == null) {
       return;
+    }
 
     setState(() => _isUploadingPhoto = true);
     int successCount = 0;
@@ -1016,39 +851,38 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         final entryIdx = _photoContextEntryIdx!;
         final activityId = _photoContextActivityId;
 
+        // Re-read state para tener la versión más reciente
+        final currentState = ref.read(reportNotifierProvider)!;
+        final entry = currentState.report.entries[entryIdx];
+
         final photoUrl = await _photoService.uploadPhoto(
           photoBytes: bytes,
           reportId: '${widget.policyId}_${widget.dateStr}',
-          deviceInstanceId: _report!.entries[entryIdx].instanceId,
+          deviceInstanceId: entry.instanceId,
           activityId: activityId,
         );
 
-        final entry = _report!.entries[entryIdx];
         if (activityId != null) {
-          final currentData =
-              entry.activityData[activityId] ??
+          final currentData = entry.activityData[activityId] ??
               ActivityData(photoUrls: [], observations: '');
           final newPhotoUrls = [...currentData.photoUrls, photoUrl];
-          final newActivityData = Map<String, ActivityData>.from(
-            entry.activityData,
-          );
+          final newActivityData =
+              Map<String, ActivityData>.from(entry.activityData);
           newActivityData[activityId] = ActivityData(
             photoUrls: newPhotoUrls,
             observations: currentData.observations,
           );
-          _updateEntry(entryIdx, activityData: newActivityData);
+          _notifier.updateActivityData(entryIdx, newActivityData);
         } else {
           final newPhotoUrls = [...entry.photoUrls, photoUrl];
-          _updateEntry(entryIdx, photoUrls: newPhotoUrls);
+          _notifier.updatePhotoUrls(entryIdx, newPhotoUrls);
         }
         successCount++;
       }
 
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       _showSnackBar(
-        successCount == 1
-            ? 'Foto subida'
-            : '$successCount fotos subidas',
+        successCount == 1 ? 'Foto subida' : '$successCount fotos subidas',
         Colors.green,
       );
     } catch (e) {
@@ -1060,11 +894,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   Future<void> _confirmDeletePhoto(int photoIndex) async {
-    if (_photoContextEntryIdx == null || _report == null) return;
+    final state = ref.read(reportNotifierProvider);
+    if (_photoContextEntryIdx == null || state == null) return;
 
     final entryIdx = _photoContextEntryIdx!;
     final activityId = _photoContextActivityId;
-    final entry = _report!.entries[entryIdx];
+    final entry = state.report.entries[entryIdx];
     String? photoUrlToDelete;
 
     if (activityId != null) {
@@ -1073,14 +908,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         photoUrlToDelete = currentData.photoUrls[photoIndex];
         final newPhotoUrls = List<String>.from(currentData.photoUrls);
         newPhotoUrls.removeAt(photoIndex);
-        final newActivityData = Map<String, ActivityData>.from(
-          entry.activityData,
-        );
+        final newActivityData =
+            Map<String, ActivityData>.from(entry.activityData);
         newActivityData[activityId] = ActivityData(
           photoUrls: newPhotoUrls,
           observations: currentData.observations,
         );
-        _updateEntry(entryIdx, activityData: newActivityData);
+        _notifier.updateActivityData(entryIdx, newActivityData);
         if (newPhotoUrls.isEmpty) {
           setState(() {
             _photoContextEntryIdx = null;
@@ -1093,7 +927,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         photoUrlToDelete = entry.photoUrls[photoIndex];
         final newPhotoUrls = List<String>.from(entry.photoUrls);
         newPhotoUrls.removeAt(photoIndex);
-        _updateEntry(entryIdx, photoUrls: newPhotoUrls);
+        _notifier.updatePhotoUrls(entryIdx, newPhotoUrls);
         if (newPhotoUrls.isEmpty) {
           setState(() {
             _photoContextEntryIdx = null;
@@ -1113,105 +947,32 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // AGRUPACIÓN Y BÚSQUEDA OPTIMIZADA
-  // ══════════════════════════════════════════════════════════════════════
-
-  PolicyDevice? _findPolicyDevice(String entryInstanceId) {
-    final policyToUse = _currentPolicy ?? widget.policy;
-    try {
-      return policyToUse.devices.firstWhere(
-        (d) =>
-            entryInstanceId == d.instanceId ||
-            entryInstanceId.startsWith('${d.instanceId}_'),
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Map<String, List<ReportEntry>> _groupEntries() {
-    if (_report == null) return {};
-
-    final policyToUse = _currentPolicy ?? widget.policy;
-    final Map<String, PolicyDevice> policyDevicesMap = {
-      for (final d in policyToUse.devices) d.instanceId: d
-    };
-
-    final grouped = <String, List<ReportEntry>>{};
-
-    for (final entry in _report!.entries) {
-      String baseId = entry.instanceId;
-      final lastUnderscore = baseId.lastIndexOf('_');
-      if (lastUnderscore != -1) {
-        final suffix = baseId.substring(lastUnderscore + 1);
-        if (int.tryParse(suffix) != null) {
-          baseId = baseId.substring(0, lastUnderscore);
-        }
-      }
-
-      final deviceInstance =
-          policyDevicesMap[baseId] ?? policyDevicesMap[entry.instanceId];
-      if (deviceInstance == null) continue;
-
-      final defId = deviceInstance.definitionId;
-      (grouped[defId] ??= []).add(entry);
-    }
-
-    return grouped;
-  }
-
-  String _getFrequencies(Map<String, List<ReportEntry>> grouped) {
-    final bool isWeekly = widget.dateStr.contains('W');
-    if (!isWeekly) return "Mensual";
-
-    final Set<String> frecuenciasPresentes = {};
-    final policyToUse = _currentPolicy ?? widget.policy;
-    // ✅ Usar mapa para O(1) lookups
-    final defMap = {for (final d in _devicesEffective) d.id: d};
-
-    for (final devInstance in policyToUse.devices) {
-      final def = defMap[devInstance.definitionId];
-      if (def == null) continue;
-      for (final act in def.activities) {
-        if (act.frequency == Frequency.SEMANAL) {
-          frecuenciasPresentes.add('Semanal');
-        } else if (act.frequency == Frequency.QUINCENAL) {
-          frecuenciasPresentes.add('Quincenal');
-        }
-      }
-    }
-
-    if (frecuenciasPresentes.isEmpty) return "Semanal";
-    final lista = frecuenciasPresentes.toList()..sort();
-    return lista.join(' / ');
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #9: RESOLUCIÓN DE ÍNDICE GLOBAL EN O(1)
-  // En lugar de _report!.entries.indexWhere(...) que es O(n),
-  // usamos el mapa pre-calculado.
-  // ══════════════════════════════════════════════════════════════════════
-  int _globalIndexOf(String instanceId) {
-    return _instanceIdToGlobalIndex[instanceId] ?? -1;
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
   // BUILD
   // ══════════════════════════════════════════════════════════════════════
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading || _report == null || _companySettings == null) {
+    // Escuchar el estado del reporte
+    final reportState = ref.watch(reportNotifierProvider);
+
+    if (_isLoading || reportState == null || _companySettings == null) {
       return const Scaffold(
         backgroundColor: _bgLight,
         body: Center(child: CircularProgressIndicator(color: _primaryDark)),
       );
     }
 
-    // ✅ NO recalculamos nada aquí - todo viene del caché
-    final groupedEntriesList = _cachedGroupedEntries;
-    final frequencies = _cachedFrequencies;
-    final assignedUsers = _cachedAssignedUsers;
+    // Datos derivados del caché (ya pre-computados, O(1))
+    final groupedEntriesList = reportState.groupedEntries;
+    final frequencies = reportState.frequencies;
+
+    // Usuarios asignados (computado aquí, barato — solo filtra por IDs)
+    final assignedUsers = widget.users
+        .where((user) =>
+            reportState.report.assignedTechnicianIds.contains(user.id))
+        .toList();
+
+    final isEditable = _isEditable(reportState);
 
     String adminTooltip = 'Modo Admin';
     if (_isUserCoordinator()) {
@@ -1226,140 +987,96 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
     return Scaffold(
       backgroundColor: _bgLight,
-      appBar: _buildAppBar(adminTooltip),
+      appBar: _buildAppBar(adminTooltip, reportState),
       body: CustomScrollView(
         slivers: [
           SliverToBoxAdapter(
             child: Column(
               children: [
+                // ★ ReportHeader — No depende de estado mutable
                 ReportHeader(
                   companySettings: _companySettings!,
                   client: widget.client,
-                  serviceDate: _report!.serviceDate,
+                  serviceDate: reportState.report.serviceDate,
                   dateStr: widget.dateStr,
                   frequencies: frequencies,
                 ),
+                // ★ ReportControls — ConsumerWidget, se auto-gestiona
                 ReportControls(
-                  report: _report!,
                   users: widget.users,
                   adminOverride: _adminOverride,
-                  isUserDesignated:
-                      _report!.assignedTechnicianIds.contains(_currentUserId),
+                  isUserDesignated: reportState.report.assignedTechnicianIds
+                      .contains(_currentUserId),
+                  currentUserId: _currentUserId,
                   onStartService: _handleStartService,
                   onEndService: _handleEndService,
                   onResumeService: _handleResumeService,
-                  onDateChanged: (newDate) {
-                    _report = _report!.copyWith(serviceDate: newDate);
-                    setState(() {});
-                    _saveImmediate();
-                  },
-                  onStartTimeEdited: (newTime) {
-                    _report = _report!.copyWith(startTime: newTime);
-                    setState(() {});
-                    _saveImmediate();
-                  },
-                  onEndTimeEdited: (newTime) {
-                    _report = _report!.copyWith(endTime: newTime);
-                    setState(() {});
-                    _saveImmediate();
-                  },
                 ),
               ],
             ),
           ),
 
-          // ══════════════════════════════════════════════════════════
-          // ✅ OPTIMIZACIÓN #10: SliverList con callbacks O(1)
-          // ══════════════════════════════════════════════════════════
+          // ★ Secciones de dispositivos — Cada una es ConsumerWidget
           SliverList(
-            delegate: SliverChildBuilderDelegate((context, index) {
-              final entryGroup = groupedEntriesList[index];
-              final defId = entryGroup.key;
-              final sectionEntries = entryGroup.value;
+            delegate: SliverChildBuilderDelegate(
+              (context, index) {
+                final entryGroup = groupedEntriesList[index];
+                final defId = entryGroup.key;
 
-              final deviceDef = _devicesEffective.firstWhere(
-                (d) => d.id == defId,
-                orElse: () => DeviceModel(
-                  id: defId,
-                  name: 'Desconocido',
-                  description: '',
-                  activities: [],
-                ),
-              );
+                final deviceDef = _devicesEffective.firstWhere(
+                  (d) => d.id == defId,
+                  orElse: () => DeviceModel(
+                    id: defId,
+                    name: 'Desconocido',
+                    description: '',
+                    activities: [],
+                  ),
+                );
 
-              // ✅ Wrap en RepaintBoundary para aislar repaints
-              return RepaintBoundary(
-                child: DeviceSectionImproved(
-                  defId: defId,
-                  deviceDef: deviceDef,
-                  entries: sectionEntries,
-                  users: assignedUsers,
-                  sectionAssignments:
-                      _report!.sectionAssignments[defId] ?? [],
-                  isEditable: _isEditable(),
-                  allowedToEdit: _isEditable(),
-                  isUserCoordinator: _isUserCoordinator(),
-                  adminOverride: _adminOverride,
-                  currentUserId: _currentUserId,
-                  onToggleAssignment: (uid) =>
-                      _toggleSectionAssignment(defId, uid),
-                  // ✅ O(1) global index lookup
-                  onCustomIdChanged: (localIndex, val) {
-                    final gi =
-                        _globalIndexOf(sectionEntries[localIndex].instanceId);
-                    if (gi != -1) _updateEntry(gi, customId: val, rebuild: false);
-                  },
-                  onAreaChanged: (localIndex, val) {
-                    final gi =
-                        _globalIndexOf(sectionEntries[localIndex].instanceId);
-                    if (gi != -1) _updateEntry(gi, area: val, rebuild: false);
-                  },
-                  onToggleStatus: (localIndex, activityId) {
-                    final gi =
-                        _globalIndexOf(sectionEntries[localIndex].instanceId);
-                    if (gi != -1) _toggleStatus(gi, activityId, defId);
-                  },
-                  onCameraClick: (localIndex, {activityId}) {
-                    final gi =
-                        _globalIndexOf(sectionEntries[localIndex].instanceId);
-                    if (gi != -1)
-                      _handleCameraClick(gi, activityId: activityId);
-                  },
-                  onObservationClick: (localIndex, {activityId}) {
-                    final gi =
-                        _globalIndexOf(sectionEntries[localIndex].instanceId);
-                    if (gi != -1) {
+                return RepaintBoundary(
+                  child: DeviceSectionImproved(
+                    defId: defId,
+                    deviceDef: deviceDef,
+                    users: assignedUsers,
+                    isEditable: isEditable,
+                    isUserCoordinator: _isUserCoordinator(),
+                    adminOverride: _adminOverride,
+                    currentUserId: _currentUserId,
+                    onCameraClick: (gi, {activityId}) =>
+                        _handleCameraClick(gi, activityId: activityId),
+                    onObservationClick: (gi, {activityId}) {
                       setState(() {
-                        _activeObservationEntry = gi.toString();
+                        _activeObservationEntryIdx = gi;
                         _activeObservationActivityId = activityId;
                       });
-                    }
-                  },
-                ),
-              );
-            }, childCount: groupedEntriesList.length),
+                    },
+                  ),
+                );
+              },
+              childCount: groupedEntriesList.length,
+            ),
           ),
 
           SliverToBoxAdapter(
             child: Column(
               children: [
-                _buildGeneralObservationsBox(),
-                ReportSummary(report: _report!),
+                _buildGeneralObservationsBox(reportState, isEditable),
+                // ★ ReportSummary — ConsumerWidget, solo escucha stats
+                const ReportSummary(),
+                // ★ ReportSignatures — sin cambios
                 ReportSignatures(
                   providerController: _providerSigController,
                   clientController: _clientSigController,
-                  providerName: _report!.providerSignerName,
-                  clientName: _report!.clientSignerName,
-                  providerSignatureData: _report!.providerSignature,
-                  clientSignatureData: _report!.clientSignature,
+                  providerName: reportState.report.providerSignerName,
+                  clientName: reportState.report.clientSignerName,
+                  providerSignatureData: reportState.report.providerSignature,
+                  clientSignatureData: reportState.report.clientSignature,
                   isEditable: _canSignReport(),
                   onProviderNameChanged: (val) {
-                    _report = _report!.copyWith(providerSignerName: val);
-                    _scheduleSave();
+                    _notifier.updateSignatures(providerName: val);
                   },
                   onClientNameChanged: (val) {
-                    _report = _report!.copyWith(clientSignerName: val);
-                    _scheduleSave();
+                    _notifier.updateSignatures(clientName: val);
                   },
                 ),
                 const SizedBox(height: 20),
@@ -1368,10 +1085,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           ),
         ],
       ),
-      floatingActionButton: null,
-      bottomSheet: _activeObservationEntry != null
-          ? _buildObservationModal()
-          : (_photoContextEntryIdx != null ? _buildPhotoModal() : null),
+      bottomSheet: _activeObservationEntryIdx != null
+          ? _buildObservationModal(reportState)
+          : (_photoContextEntryIdx != null
+              ? _buildPhotoModal(reportState)
+              : null),
     );
   }
 
@@ -1379,7 +1097,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   // APP BAR
   // ══════════════════════════════════════════════════════════════════════
 
-  PreferredSizeWidget _buildAppBar(String adminTooltip) {
+  PreferredSizeWidget _buildAppBar(
+    String adminTooltip,
+    ReportState reportState,
+  ) {
     return AppBar(
       backgroundColor: Colors.white,
       elevation: 0,
@@ -1415,9 +1136,9 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   fontWeight: FontWeight.w500,
                 ),
               ),
-              if (_report!.startTime != null) ...[
+              if (reportState.report.startTime != null) ...[
                 const SizedBox(width: 8),
-                _buildStatusChip(),
+                _buildStatusChip(reportState),
               ],
             ],
           ),
@@ -1435,7 +1156,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   : const Color(0xFF94A3B8),
               size: 22,
             ),
-            onPressed: () => setState(() => _adminOverride = !_adminOverride),
+            onPressed: () =>
+                setState(() => _adminOverride = !_adminOverride),
             tooltip: adminTooltip,
           ),
         const SizedBox(width: 8),
@@ -1443,9 +1165,10 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     );
   }
 
-  Widget _buildStatusChip() {
-    final isRunning = _report!.endTime == null;
-    final color = isRunning ? const Color(0xFF10B981) : const Color(0xFF64748B);
+  Widget _buildStatusChip(ReportState state) {
+    final isRunning = state.report.endTime == null;
+    final color =
+        isRunning ? const Color(0xFF10B981) : const Color(0xFF64748B);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
@@ -1475,14 +1198,13 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // ✅ OPTIMIZACIÓN #11: OBSERVACIONES GENERALES CON CONTROLLER ESTABLE
+  // OBSERVACIONES GENERALES
   // ══════════════════════════════════════════════════════════════════════
 
-  List<Map<String, String>> _getRegisteredFindings() {
+  List<Map<String, String>> _getRegisteredFindings(ReportState state) {
     final List<Map<String, String>> findings = [];
-    if (_report == null) return findings;
 
-    for (final entry in _report!.entries) {
+    for (final entry in state.report.entries) {
       List<String> deviceFindingsTexts = [];
 
       if (entry.observations.trim().isNotEmpty) {
@@ -1507,8 +1229,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     return findings;
   }
 
-  Widget _buildGeneralObservationsBox() {
-    final registeredFindings = _getRegisteredFindings();
+  Widget _buildGeneralObservationsBox(ReportState state, bool isEditable) {
+    final registeredFindings = _getRegisteredFindings(state);
     final hasFindings = registeredFindings.isNotEmpty;
 
     return Container(
@@ -1529,14 +1251,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildSectionHeader(
-            Icons.notes,
-            'OBSERVACIONES GENERALES DEL SERVICIO',
-          ),
+              Icons.notes, 'OBSERVACIONES GENERALES DEL SERVICIO'),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            // ✅ Usa el controller estable - no se recrea en cada build
             child: TextField(
-              enabled: _isEditable(),
+              enabled: isEditable,
               controller: _generalObsController,
               maxLines: 3,
               style:
@@ -1569,8 +1288,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 _generalObsDebounce?.cancel();
                 _generalObsDebounce =
                     Timer(const Duration(milliseconds: 1500), () {
-                  _report = _report!.copyWith(generalObservations: val);
-                  _scheduleSave();
+                  _notifier.updateGeneralObservations(val);
                 });
               },
             ),
@@ -1593,9 +1311,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                           children: [
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 4,
-                              ),
+                                  horizontal: 8, vertical: 4),
                               decoration: BoxDecoration(
                                 color: const Color(0xFFE2E8F0),
                                 borderRadius: BorderRadius.circular(6),
@@ -1636,11 +1352,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(
-                          Icons.check_circle_outline,
-                          size: 16,
-                          color: Colors.grey.shade400,
-                        ),
+                        Icon(Icons.check_circle_outline,
+                            size: 16, color: Colors.grey.shade400),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
@@ -1690,11 +1403,12 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   // MODALES
   // ══════════════════════════════════════════════════════════════════════
 
-  Widget _buildObservationModal() {
-    if (_activeObservationEntry == null) return const SizedBox();
+  Widget _buildObservationModal(ReportState state) {
+    if (_activeObservationEntryIdx == null) return const SizedBox();
 
-    final entryIdx = int.parse(_activeObservationEntry!);
-    final entry = _report!.entries[entryIdx];
+    final entryIdx = _activeObservationEntryIdx!;
+    if (entryIdx >= state.report.entries.length) return const SizedBox();
+    final entry = state.report.entries[entryIdx];
 
     String currentObservation;
     String title;
@@ -1723,43 +1437,46 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
     return _ObservationModal(
       key: ValueKey(
-        'obs_${entryIdx}_${_activeObservationActivityId ?? 'device'}',
-      ),
+          'obs_${entryIdx}_${_activeObservationActivityId ?? 'device'}'),
       initialText: currentObservation,
       title: title,
       subtitle: subtitle,
       icon: icon,
       accentColor: accentColor,
       onClose: () => setState(() {
-        _activeObservationEntry = null;
+        _activeObservationEntryIdx = null;
         _activeObservationActivityId = null;
       }),
       onSave: (text) {
         if (_activeObservationActivityId != null) {
           final currentData =
               entry.activityData[_activeObservationActivityId!] ??
-              ActivityData(photoUrls: [], observations: '');
+                  ActivityData(photoUrls: [], observations: '');
           final newActivityData =
               Map<String, ActivityData>.from(entry.activityData);
           newActivityData[_activeObservationActivityId!] = ActivityData(
             photoUrls: currentData.photoUrls,
             observations: text,
           );
-          _updateEntry(entryIdx, activityData: newActivityData);
+          _notifier.updateActivityData(entryIdx, newActivityData);
         } else {
-          _updateEntry(entryIdx, observations: text);
+          _notifier.updateObservation(entryIdx, text);
         }
         setState(() {
-          _activeObservationEntry = null;
+          _activeObservationEntryIdx = null;
           _activeObservationActivityId = null;
         });
       },
     );
   }
 
-  Widget _buildPhotoModal() {
+  Widget _buildPhotoModal(ReportState state) {
     if (_photoContextEntryIdx == null) return const SizedBox();
-    final entry = _report!.entries[_photoContextEntryIdx!];
+    if (_photoContextEntryIdx! >= state.report.entries.length) {
+      return const SizedBox();
+    }
+
+    final entry = state.report.entries[_photoContextEntryIdx!];
 
     List<String> photos;
     String contextTitle;
@@ -1810,11 +1527,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                     color: const Color(0xFFF1F5F9),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(
-                    Icons.photo_library,
-                    color: Color(0xFF3B82F6),
-                    size: 22,
-                  ),
+                  child: const Icon(Icons.photo_library,
+                      color: Color(0xFF3B82F6), size: 22),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -1842,10 +1556,8 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(
-                    Icons.close_rounded,
-                    color: Color(0xFF94A3B8),
-                  ),
+                  icon: const Icon(Icons.close_rounded,
+                      color: Color(0xFF94A3B8)),
                   onPressed: () => setState(() {
                     _photoContextEntryIdx = null;
                     _photoContextActivityId = null;
@@ -1853,8 +1565,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   style: IconButton.styleFrom(
                     backgroundColor: const Color(0xFFF1F5F9),
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
+                        borderRadius: BorderRadius.circular(8)),
                   ),
                 ),
               ],
@@ -1891,18 +1602,15 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                 child: ElevatedButton.icon(
                   onPressed: _showImageSourceSelection,
                   icon: const Icon(Icons.add_a_photo, size: 20),
-                  label: const Text(
-                    'Agregar Fotos',
-                    style:
-                        TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-                  ),
+                  label: const Text('Agregar Fotos',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w700, fontSize: 15)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF3B82F6),
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
+                        borderRadius: BorderRadius.circular(12)),
                     elevation: 0,
                   ),
                 ),
@@ -1920,31 +1628,23 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         children: [
           Container(
             padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF1F5F9),
+            decoration: const BoxDecoration(
+              color: Color(0xFFF1F5F9),
               shape: BoxShape.circle,
             ),
-            child: Icon(
-              Icons.add_a_photo_outlined,
-              size: 48,
-              color: Colors.grey.shade400,
-            ),
+            child: Icon(Icons.add_a_photo_outlined,
+                size: 48, color: Colors.grey.shade400),
           ),
           const SizedBox(height: 16),
-          Text(
-            'Sin fotos registradas',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-              color: Colors.grey.shade700,
-            ),
-          ),
+          Text('Sin fotos registradas',
+              style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey.shade700)),
           const SizedBox(height: 8),
-          Text(
-            'Toca el botón para agregar evidencia fotográfica',
-            style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
-            textAlign: TextAlign.center,
-          ),
+          Text('Toca el botón para agregar evidencia fotográfica',
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
+              textAlign: TextAlign.center),
         ],
       ),
     );
@@ -1969,14 +1669,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
           children: [
             Icon(Icons.add_circle, color: Color(0xFF3B82F6), size: 32),
             SizedBox(height: 8),
-            Text(
-              'Agregar',
-              style: TextStyle(
-                color: Color(0xFF3B82F6),
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+            Text('Agregar',
+                style: TextStyle(
+                    color: Color(0xFF3B82F6),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700)),
           ],
         ),
       ),
@@ -2066,14 +1763,11 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
                   color: Colors.black.withOpacity(0.7),
                   borderRadius: BorderRadius.circular(6),
                 ),
-                child: Text(
-                  '#${index + 1}',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                child: Text('#${index + 1}',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold)),
               ),
             ),
           ],
@@ -2125,7 +1819,7 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// OBSERVATION MODAL (Sin cambios significativos, ya estaba bien aislado)
+// OBSERVATION MODAL — Sin cambios, ya estaba bien aislado
 // ══════════════════════════════════════════════════════════════════════════
 
 class _ObservationModal extends StatefulWidget {
@@ -2243,26 +1937,20 @@ class _ObservationModalState extends State<_ObservationModal> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        widget.title,
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 15,
-                          color: Color(0xFF1E293B),
-                          letterSpacing: -0.3,
-                        ),
-                      ),
+                      Text(widget.title,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 15,
+                              color: Color(0xFF1E293B),
+                              letterSpacing: -0.3)),
                       const SizedBox(height: 2),
-                      Text(
-                        widget.subtitle,
-                        style: const TextStyle(
-                          color: Color(0xFF64748B),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      Text(widget.subtitle,
+                          style: const TextStyle(
+                              color: Color(0xFF64748B),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
                     ],
                   ),
                 ),
@@ -2284,15 +1972,12 @@ class _ObservationModalState extends State<_ObservationModal> {
             children: [
               Icon(Icons.edit_note, size: 16, color: Color(0xFF64748B)),
               SizedBox(width: 8),
-              Text(
-                'DETALLES Y HALLAZGOS',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF64748B),
-                  letterSpacing: 0.5,
-                ),
-              ),
+              Text('DETALLES Y HALLAZGOS',
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF64748B),
+                      letterSpacing: 0.5)),
             ],
           ),
           const SizedBox(height: 12),
@@ -2306,30 +1991,24 @@ class _ObservationModalState extends State<_ObservationModal> {
                 keyboardType: TextInputType.multiline,
                 textInputAction: TextInputAction.newline,
                 style: const TextStyle(
-                  fontSize: 14,
-                  height: 1.5,
-                  color: Color(0xFF334155),
-                ),
+                    fontSize: 14, height: 1.5, color: Color(0xFF334155)),
                 decoration: InputDecoration(
                   hintText:
                       'Describa cualquier anomalía, condición especial o recomendación técnica...',
-                  hintStyle: TextStyle(
-                      color: Colors.grey.shade400, fontSize: 13),
+                  hintStyle:
+                      TextStyle(color: Colors.grey.shade400, fontSize: 13),
                   filled: true,
                   fillColor: const Color(0xFFF8FAFC),
                   border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: Colors.grey.shade200),
-                  ),
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Colors.grey.shade200)),
                   enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: Colors.grey.shade200),
-                  ),
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: Colors.grey.shade200)),
                   focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(
-                        color: widget.accentColor, width: 2),
-                  ),
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide:
+                          BorderSide(color: widget.accentColor, width: 2)),
                   contentPadding: const EdgeInsets.all(16),
                   counterText: '',
                 ),
@@ -2349,21 +2028,17 @@ class _ObservationModalState extends State<_ObservationModal> {
                         : Colors.white,
                     borderRadius: BorderRadius.circular(6),
                     border: Border.all(
-                      color: _charCount > 450
-                          ? Colors.red.shade200
-                          : Colors.grey.shade200,
-                    ),
+                        color: _charCount > 450
+                            ? Colors.red.shade200
+                            : Colors.grey.shade200),
                   ),
-                  child: Text(
-                    '$_charCount/500',
-                    style: TextStyle(
-                      fontSize: 10,
-                      fontWeight: FontWeight.w600,
-                      color: _charCount > 450
-                          ? Colors.red.shade700
-                          : const Color(0xFF94A3B8),
-                    ),
-                  ),
+                  child: Text('$_charCount/500',
+                      style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: _charCount > 450
+                              ? Colors.red.shade700
+                              : const Color(0xFF94A3B8))),
                 ),
               ),
             ],

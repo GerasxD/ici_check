@@ -1,37 +1,41 @@
+// lib/features/reports/widgets/report_summary.dart
+//
+// ═══════════════════════════════════════════════════════════════════════
+// ReportSummary — Refactorizado con Riverpod
+//
+// ANTES: Recibía `ServiceReportModel report` completo, ejecutaba
+//        _calculateStats() en build() → O(N×M) en cada rebuild.
+//
+// DESPUÉS: Escucha SOLO reportStatsProvider.
+//          Si el usuario teclea una observación o cambia un customId,
+//          las stats no cambian → este widget NO se reconstruye.
+//          Solo se reconstruye cuando alguien hace tap en un toggle.
+// ═══════════════════════════════════════════════════════════════════════
+
 import 'package:flutter/material.dart';
-import 'package:ici_check/features/reports/data/report_model.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:ici_check/features/reports/state/report_notifier.dart';
 
-class ReportSummary extends StatelessWidget {
-  final ServiceReportModel report;
-
-  const ReportSummary({super.key, required this.report});
-
-  Map<String, int> _calculateStats() {
-    int ok = 0, nok = 0, na = 0, nr = 0;
-    
-    for (var entry in report.entries) {
-      for (var status in entry.results.values) {
-        if (status == 'OK') ok++;
-        if (status == 'NOK') nok++;
-        if (status == 'NA') na++;
-        if (status == 'NR') nr++;
-      }
-    }
-    
-    return {'ok': ok, 'nok': nok, 'na': na, 'nr': nr};
-  }
+class ReportSummary extends ConsumerWidget {
+  const ReportSummary({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final stats = _calculateStats();
-    
+  Widget build(BuildContext context, WidgetRef ref) {
+    // ★ CLAVE: select() compara con ReportStats.operator ==
+    // Si ok/nok/na/nr no cambiaron → build() NO se ejecuta
+    final stats = ref.watch(reportStatsProvider);
+
+    if (stats == null) {
+      return const SizedBox.shrink();
+    }
+
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC), // slate-50 background
+        color: const Color(0xFFF8FAFC),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFE2E8F0)), // slate-200
+        border: Border.all(color: const Color(0xFFE2E8F0)),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withOpacity(0.03),
@@ -43,7 +47,7 @@ class ReportSummary extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header del Resumen con Icono
+          // ─── Header del Resumen ───
           Padding(
             padding: const EdgeInsets.only(bottom: 16),
             child: Row(
@@ -55,7 +59,11 @@ class ReportSummary extends StatelessWidget {
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: const Color(0xFFE2E8F0)),
                   ),
-                  child: const Icon(Icons.analytics_outlined, size: 18, color: Color(0xFF1E293B)),
+                  child: const Icon(
+                    Icons.analytics_outlined,
+                    size: 18,
+                    color: Color(0xFF1E293B),
+                  ),
                 ),
                 const SizedBox(width: 12),
                 const Column(
@@ -66,7 +74,7 @@ class ReportSummary extends StatelessWidget {
                       style: TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w900,
-                        color: Color(0xFF1E293B), // slate-800
+                        color: Color(0xFF1E293B),
                         letterSpacing: 0.5,
                       ),
                     ),
@@ -74,7 +82,7 @@ class ReportSummary extends StatelessWidget {
                       'Estadísticas del servicio actual',
                       style: TextStyle(
                         fontSize: 10,
-                        color: Color(0xFF64748B), // slate-500
+                        color: Color(0xFF64748B),
                         fontWeight: FontWeight.w500,
                       ),
                     ),
@@ -83,58 +91,53 @@ class ReportSummary extends StatelessWidget {
               ],
             ),
           ),
-          
-          // Grid de Estadísticas (Cards)
+
+          // ─── Grid de Estadísticas (Fila 1: OK + NOK) ───
           Row(
             children: [
-              // OK
               Expanded(
                 child: _StatCard(
                   label: 'CORRECTO',
-                  value: stats['ok']!,
-                  color: const Color(0xFF10B981), // Emerald-500
-                  bgColor: const Color(0xFFECFDF5), // Emerald-50
+                  value: stats.ok,
+                  color: const Color(0xFF10B981),
+                  bgColor: const Color(0xFFECFDF5),
                   icon: Icons.check_circle,
                 ),
               ),
               const SizedBox(width: 12),
-              
-              // NOK (Falla)
               Expanded(
                 child: _StatCard(
                   label: 'FALLA',
-                  value: stats['nok']!,
-                  color: const Color(0xFFEF4444), // Red-500
-                  bgColor: const Color(0xFFFEF2F2), // Red-50
+                  value: stats.nok,
+                  color: const Color(0xFFEF4444),
+                  bgColor: const Color(0xFFFEF2F2),
                   icon: Icons.cancel,
                 ),
               ),
             ],
           ),
-          
+
           const SizedBox(height: 12),
-          
+
+          // ─── Grid de Estadísticas (Fila 2: NA + NR) ───
           Row(
             children: [
-              // N/A
               Expanded(
                 child: _StatCard(
                   label: 'NO APLICA',
-                  value: stats['na']!,
-                  color: const Color(0xFF64748B), // Slate-500
-                  bgColor: const Color(0xFFF1F5F9), // Slate-100
-                  icon: Icons.not_interested, // Icono más claro para N/A
+                  value: stats.na,
+                  color: const Color(0xFF64748B),
+                  bgColor: const Color(0xFFF1F5F9),
+                  icon: Icons.not_interested,
                 ),
               ),
               const SizedBox(width: 12),
-              
-              // N/R
               Expanded(
                 child: _StatCard(
                   label: 'NO REALIZADO',
-                  value: stats['nr']!,
-                  color: const Color(0xFFF59E0B), // Amber-500
-                  bgColor: const Color(0xFFFFFBEB), // Amber-50
+                  value: stats.nr,
+                  color: const Color(0xFFF59E0B),
+                  bgColor: const Color(0xFFFFFBEB),
                   icon: Icons.warning_amber_rounded,
                 ),
               ),
@@ -146,6 +149,9 @@ class ReportSummary extends StatelessWidget {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// _StatCard — Sin cambios visuales, exactamente igual que antes
+// ═══════════════════════════════════════════════════════════════════════
 class _StatCard extends StatelessWidget {
   final String label;
   final int value;
@@ -179,7 +185,7 @@ class _StatCard extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // Icono con fondo circular suave
+          // Icono con fondo circular
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
@@ -189,7 +195,7 @@ class _StatCard extends StatelessWidget {
             child: Icon(icon, size: 20, color: color),
           ),
           const SizedBox(height: 12),
-          
+
           // Número Grande
           Text(
             value.toString(),
@@ -198,18 +204,18 @@ class _StatCard extends StatelessWidget {
               fontWeight: FontWeight.w900,
               color: color,
               height: 1.0,
-              letterSpacing: -1.0, // Tight tracking para números grandes
+              letterSpacing: -1.0,
             ),
           ),
           const SizedBox(height: 4),
-          
+
           // Etiqueta
           Text(
             label,
-            style: TextStyle(
+            style: const TextStyle(
               fontSize: 9,
               fontWeight: FontWeight.w700,
-              color: const Color(0xFF94A3B8), // Slate-400
+              color: Color(0xFF94A3B8),
               letterSpacing: 0.5,
             ),
             textAlign: TextAlign.center,
