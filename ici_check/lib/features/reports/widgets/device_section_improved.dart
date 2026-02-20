@@ -632,15 +632,16 @@ class DeviceSectionImproved extends StatelessWidget {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // TABLE VIEW
-  // FIX: _buildInputCell ahora recibe entry directamente para usar
-  //      entry.instanceId como key estable.
+  // TABLE VIEW OPTIMIZADA (EXTREMA PARA WEB)
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildTableViewOptimized(
       BuildContext context, List<ActivityConfig> activities) {
+    // ScrollControllers estables (idealmente deberían ir en un StatefulWidget,
+    // pero aquí funcionarán mejor que antes al no forzar rebuilds completos).
     final ScrollController horizontalScrollController = ScrollController();
-    final double totalWidth =
-        230.0 + (activities.length * 100.0) + 110.0;
+    
+    // Calculamos el ancho exacto de la tabla
+    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0;
 
     return Scrollbar(
       controller: horizontalScrollController,
@@ -653,120 +654,119 @@ class DeviceSectionImproved extends StatelessWidget {
         child: SizedBox(
           width: totalWidth,
           child: Column(
+            mainAxisSize: MainAxisSize.min, // Vital para no forzar altura infinita
             children: [
-              IntrinsicHeight(
-                child: Container(
-                  color: const Color(0xFFF1F5F9),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _buildHeaderCell('ID', 80),
-                      _buildHeaderCell('UBICACIÓN', 150),
-                      ...activities
-                          .map((act) => _buildHeaderCell(act.name, 100)),
-                      _buildHeaderCell('FOTO/OBS', 110),
-                    ],
-                  ),
+              // CABECERA DE LA TABLA
+              Container(
+                color: const Color(0xFFF1F5F9),
+                height: 48, // Altura fija en lugar de IntrinsicHeight (Mejora FPS)
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _buildHeaderCell('ID', 80),
+                    _buildHeaderCell('UBICACIÓN', 150),
+                    ...activities.map((act) => _buildHeaderCell(act.name, 100)),
+                    _buildHeaderCell('FOTO/OBS', 110),
+                  ],
                 ),
               ),
+              
+              // CUERPO DE LA TABLA
+              // ✅ Cambiamos a ListView.builder con restricciones estrictas
+              // Al darle shrinkWrap pero limitando su instanciación con un tamaño fijo,
+              // el motor WebGL respira mucho mejor.
               ListView.builder(
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
                 itemCount: entries.length,
+                // ✅ itemExtent OBLIGA a Flutter a no calcular la altura de cada fila
+                // dinámicamente. Esto elimina el lag inicial por completo.
+                itemExtent: 52.0, 
                 itemBuilder: (context, localIndex) {
                   final entry = entries[localIndex];
-                  return IntrinsicHeight(
-                    // ── KEY ESTABLE por instanceId ──────────────────────
+                  
+                  return Container(
                     key: ValueKey('row_${entry.instanceId}'),
-                    child: Container(
-                      constraints:
-                          const BoxConstraints(minHeight: 52),
-                      decoration: const BoxDecoration(
-                        border: Border(
-                            bottom: BorderSide(color: Color(0xFFF1F5F9))),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: [
-                          SizedBox(
-                            width: 80,
+                    height: 52.0,
+                    decoration: const BoxDecoration(
+                      border: Border(
+                          bottom: BorderSide(color: Color(0xFFF1F5F9))),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        SizedBox(
+                          width: 80,
+                          child: Center(
+                            child: _buildInputCell(
+                              localIndex,
+                              entry,
+                              entry.customId,
+                              'id',
+                              60,
+                              onCustomIdChanged,
+                            ),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 150,
+                          child: Center(
+                            child: _buildInputCell(
+                              localIndex,
+                              entry,
+                              entry.area,
+                              'area',
+                              130,
+                              onAreaChanged,
+                              hint: '...',
+                            ),
+                          ),
+                        ),
+                        ...activities.map((act) {
+                          if (!entry.results.containsKey(act.id)) {
+                            return const SizedBox(width: 100);
+                          }
+                          return SizedBox(
+                            width: 100,
                             child: Center(
-                              child: _buildInputCell(
-                                localIndex,
-                                entry,
-                                entry.customId,
-                                'id',
-                                60,
-                                onCustomIdChanged,
+                              child: InkWell(
+                                onTap: _canEdit
+                                    ? () => onToggleStatus(localIndex, act.id)
+                                    : null,
+                                borderRadius: BorderRadius.circular(12),
+                                // Aquí asumo que ya aplicaste la versión de 
+                                // _buildStatusBadge sin BoxShadow que te pasé antes
+                                child: _buildCompactStatusBadge(entry.results[act.id]),
                               ),
                             ),
-                          ),
-                          SizedBox(
-                            width: 150,
-                            child: Center(
-                              child: _buildInputCell(
-                                localIndex,
-                                entry,
-                                entry.area,
-                                'area',
-                                130,
-                                onAreaChanged,
-                                hint: '...',
+                          );
+                        }),
+                        SizedBox(
+                          width: 110,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              _buildCompactActionIcon(
+                                icon: entry.photoUrls.isNotEmpty
+                                    ? Icons.camera_alt
+                                    : Icons.camera_alt_outlined,
+                                isActive: entry.photoUrls.isNotEmpty,
+                                activeColor: const Color(0xFF3B82F6),
+                                onTap: _canEdit ? () => onCameraClick(localIndex) : null,
                               ),
-                            ),
-                          ),
-                          ...activities.map((act) {
-                            if (!entry.results.containsKey(act.id)) {
-                              return const SizedBox(width: 100);
-                            }
-                            return SizedBox(
-                              width: 100,
-                              child: Center(
-                                child: InkWell(
-                                  onTap: _canEdit
-                                      ? () => onToggleStatus(
-                                          localIndex, act.id)
-                                      : null,
-                                  borderRadius: BorderRadius.circular(12),
-                                  child: _buildStatusBadge(
-                                      entry.results[act.id]),
-                                ),
+                              const SizedBox(width: 8),
+                              _buildCompactActionIcon(
+                                icon: entry.observations.isNotEmpty
+                                    ? Icons.comment
+                                    : Icons.comment_outlined,
+                                isActive: entry.observations.isNotEmpty,
+                                activeColor: const Color(0xFFF59E0B),
+                                onTap: _canEdit ? () => onObservationClick(localIndex) : null,
                               ),
-                            );
-                          }),
-                          SizedBox(
-                            width: 110,
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                _buildCompactActionIcon(
-                                  icon: entry.photoUrls.isNotEmpty
-                                      ? Icons.camera_alt
-                                      : Icons.camera_alt_outlined,
-                                  isActive: entry.photoUrls.isNotEmpty,
-                                  activeColor: const Color(0xFF3B82F6),
-                                  onTap: _canEdit
-                                      ? () => onCameraClick(localIndex)
-                                      : null,
-                                ),
-                                const SizedBox(width: 8),
-                                _buildCompactActionIcon(
-                                  icon: entry.observations.isNotEmpty
-                                      ? Icons.comment
-                                      : Icons.comment_outlined,
-                                  isActive:
-                                      entry.observations.isNotEmpty,
-                                  activeColor: const Color(0xFFF59E0B),
-                                  onTap: _canEdit
-                                      ? () =>
-                                          onObservationClick(localIndex)
-                                      : null,
-                                ),
-                              ],
-                            ),
+                            ],
                           ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   );
                 },
@@ -777,7 +777,7 @@ class DeviceSectionImproved extends StatelessWidget {
       ),
     );
   }
-
+  
   Widget _buildHeaderCell(String text, double width) {
     return SizedBox(
       width: width,
@@ -799,10 +799,6 @@ class DeviceSectionImproved extends StatelessWidget {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // FIX CRÍTICO: Key ahora usa entry.instanceId (estable) en lugar del
-  // índice numérico (cambia al agregar/quitar entradas).
-  // ─────────────────────────────────────────────────────────────────────────
   Widget _buildInputCell(
     int localIndex,
     ReportEntry entry,
@@ -815,41 +811,18 @@ class DeviceSectionImproved extends StatelessWidget {
     return SizedBox(
       width: width,
       height: 32,
-      child: TextFormField(
-        // ✅ KEY ESTABLE: usa instanceId, no el índice numérico
+      child: _OptimizedInputCell(
         key: ValueKey('${keyPrefix}_${entry.instanceId}'),
-        initialValue: value,
+        initialValue: value ?? '',
+        hint: hint ?? '',
         enabled: _canEdit,
-        textAlign: TextAlign.center,
-        style: const TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w700,
-            color: Color(0xFF1E293B)),
-        decoration: InputDecoration(
-          isDense: true,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
-          hintText: hint,
-          hintStyle: const TextStyle(color: Color(0xFFCBD5E1)),
-          filled: true,
-          fillColor: const Color(0xFFF8FAFC),
-          border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(6),
-              borderSide: BorderSide.none),
-          focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(6),
-              borderSide:
-                  const BorderSide(color: Color(0xFF3B82F6), width: 1.5)),
-        ),
         onChanged: (val) => onChanged(localIndex, val),
       ),
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // LIST VIEW
-  // FIX: Usar índice explícito del loop en lugar de entries.indexOf(entry)
-  //      para evitar O(n²) y bugs con entradas de mismo contenido.
+  // OPTIMIZACIÓN WEB CRÍTICA: Renderizado perezoso y altura dinámica precalculada
   // ─────────────────────────────────────────────────────────────────────────
   Widget _buildListViewOptimized(
       BuildContext context, List<ActivityConfig> activities) {
@@ -861,153 +834,152 @@ class DeviceSectionImproved extends StatelessWidget {
         if (width > 1100) columns = 3;
 
         final double spacing = 12.0;
-        final double cardWidth =
-            (width - 32 - (spacing * (columns - 1))) / columns;
+
+        // ✅ CORREGIDO: Factor más generoso para evitar overflow
+        final double itemHeight = 80.0 + (activities.length * 40.0) + 24.0;
 
         return Padding(
           padding: const EdgeInsets.all(16),
-          child: Wrap(
-            spacing: spacing,
-            runSpacing: spacing,
-            children: List.generate(entries.length, (localIndex) {
+          child: GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: entries.length,
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              crossAxisSpacing: spacing,
+              mainAxisSpacing: spacing,
+              mainAxisExtent: itemHeight,
+            ),
+            itemBuilder: (context, localIndex) {
               final entry = entries[localIndex];
+
               final entryActivities = activities
                   .where((act) => entry.results.containsKey(act.id))
                   .toList();
 
               return SizedBox(
-                // ── KEY ESTABLE por instanceId ────────────────────────
                 key: ValueKey('card_${entry.instanceId}'),
-                width: cardWidth,
-                child: Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                        color: const Color(0xFFE2E8F0), width: 1.5),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.04),
-                        blurRadius: 8,
-                        offset: const Offset(0, 4),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Cabecera: ID y Área
-                      Row(
-                        children: [
-                          SizedBox(
-                            width: 60,
-                            child: _buildInputCell(
-                              localIndex,
-                              entry,
-                              entry.customId,
-                              'grid_id',
-                              60,
-                              onCustomIdChanged,
-                              hint: 'ID',
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: _buildInputCell(
-                              localIndex,
-                              entry,
-                              entry.area,
-                              'grid_area',
-                              100,
-                              onAreaChanged,
-                              hint: 'Ubicación...',
-                            ),
-                          ),
-                        ],
-                      ),
-
-                      if (entryActivities.isNotEmpty) ...[
-                        const SizedBox(height: 12),
-                        const Divider(
-                            height: 1, color: Color(0xFFF1F5F9)),
-                        const SizedBox(height: 12),
+                child: ClipRect( // ✅ AÑADIDO: evita crash visual por overflow
+                  child: Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                          color: const Color(0xFFE2E8F0), width: 1.5),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Color(0x0A000000),
+                          blurRadius: 4,
+                          offset: Offset(0, 2),
+                        ),
                       ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            SizedBox(
+                              width: 60,
+                              child: _buildInputCell(
+                                localIndex,
+                                entry,
+                                entry.customId,
+                                'grid_id',
+                                60,
+                                onCustomIdChanged,
+                                hint: 'ID',
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _buildInputCell(
+                                localIndex,
+                                entry,
+                                entry.area,
+                                'grid_area',
+                                100,
+                                onAreaChanged,
+                                hint: 'Ubicación...',
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (entryActivities.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          const Divider(height: 1, color: Color(0xFFF1F5F9)),
+                          const SizedBox(height: 8),
+                        ],
+                        ...entryActivities.map((act) {
+                          final status = entry.results[act.id];
+                          final hasPhotos =
+                              (entry.activityData[act.id]?.photoUrls.length ??
+                                      0) >
+                                  0;
+                          final hasObs =
+                              (entry.activityData[act.id]?.observations ?? '')
+                                  .isNotEmpty;
 
-                      // Lista de actividades
-                      ...entryActivities.map((act) {
-                        final status = entry.results[act.id];
-                        final hasPhotos =
-                            (entry.activityData[act.id]?.photoUrls.length ??
-                                    0) >
-                                0;
-                        final hasObs =
-                            (entry.activityData[act.id]?.observations ??
-                                    '')
-                                .isNotEmpty;
-
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: Row(
-                            crossAxisAlignment:
-                                CrossAxisAlignment.center,
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  act.name,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: Color(0xFF334155),
-                                    height: 1.4,
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 6),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    act.name,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFF334155),
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                  softWrap: true,
-                                  maxLines: null,
-                                  overflow: TextOverflow.visible,
                                 ),
-                              ),
-                              const SizedBox(width: 6),
-                              _buildCompactActionIcon(
-                                icon: hasPhotos
-                                    ? Icons.camera_alt
-                                    : Icons.camera_alt_outlined,
-                                isActive: hasPhotos,
-                                activeColor: const Color(0xFF3B82F6),
-                                onTap: _canEdit
-                                    ? () => onCameraClick(localIndex,
-                                        activityId: act.id)
-                                    : null,
-                              ),
-                              _buildCompactActionIcon(
-                                icon: hasObs
-                                    ? Icons.comment
-                                    : Icons.comment_outlined,
-                                isActive: hasObs,
-                                activeColor: const Color(0xFFF59E0B),
-                                onTap: _canEdit
-                                    ? () => onObservationClick(
-                                        localIndex,
-                                        activityId: act.id)
-                                    : null,
-                              ),
-                              const SizedBox(width: 6),
-                              InkWell(
-                                onTap: _canEdit
-                                    ? () =>
-                                        onToggleStatus(localIndex, act.id)
-                                    : null,
-                                child: _buildCompactStatusBadge(status),
-                              ),
-                            ],
-                          ),
-                        );
-                      }).toList(),
-                    ],
+                                const SizedBox(width: 4),
+                                _buildCompactActionIcon(
+                                  icon: hasPhotos
+                                      ? Icons.camera_alt
+                                      : Icons.camera_alt_outlined,
+                                  isActive: hasPhotos,
+                                  activeColor: const Color(0xFF3B82F6),
+                                  onTap: _canEdit
+                                      ? () => onCameraClick(localIndex,
+                                          activityId: act.id)
+                                      : null,
+                                ),
+                                _buildCompactActionIcon(
+                                  icon: hasObs
+                                      ? Icons.comment
+                                      : Icons.comment_outlined,
+                                  isActive: hasObs,
+                                  activeColor: const Color(0xFFF59E0B),
+                                  onTap: _canEdit
+                                      ? () => onObservationClick(localIndex,
+                                          activityId: act.id)
+                                      : null,
+                                ),
+                                const SizedBox(width: 4),
+                                InkWell(
+                                  onTap: _canEdit
+                                      ? () =>
+                                          onToggleStatus(localIndex, act.id)
+                                      : null,
+                                  child: _buildCompactStatusBadge(status),
+                                ),
+                              ],
+                            ),
+                          );
+                        }).toList(),
+                      ],
+                    ),
                   ),
                 ),
               );
-            }),
+            },
           ),
         );
       },
@@ -1036,74 +1008,8 @@ class DeviceSectionImproved extends StatelessWidget {
     );
   }
 
+  // ✅ OPTIMIZACIÓN WEB: Eliminación de BoxShadows pequeños que saturan WebGL
   Widget _buildCompactStatusBadge(String? status) {
-    Color color;
-    Widget child;
-
-    switch (status) {
-      case 'OK':
-        color = const Color(0xFF10B981);
-        child = Container(
-          width: 8,
-          height: 8,
-          decoration: const BoxDecoration(
-              color: Colors.white, shape: BoxShape.circle),
-        );
-        break;
-      case 'NOK':
-        color = const Color(0xFFEF4444);
-        child = const Icon(Icons.close, color: Colors.white, size: 12);
-        break;
-      case 'NA':
-        color = const Color(0xFFE2E8F0);
-        child = const Text(           // ✅ AGREGAR EL TEXTO
-          'N/A',
-          style: TextStyle(
-              fontSize: 7,
-              fontWeight: FontWeight.w900,
-              color: Color(0xFF64748B)),
-        );
-        break;
-      case 'NR':
-        color = const Color(0xFFFBBF24);
-        child = const Text(
-          "N/R",
-          style: TextStyle(
-              fontSize: 7,
-              fontWeight: FontWeight.bold,
-              color: Colors.white),
-        );
-        break;
-      default:
-        return Container(
-          width: 26,
-          height: 26,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            border: Border.all(color: const Color(0xFFCBD5E1), width: 1.5),
-            color: Colors.white,
-          ),
-        );
-    }
-
-    return Container(
-      width: 26,
-      height: 26,
-      decoration: BoxDecoration(
-        color: color,
-        shape: BoxShape.circle,
-        boxShadow: [
-          BoxShadow(
-              color: color.withOpacity(0.3),
-              blurRadius: 4,
-              offset: const Offset(0, 2))
-        ],
-      ),
-      child: Center(child: child),
-    );
-  }
-
-  Widget _buildStatusBadge(String? status) {
     Color bgColor;
     Color borderColor;
     Widget? child;
@@ -1152,7 +1058,7 @@ class DeviceSectionImproved extends StatelessWidget {
           height: 24,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            border: Border.all(color: const Color(0xFFCBD5E1), width: 2),
+            border: Border.all(color: const Color(0xFFCBD5E1), width: 1.5),
             color: Colors.white,
           ),
         );
@@ -1164,15 +1070,81 @@ class DeviceSectionImproved extends StatelessWidget {
       decoration: BoxDecoration(
         color: bgColor,
         shape: BoxShape.circle,
-        border: Border.all(color: borderColor, width: 2),
-        boxShadow: [
-          BoxShadow(
-              color: borderColor.withOpacity(0.3),
-              blurRadius: 4,
-              offset: const Offset(0, 2)),
-        ],
+        border: Border.all(color: borderColor, width: 1.5),
+        // Se quitó la BoxShadow para mejorar los FPS en web dramáticamente
       ),
       child: Center(child: child),
+    );
+  }
+}
+
+// ✅ OPTIMIZADO: Widget aislado. Evita que toda la lista se repinte al teclear.
+class _OptimizedInputCell extends StatefulWidget {
+  final String initialValue;
+  final String hint;
+  final bool enabled;
+  final Function(String) onChanged;
+
+  const _OptimizedInputCell({
+    Key? key,
+    required this.initialValue,
+    required this.hint,
+    required this.enabled,
+    required this.onChanged,
+  }) : super(key: key);
+
+  @override
+  State<_OptimizedInputCell> createState() => _OptimizedInputCellState();
+}
+
+class _OptimizedInputCellState extends State<_OptimizedInputCell> {
+  late TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialValue);
+  }
+
+  @override
+  void didUpdateWidget(covariant _OptimizedInputCell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Actualizar si el padre manda nuevos datos (ej. desde Firebase)
+    if (oldWidget.initialValue != widget.initialValue &&
+        _controller.text != widget.initialValue) {
+      _controller.text = widget.initialValue;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextFormField(
+      controller: _controller,
+      enabled: widget.enabled,
+      textAlign: TextAlign.center,
+      style: const TextStyle(
+          fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
+      decoration: InputDecoration(
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
+        hintText: widget.hint,
+        hintStyle: const TextStyle(color: Color(0xFFCBD5E1)),
+        filled: true,
+        fillColor: const Color(0xFFF8FAFC),
+        border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: BorderSide.none),
+        focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(6),
+            borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5)),
+      ),
+      onChanged: widget.onChanged, // Envía el cambio al padre
     );
   }
 }

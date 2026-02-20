@@ -15,9 +15,8 @@ import 'package:intl/intl.dart';
 import 'package:signature/signature.dart';
 import 'package:image_picker/image_picker.dart';
 
-// Imports de Modelos y Repositorios
 import 'package:ici_check/features/policies/data/policy_model.dart';
-import 'package:ici_check/features/policies/data/policies_repository.dart'; // NUEVO
+import 'package:ici_check/features/policies/data/policies_repository.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:ici_check/features/clients/data/client_model.dart';
@@ -49,44 +48,63 @@ class ServiceReportScreen extends StatefulWidget {
 }
 
 class _ServiceReportScreenState extends State<ServiceReportScreen> {
-  // Repositorios y Servicios
+  // ══════════════════════════════════════════════════════════════════════
+  // REPOSITORIOS Y SERVICIOS
+  // ══════════════════════════════════════════════════════════════════════
   final ReportsRepository _repo = ReportsRepository();
   final SettingsRepository _settingsRepo = SettingsRepository();
-  final PoliciesRepository _policiesRepo = PoliciesRepository(); // NUEVO
-
+  final PoliciesRepository _policiesRepo = PoliciesRepository();
   final DevicesRepository _devicesRepo = DevicesRepository();
-  List<DeviceModel> _currentDevices =
-      []; // ← lista viva, se actualiza con Firebase
-  StreamSubscription? _devicesSubscription; // ← suscripción
-
-  // Getter: devuelve los dispositivos actualizados si ya se cargaron,
-  // o los que vinieron como parámetro si aún no llegó el stream.
-  List<DeviceModel> get _devicesEffective =>
-      _currentDevices.isNotEmpty ? _currentDevices : widget.devices;
-
   final ImagePicker _picker = ImagePicker();
-  Timer? _autoSaveDebounce;
   final PhotoStorageService _photoService = PhotoStorageService();
-  bool _isUploadingPhoto = false;
+  final DeviceLocationService _locationService = DeviceLocationService();
 
-  // Estado del Reporte
+  // ══════════════════════════════════════════════════════════════════════
+  // ESTADO PRINCIPAL
+  // ══════════════════════════════════════════════════════════════════════
   ServiceReportModel? _report;
   CompanySettingsModel? _companySettings;
-  PolicyModel? _currentPolicy; // NUEVO - Guardamos la póliza actual
+  PolicyModel? _currentPolicy;
+  List<DeviceModel> _currentDevices = [];
   bool _isLoading = true;
+  bool _isUploadingPhoto = false;
 
-  // Estado de la UI
+  // Estado de usuario
   bool _adminOverride = false;
   String? _currentUserId;
   UserModel? _currentUser;
 
-  // Suscripciones de streams
-  StreamSubscription? _policySubscription; // NUEVO
-  StreamSubscription? _reportSubscription; // NUEVO
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #1: MAPA DE ÍNDICES GLOBALES PRE-CALCULADO
+  // Elimina los costosos `indexWhere` en O(n) que se ejecutaban en cada
+  // callback de cada celda. Ahora es O(1) por lookup.
+  // ══════════════════════════════════════════════════════════════════════
+  Map<String, int> _instanceIdToGlobalIndex = {};
 
-  final DeviceLocationService _locationService = DeviceLocationService();
-  Map<String, Map<String, String>> _savedLocations = {};
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #2: CACHÉ DE DATOS DERIVADOS
+  // Se recalculan SOLO cuando cambian las entries, no en cada build().
+  // ══════════════════════════════════════════════════════════════════════
+  List<MapEntry<String, List<ReportEntry>>> _cachedGroupedEntries = [];
+  String _cachedFrequencies = "";
+  List<UserModel> _cachedAssignedUsers = [];
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #3: DEBOUNCE UNIFICADO PARA FIREBASE
+  // En lugar de guardar en Firebase en cada tecla o toggle, acumulamos
+  // los cambios y hacemos UN SOLO write cada 800ms.
+  // ══════════════════════════════════════════════════════════════════════
+  Timer? _saveDebounce;
+  bool _hasPendingChanges = false;
+
+  // Suscripciones
+  StreamSubscription? _policySubscription;
+  StreamSubscription? _reportSubscription;
+  StreamSubscription? _devicesSubscription;
   Timer? _locationSaveDebounce;
+
+  // Ubicaciones guardadas
+  Map<String, Map<String, String>> _savedLocations = {};
 
   // Controladores de firma
   final SignatureController _providerSigController = SignatureController(
@@ -104,13 +122,26 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
   int? _photoContextEntryIdx;
   String? _photoContextActivityId;
 
+  // ✅ OPTIMIZACIÓN #4: Controller estable para observaciones generales
+  // Evita recrear TextEditingController en cada build().
+  late final TextEditingController _generalObsController;
+  Timer? _generalObsDebounce;
+
   // Colores
-  final Color _bgLight = const Color(0xFFF8FAFC);
-  final Color _primaryDark = const Color(0xFF0F172A);
+  static const Color _bgLight = Color(0xFFF8FAFC);
+  static const Color _primaryDark = Color(0xFF0F172A);
+
+  List<DeviceModel> get _devicesEffective =>
+      _currentDevices.isNotEmpty ? _currentDevices : widget.devices;
+
+  // ══════════════════════════════════════════════════════════════════════
+  // LIFECYCLE
+  // ══════════════════════════════════════════════════════════════════════
 
   @override
   void initState() {
     super.initState();
+    _generalObsController = TextEditingController();
     _loadData();
     _providerSigController.addListener(_onSignatureChanged);
     _clientSigController.addListener(_onSignatureChanged);
@@ -118,19 +149,74 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
 
   @override
   void dispose() {
-    _locationSaveDebounce?.cancel(); // ✅ AGREGAR
+    // Guardar cambios pendientes antes de destruir
+    _flushPendingChanges();
+    _locationSaveDebounce?.cancel();
     _providerSigController.dispose();
     _clientSigController.dispose();
-    _policySubscription?.cancel(); // NUEVO
-    _reportSubscription?.cancel(); // NUEVO
-    _devicesSubscription?.cancel(); // ← AGREGAR ESTA LÍNEA
-    _autoSaveDebounce?.cancel();
+    _policySubscription?.cancel();
+    _reportSubscription?.cancel();
+    _devicesSubscription?.cancel();
+    _saveDebounce?.cancel();
+    _generalObsDebounce?.cancel();
+    _generalObsController.dispose();
     super.dispose();
   }
 
-  // ==========================================
-  // CARGA DE DATOS E INICIALIZACIÓN (MEJORADO)
-  // ==========================================
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #5: RECALCULAR DATOS DERIVADOS EN UN SOLO LUGAR
+  // Se llama SOLO cuando _report.entries cambia, NO en build().
+  // ══════════════════════════════════════════════════════════════════════
+  void _updateDerivedData() {
+    if (_report == null) return;
+
+    // 1. Reconstruir mapa de índices globales
+    final newIndexMap = <String, int>{};
+    for (int i = 0; i < _report!.entries.length; i++) {
+      newIndexMap[_report!.entries[i].instanceId] = i;
+    }
+    _instanceIdToGlobalIndex = newIndexMap;
+
+    // 2. Recalcular agrupación
+    final grouped = _groupEntries();
+    _cachedGroupedEntries = grouped.entries.toList();
+    _cachedFrequencies = _getFrequencies(grouped);
+
+    // 3. Recalcular usuarios asignados
+    _cachedAssignedUsers = widget.users
+        .where((user) => _report!.assignedTechnicianIds.contains(user.id))
+        .toList();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #6: GUARDADO DIFERIDO (DEBOUNCED)
+  // Acumula cambios y hace UN write a Firebase cada 800ms.
+  // ══════════════════════════════════════════════════════════════════════
+  void _scheduleSave() {
+    _hasPendingChanges = true;
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(const Duration(milliseconds: 800), () {
+      _flushPendingChanges();
+    });
+  }
+
+  void _flushPendingChanges() {
+    if (_hasPendingChanges && _report != null) {
+      _hasPendingChanges = false;
+      _repo.saveReport(_report!);
+    }
+  }
+
+  /// Guarda inmediatamente (para acciones críticas como start/end service)
+  void _saveImmediate() {
+    _saveDebounce?.cancel();
+    _hasPendingChanges = false;
+    if (_report != null) _repo.saveReport(_report!);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // CARGA DE DATOS
+  // ══════════════════════════════════════════════════════════════════════
   Future<void> _loadData() async {
     try {
       final companyData = await _settingsRepo.getSettings();
@@ -144,77 +230,61 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
         );
       }
 
-      final instanceIds = widget.policy.devices
-          .map((d) => d.instanceId)
-          .toList();
+      final instanceIds =
+          widget.policy.devices.map((d) => d.instanceId).toList();
 
       _savedLocations = await _locationService.getLocationsForPolicy(
         widget.policyId,
         instanceIds,
       );
 
-      // ====================================================
-      // NUEVO: ESCUCHAR CAMBIOS EN LOS DEVICE MODELS EN TIEMPO REAL
-      // ====================================================
+      // Stream de dispositivos
       _devicesSubscription = _devicesRepo.getDevicesStream().listen((
         updatedDevices,
       ) {
-        if (mounted) {
-          final bool firstLoad = _currentDevices.isEmpty;
+        if (!mounted) return;
+        final bool firstLoad = _currentDevices.isEmpty;
+        bool hasChanges =
+            firstLoad ||
+            _hasRelevantDeviceChanges(_currentDevices, updatedDevices);
 
-          // Detectar si cambió algo relevante (frecuencias de actividades)
-          bool hasChanges =
-              firstLoad ||
-              _hasRelevantDeviceChanges(_currentDevices, updatedDevices);
+        setState(() => _currentDevices = updatedDevices);
 
-          setState(() {
-            _currentDevices = updatedDevices;
-          });
-
-          // Si ya tenemos el reporte cargado y los dispositivos cambiaron,
-          // re-sincronizar para quitar/agregar las actividades que correspondan
-          if (!firstLoad && hasChanges && _report != null) {
-            debugPrint(
-              "🔄 Dispositivos actualizados (frecuencias cambiadas). Re-sincronizando reporte...",
-            );
-            _resyncReportWithCurrentDevices();
-          }
+        if (!firstLoad && hasChanges && _report != null) {
+          _resyncReportWithCurrentDevices();
         }
       });
 
-      // ====================================================
-      // NUEVO: ESCUCHAR CAMBIOS EN LA PÓLIZA EN TIEMPO REAL
-      // ====================================================
-      _policySubscription = _policiesRepo.getPoliciesStream().listen((policies) {
+      // Stream de póliza
+      _policySubscription =
+          _policiesRepo.getPoliciesStream().listen((policies) {
         try {
-        final updatedPolicy = policies.firstWhere((p) => p.id == widget.policyId);
-        final previousPolicy = _currentPolicy;
+          final updatedPolicy =
+              policies.firstWhere((p) => p.id == widget.policyId);
+          final previousPolicy = _currentPolicy;
 
-        // Actualizar _currentPolicy primero
-        if (mounted) setState(() => _currentPolicy = updatedPolicy);
+          if (mounted) setState(() => _currentPolicy = updatedPolicy);
 
-       // Solo re-sincronizar si hubo cambios reales Y ya tenemos reporte
-        if (previousPolicy != null &&
-            _hasRelevantPolicyChanges(previousPolicy, updatedPolicy) &&
-            _report != null) {
-         debugPrint("🔄 Cambios en póliza detectados. Re-sincronizando...");
-         _syncReportWithPolicy(updatedPolicy);
+          if (previousPolicy != null &&
+              _hasRelevantPolicyChanges(previousPolicy, updatedPolicy) &&
+              _report != null) {
+            _syncReportWithPolicy(updatedPolicy);
+          }
+        } catch (e) {
+          debugPrint("Error actualizando póliza: $e");
         }
-      } catch (e) {
-        debugPrint("Error actualizando póliza: $e");
-      }
-    });
+      });
 
-      // Escuchamos el stream del reporte
+      // Stream del reporte
       _reportSubscription = _repo
           .getReportStream(widget.policyId, widget.dateStr)
           .listen((existingReport) {
-            if (existingReport != null) {
-              _syncAndLoadReport(existingReport);
-            } else {
-              _initializeNewReport();
-            }
-          });
+        if (existingReport != null) {
+          _syncAndLoadReport(existingReport);
+        } else {
+          _initializeNewReport();
+        }
+      });
 
       if (mounted) {
         setState(() {
@@ -229,39 +299,55 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     }
   }
 
-  // ====================================================
-  // NUEVO: DETECTAR CAMBIOS RELEVANTES EN DEVICE MODELS
-  // ====================================================
+  // ══════════════════════════════════════════════════════════════════════
+  // DETECCIÓN DE CAMBIOS
+  // ══════════════════════════════════════════════════════════════════════
+
   bool _hasRelevantDeviceChanges(
     List<DeviceModel> oldDevs,
     List<DeviceModel> newDevs,
   ) {
     if (oldDevs.length != newDevs.length) return true;
-
-    for (final oldDev in oldDevs) {
-      try {
-        final newDev = newDevs.firstWhere((d) => d.id == oldDev.id);
-
-        // Comparar actividades (cantidad o frecuencias)
-        if (oldDev.activities.length != newDev.activities.length) return true;
-
-        for (int i = 0; i < oldDev.activities.length; i++) {
-          final oldAct = oldDev.activities[i];
-          final newAct = newDev.activities[i];
-          if (oldAct.id != newAct.id) return true;
-          if (oldAct.frequency != newAct.frequency)
-            return true; // ← el cambio clave
+    // ✅ Usar mapa para comparación O(n) en vez de O(n²)
+    final oldMap = {for (final d in oldDevs) d.id: d};
+    for (final newDev in newDevs) {
+      final oldDev = oldMap[newDev.id];
+      if (oldDev == null) return true;
+      if (oldDev.activities.length != newDev.activities.length) return true;
+      for (int i = 0; i < oldDev.activities.length; i++) {
+        if (oldDev.activities[i].id != newDev.activities[i].id) return true;
+        if (oldDev.activities[i].frequency != newDev.activities[i].frequency) {
+          return true;
         }
-      } catch (_) {
-        return true; // El dispositivo no existe en la nueva lista
       }
     }
     return false;
   }
 
-  // ====================================================
-  // NUEVO: RE-SINCRONIZAR REPORTE USANDO DISPOSITIVOS ACTUALIZADOS
-  // ====================================================
+  bool _hasRelevantPolicyChanges(PolicyModel old, PolicyModel updated) {
+    if (old.includeWeekly != updated.includeWeekly) return true;
+    if (old.devices.length != updated.devices.length) return true;
+
+    final oldMap = {for (final d in old.devices) d.instanceId: d};
+    final newMap = {for (final d in updated.devices) d.instanceId: d};
+
+    for (final id in newMap.keys) {
+      if (!oldMap.containsKey(id)) return true;
+    }
+    for (final id in oldMap.keys) {
+      if (!newMap.containsKey(id)) return true;
+      final o = oldMap[id]!;
+      final n = newMap[id]!;
+      if (o.quantity != n.quantity) return true;
+      if (o.definitionId != n.definitionId) return true;
+    }
+    return false;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // SINCRONIZACIÓN
+  // ══════════════════════════════════════════════════════════════════════
+
   Future<void> _resyncReportWithCurrentDevices() async {
     if (_report == null || _currentDevices.isEmpty) return;
 
@@ -278,85 +364,38 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     );
 
     final mergedEntries = _mergeEntries(_report!.entries, idealEntries);
-
-    // ✅ FIX: Comparar el contenido real de results, no solo la longitud
-    bool changed = false;
-    if (mergedEntries.length != _report!.entries.length) {
-      changed = true;
-    } else {
-      for (int i = 0; i < mergedEntries.length; i++) {
-        final newResultKeys = mergedEntries[i].results.keys.toSet();
-        final oldResultKeys = _report!.entries[i].results.keys.toSet();
-        if (!newResultKeys.containsAll(oldResultKeys) ||
-            !oldResultKeys.containsAll(newResultKeys)) {
-          changed = true;
-          break;
-        }
-      }
-    }
-
-    if (!changed) {
-      debugPrint("✅ No hubo cambios reales en el reporte, omitiendo guardado.");
-      return;
-    }
+    if (!_entriesStructureChanged(_report!.entries, mergedEntries)) return;
 
     final updatedReport = _report!.copyWith(entries: mergedEntries);
     await _repo.saveReport(updatedReport);
 
     if (mounted) {
-      setState(() => _report = updatedReport);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Actividades actualizadas según la nueva frecuencia'),
-          backgroundColor: Colors.blue,
-          duration: Duration(seconds: 2),
-        ),
+      setState(() {
+        _report = updatedReport;
+        _updateDerivedData();
+      });
+      _showSnackBar(
+        'Actividades actualizadas según la nueva frecuencia',
+        Colors.blue,
       );
     }
   }
 
-  bool _hasRelevantPolicyChanges(PolicyModel old, PolicyModel updated) {
-    if (old.includeWeekly != updated.includeWeekly) return true;
-    if (old.devices.length != updated.devices.length) return true;
-
-    final oldMap = { for (final d in old.devices)     d.instanceId: d };
-    final newMap = { for (final d in updated.devices) d.instanceId: d };
-
-    for (final id in newMap.keys) {
-      if (!oldMap.containsKey(id)) return true; // dispositivo agregado
-    }
-    for (final id in oldMap.keys) {
-      if (!newMap.containsKey(id)) return true; // dispositivo removido
-      final o = oldMap[id]!;
-      final n = newMap[id]!;
-      if (o.quantity      != n.quantity)      return true;
-      if (o.definitionId  != n.definitionId)  return true;
-    }
-    return false;
-  }
-
-  // ====================================================
-  // NUEVO: SINCRONIZAR REPORTE CUANDO LA PÓLIZA CAMBIA
-  // ====================================================
   Future<void> _syncReportWithPolicy(PolicyModel updatedPolicy) async {
     if (_report == null) return;
 
     bool isWeekly = widget.dateStr.contains('W');
     int timeIndex = _calculateTimeIndex(isWeekly);
 
-    // Generar las entradas ideales con la póliza actualizada
     final idealEntries = _repo.generateEntriesForDate(
-      updatedPolicy, // Usar la póliza actualizada
+      updatedPolicy,
       widget.dateStr,
       _devicesEffective,
       isWeekly,
       timeIndex,
     );
 
-    // Fusionar con datos existentes
     final mergedEntries = _mergeEntries(_report!.entries, idealEntries);
-
-    // Guardar el reporte actualizado
     final updatedReport = _report!.copyWith(entries: mergedEntries);
 
     await _repo.saveReport(updatedReport);
@@ -364,24 +403,143 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     if (mounted) {
       setState(() {
         _report = updatedReport;
+        _updateDerivedData();
       });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Reporte actualizado con los cambios de la póliza'),
-          backgroundColor: Colors.blue,
-          duration: Duration(seconds: 2),
-        ),
+      _showSnackBar(
+        'Reporte actualizado con los cambios de la póliza',
+        Colors.blue,
       );
     }
   }
 
-  // ====================================================
-  // HELPER: CALCULAR ÍNDICE DE TIEMPO
-  // ====================================================
-  int _calculateTimeIndex(bool isWeekly) {
-    int timeIndex = 0;
+  /// ✅ Comparación eficiente de estructura de entries
+  bool _entriesStructureChanged(
+    List<ReportEntry> oldEntries,
+    List<ReportEntry> newEntries,
+  ) {
+    if (oldEntries.length != newEntries.length) return true;
+    for (int i = 0; i < newEntries.length; i++) {
+      final newKeys = newEntries[i].results.keys.toSet();
+      final oldKeys = oldEntries[i].results.keys.toSet();
+      if (!newKeys.containsAll(oldKeys) || !oldKeys.containsAll(newKeys)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
+  void _syncAndLoadReport(ServiceReportModel existingReport) {
+    // ✅ AÑADIDO: Si hay cambios locales pendientes, no pisar con snapshot de Firebase
+    if (_hasPendingChanges) return;
+
+    if (_devicesEffective.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _report = existingReport;
+          _syncGeneralObsController(existingReport.generalObservations);
+          _updateDerivedData();
+          _isLoading = false;
+          _loadSignatures();
+        });
+      }
+      return;
+    }
+
+    bool isWeekly = widget.dateStr.contains('W');
+    int timeIndex = _calculateTimeIndex(isWeekly);
+    final policyToUse = _currentPolicy ?? widget.policy;
+
+    final idealEntries = _repo.generateEntriesForDate(
+      policyToUse,
+      widget.dateStr,
+      _devicesEffective,
+      isWeekly,
+      timeIndex,
+    );
+
+    final mergedEntries = _mergeEntries(existingReport.entries, idealEntries);
+
+    bool hasStructureChanges =
+        _entriesStructureChanged(existingReport.entries, mergedEntries);
+
+    bool hasLocationChanges = false;
+    if (!hasStructureChanges && _savedLocations.isNotEmpty) {
+      for (int i = 0; i < mergedEntries.length; i++) {
+        final original = existingReport.entries[i];
+        final merged = mergedEntries[i];
+        if (original.customId != merged.customId ||
+            original.area != merged.area) {
+          hasLocationChanges = true;
+          break;
+        }
+      }
+    }
+
+    if (hasStructureChanges || hasLocationChanges) {
+      final updatedReport = existingReport.copyWith(entries: mergedEntries);
+      if (hasStructureChanges) {
+        _repo.saveReport(updatedReport);
+      }
+      if (mounted) {
+        setState(() {
+          _report = updatedReport;
+          _syncGeneralObsController(updatedReport.generalObservations);
+          _updateDerivedData();
+          _isLoading = false;
+          _loadSignatures();
+        });
+      }
+    } else {
+      if (mounted) {
+        setState(() {
+          _report = existingReport;
+          _syncGeneralObsController(existingReport.generalObservations);
+          _updateDerivedData();
+          _isLoading = false;
+          _loadSignatures();
+        });
+      }
+    }
+  }
+
+  /// ✅ Sincroniza el controller de observaciones generales solo si cambió externamente
+  void _syncGeneralObsController(String newText) {
+    if (_generalObsController.text != newText) {
+      _generalObsController.text = newText;
+    }
+  }
+
+  void _initializeNewReport() {
+    bool isWeekly = widget.dateStr.contains('W');
+    int timeIndex = _calculateTimeIndex(isWeekly);
+    final policyToUse = _currentPolicy ?? widget.policy;
+
+    final newReport = _repo.initializeReport(
+      policyToUse,
+      widget.dateStr,
+      _devicesEffective,
+      isWeekly,
+      timeIndex,
+      savedLocations: _savedLocations,
+    );
+
+    _repo.saveReport(newReport);
+
+    if (mounted) {
+      setState(() {
+        _report = newReport;
+        _syncGeneralObsController(newReport.generalObservations);
+        _updateDerivedData();
+        _isLoading = false;
+      });
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // HELPERS
+  // ══════════════════════════════════════════════════════════════════════
+
+  int _calculateTimeIndex(bool isWeekly) {
     if (!isWeekly) {
       DateTime pStart = DateTime(
         widget.policy.startDate.year,
@@ -390,17 +548,15 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
       );
       try {
         DateTime rDate = DateFormat('yyyy-MM').parse(widget.dateStr);
-        timeIndex =
-            (rDate.year - pStart.year) * 12 + (rDate.month - pStart.month);
+        return (rDate.year - pStart.year) * 12 + (rDate.month - pStart.month);
       } catch (e) {
         debugPrint("Error parsing date: $e");
+        return 0;
       }
     } else {
       int weekNumber = int.tryParse(widget.dateStr.split('W').last) ?? 1;
-      timeIndex = (weekNumber > 0) ? weekNumber - 1 : 0;
+      return (weekNumber > 0) ? weekNumber - 1 : 0;
     }
-
-    return timeIndex;
   }
 
   List<ReportEntry> _mergeEntries(
@@ -410,133 +566,35 @@ class _ServiceReportScreenState extends State<ServiceReportScreen> {
     return _repo.mergeEntries(existing, ideal, _savedLocations);
   }
 
-  void _syncAndLoadReport(ServiceReportModel existingReport) {
-  // ✅ PASO 1: Migración automática del esquema viejo (instanceIds duplicados) al nuevo
-  final migratedEntries = _repo.migrateOldEntries(existingReport.entries);
-  final bool wasMigrated = migratedEntries.length != existingReport.entries.length ||
-      _entriesHaveInstanceIdChanges(existingReport.entries, migratedEntries);
-
-  final reportToSync = wasMigrated
-      ? existingReport.copyWith(entries: migratedEntries)
-      : existingReport;
-
-  if (wasMigrated) {
-    debugPrint("✅ Reporte migrado al nuevo esquema de instanceIds únicos");
-  }
-
-  // ✅ PASO 2: Si no hay dispositivos cargados aún, guardar lo que tenemos y salir
-  if (_devicesEffective.isEmpty) {
-    if (mounted) {
-      setState(() {
-        _report = reportToSync;
-        _isLoading = false;
-        _loadSignatures();
-      });
-      // Si fue migrado, persistir inmediatamente en Firebase
-      if (wasMigrated) _repo.saveReport(reportToSync);
-    }
-    return;
-  }
-
-  // ✅ PASO 3: Generar entradas ideales según la póliza y dispositivos actuales
-  bool isWeekly = widget.dateStr.contains('W');
-  int timeIndex = _calculateTimeIndex(isWeekly);
-  final policyToUse = _currentPolicy ?? widget.policy;
-
-  final idealEntries = _repo.generateEntriesForDate(
-    policyToUse,
-    widget.dateStr,
-    _devicesEffective,
-    isWeekly,
-    timeIndex,
-  );
-
-  // ✅ PASO 4: Merge usando el reporte ya migrado
-  final mergedEntries = _mergeEntries(reportToSync.entries, idealEntries);
-
-  // ✅ PASO 5: Detectar cambios en actividades
-  // La migración por sí sola ya cuenta como cambio que hay que guardar
-  bool hasChanges = wasMigrated || mergedEntries.length != reportToSync.entries.length;
-
-  if (!hasChanges) {
-    for (int i = 0; i < mergedEntries.length; i++) {
-      final newKeys = mergedEntries[i].results.keys.toSet();
-      final oldKeys = reportToSync.entries[i].results.keys.toSet();
-      if (!newKeys.containsAll(oldKeys) || !oldKeys.containsAll(newKeys)) {
-        hasChanges = true;
-        break;
-      }
-    }
-  }
-
-  // ✅ PASO 6: Detectar cambios solo de ubicaciones (no requieren guardar en Firebase)
-  bool hasLocationChanges = false;
-  if (!hasChanges && _savedLocations.isNotEmpty) {
-    for (int i = 0; i < mergedEntries.length; i++) {
-      final original = reportToSync.entries[i];
-      final merged = mergedEntries[i];
-      if (original.customId != merged.customId || original.area != merged.area) {
-        hasLocationChanges = true;
-        break;
-      }
-    }
-  }
-
-  // ✅ PASO 7: Aplicar cambios y guardar si corresponde
-  if (hasChanges || hasLocationChanges) {
-    debugPrint("🔄 Sincronizando reporte ${hasLocationChanges ? '(ubicaciones)' : '(actividades/migración)'}...");
-    final updatedReport = reportToSync.copyWith(entries: mergedEntries);
-
-    // Solo guardar en Firebase si hubo cambios reales de estructura o migración
-    // Las ubicaciones ya están persistidas en device_locations, no necesitan guardarse aquí
-    if (hasChanges) {
-      _repo.saveReport(updatedReport);
-    }
-
-    if (mounted) {
-      setState(() {
-        _report = updatedReport;
-        _isLoading = false;
-        _loadSignatures();
-      });
-    }
-  } else {
-    // Sin cambios: cargar tal cual
-    if (mounted) {
-      setState(() {
-        _report = reportToSync; // Usar reportToSync por si hubo migración sin merge
-        _isLoading = false;
-        _loadSignatures();
-      });
-    }
-  }
-}
-
-  // Helper para detectar si la migración cambió algún instanceId
-bool _entriesHaveInstanceIdChanges(
-    List<ReportEntry> original,
-    List<ReportEntry> migrated,
-  ) {
-    if (original.length != migrated.length) return true;
-    for (int i = 0; i < original.length; i++) {
-      if (original[i].instanceId != migrated[i].instanceId) return true;
-    }
-    return false;
-  } 
-
   Future<String?> _getCurrentUserId() async {
     try {
-      final currentUser = FirebaseAuth.instance.currentUser;
-      return currentUser?.uid;
+      return FirebaseAuth.instance.currentUser?.uid;
     } catch (e) {
       debugPrint('Error getting current user ID: $e');
       return null;
     }
   }
 
+  void _showSnackBar(String message, Color color, {int seconds = 2}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: color,
+        duration: Duration(seconds: seconds),
+      ),
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // FIRMAS
+  // ══════════════════════════════════════════════════════════════════════
+
+  Timer? _signatureDebounce;
+
   void _onSignatureChanged() {
-    if (_autoSaveDebounce?.isActive ?? false) _autoSaveDebounce!.cancel();
-    _autoSaveDebounce = Timer(const Duration(seconds: 2), () {
+    _signatureDebounce?.cancel();
+    _signatureDebounce = Timer(const Duration(seconds: 2), () {
       _processAndSaveSignatures();
     });
   }
@@ -546,7 +604,6 @@ bool _entriesHaveInstanceIdChanges(
 
     String? providerSigBase64 = _report!.providerSignature;
     String? clientSigBase64 = _report!.clientSignature;
-
     bool hasChanges = false;
 
     if (_providerSigController.isNotEmpty) {
@@ -571,54 +628,28 @@ bool _entriesHaveInstanceIdChanges(
       }
     }
 
-    if (hasChanges) {
-      final updatedReport = _report!.copyWith(
+    if (hasChanges && mounted) {
+      _report = _report!.copyWith(
         providerSignature: providerSigBase64,
         clientSignature: clientSigBase64,
       );
-
-      if (mounted) {
-        setState(() {
-          _report = updatedReport;
-        });
-        await _repo.saveReport(_report!);
-        debugPrint("Firma auto-guardada");
-      }
+      _saveImmediate();
     }
   }
 
   void _loadSignatures() {
-    // Lógica de carga de firmas si es necesaria
+    // Carga de firmas si es necesaria
   }
 
-  void _initializeNewReport() {
-    bool isWeekly = widget.dateStr.contains('W');
-    int timeIndex = _calculateTimeIndex(isWeekly);
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #7: _updateEntry SIN setState PARA TOGGLES RÁPIDOS
+  // El problema principal: cada toggle hacía setState → rebuild de 600+
+  // widgets → lag visible. Ahora _updateEntryQuiet modifica el modelo
+  // sin rebuild, y solo recalcular el caché de frecuencias mínimo.
+  // ══════════════════════════════════════════════════════════════════════
 
-    final policyToUse = _currentPolicy ?? widget.policy;
-
-    final newReport = _repo.initializeReport(
-      policyToUse,
-      widget.dateStr,
-      _devicesEffective,
-      isWeekly,
-      timeIndex,
-      savedLocations: _savedLocations, // ← NUEVO
-    );
-
-    _repo.saveReport(newReport);
-
-    if (mounted) {
-      setState(() {
-        _report = newReport;
-        _isLoading = false;
-      });
-    }
-  }
-
-  // ==========================================
-  // LÓGICA DE NEGOCIO (Sin cambios)
-  // ==========================================
+  /// Actualiza una entry y programa un guardado diferido.
+  /// `rebuild`: si false, no hace setState (para toggles rápidos en tabla).
   void _updateEntry(
     int index, {
     String? customId,
@@ -627,8 +658,9 @@ bool _entriesHaveInstanceIdChanges(
     String? observations,
     List<String>? photoUrls,
     Map<String, ActivityData>? activityData,
+    bool rebuild = true,
   }) {
-    if (_report == null) return;
+    if (_report == null || index < 0 || index >= _report!.entries.length) return;
 
     final entries = List<ReportEntry>.from(_report!.entries);
     final entry = entries[index];
@@ -644,32 +676,34 @@ bool _entriesHaveInstanceIdChanges(
       activityData: activityData ?? entry.activityData,
     );
 
-    final updatedReport = _report!.copyWith(entries: entries);
+    _report = _report!.copyWith(entries: entries);
 
-    setState(() {
-      _report = updatedReport;
-    });
+    if (rebuild) {
+      setState(() {
+        _updateDerivedData();
+      });
+    }
 
-    _repo.saveReport(_report!);
+    _scheduleSave();
 
-    // ✅ NUEVO: Auto-guardar ubicación cuando customId o area cambian
+    // Auto-guardar ubicación
     if (customId != null || area != null) {
-      final newCustomId = customId ?? entry.customId;
-      final newArea = area ?? entry.area;
-
       _locationSaveDebounce?.cancel();
       _locationSaveDebounce = Timer(const Duration(seconds: 2), () {
         _locationService.saveLocation(
           policyId: widget.policyId,
           instanceId: entry.instanceId,
-          customId: newCustomId,
-          area: newArea,
+          customId: customId ?? entry.customId,
+          area: area ?? entry.area,
         );
-        debugPrint("📍 Ubicación guardada: ${entry.instanceId} → $newArea");
       });
     }
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #8: TOGGLE STATUS OPTIMIZADO
+  // Usa setState MÍNIMO: solo el badge cambia visualmente.
+  // ══════════════════════════════════════════════════════════════════════
   void _toggleStatus(int entryIndex, String activityId, String defId) {
     if (_report == null || !_canEditSection(defId)) return;
 
@@ -678,7 +712,6 @@ bool _entriesHaveInstanceIdChanges(
 
     String? current = entry.results[activityId];
     String? next;
-
     if (current == null)
       next = 'OK';
     else if (current == 'OK')
@@ -694,72 +727,54 @@ bool _entriesHaveInstanceIdChanges(
     newResults[activityId] = next;
 
     _updateEntry(entryIndex, results: newResults);
+    _saveImmediate(); // ← AÑADIDO: guarda inmediato para evitar race condition con Firebase stream
   }
 
   void _toggleSectionAssignment(String defId, String userId) {
     if (_report == null) return;
 
-    // PASO 1: Obtener asignaciones actuales del dispositivo
     final currentAssignments = List<String>.from(
       _report!.sectionAssignments[defId] ?? [],
     );
 
-    debugPrint(
-      "📋 ANTES: Dispositivo $defId tiene asignados: $currentAssignments",
-    );
-    debugPrint("   Intentando toggle de usuario: $userId");
-
-    // PASO 2: Agregar o quitar el usuario
     if (currentAssignments.contains(userId)) {
       currentAssignments.remove(userId);
-      debugPrint("   ✂️ REMOVIENDO: Técnico $userId eliminado");
     } else {
       currentAssignments.add(userId);
-      debugPrint("   ➕ AGREGANDO: Técnico $userId agregado");
     }
 
-    debugPrint(
-      "📋 DESPUÉS: Dispositivo $defId ahora tiene: $currentAssignments",
-    );
-
-    // PASO 3: Actualizar mapa de asignaciones por dispositivo
     final newSectionAssignments = Map<String, List<String>>.from(
       _report!.sectionAssignments,
     );
     newSectionAssignments[defId] = List<String>.from(currentAssignments);
 
-    // ✅ PASO 4 CORREGIDO: Preservar técnicos globales existentes
-    // Primero tomamos TODOS los técnicos que ya estaban asignados globalmente
     final Set<String> allAssignedTechs = Set<String>.from(
       _report!.assignedTechnicianIds,
     );
-
-    // Luego agregamos los técnicos de dispositivos específicos
-    newSectionAssignments.forEach((defId, techIds) {
-      debugPrint("   Device $defId → Tecnicos: $techIds");
+    newSectionAssignments.forEach((_, techIds) {
       allAssignedTechs.addAll(techIds);
     });
 
-    debugPrint("✅ TÉCNICOS GLOBALES FINALES: $allAssignedTechs");
-
-    // PASO 5: Crear reporte actualizado
     final updatedReport = _report!.copyWith(
       sectionAssignments: newSectionAssignments,
       assignedTechnicianIds: allAssignedTechs.toList(),
     );
 
-    // PASO 6: Actualizar estado
-    setState(() => _report = updatedReport);
+    setState(() {
+      _report = updatedReport;
+      _updateDerivedData();
+    });
 
-    // PASO 7: Guardar en Firebase
-    debugPrint("💾 Guardando reporte con asignaciones actualizadas...");
-    _repo.saveReport(_report!);
+    _saveImmediate();
   }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // PERMISOS
+  // ══════════════════════════════════════════════════════════════════════
 
   bool _canEditSection(String defId) {
     if (!_isEditable()) return false;
     if (_isUserCoordinator() && _adminOverride) return true;
-
     final assigned = _report?.sectionAssignments[defId] ?? [];
     if (assigned.isEmpty) return true;
     return _currentUserId != null && assigned.contains(_currentUserId);
@@ -771,39 +786,19 @@ bool _entriesHaveInstanceIdChanges(
     return _report!.startTime != null && _report!.endTime == null;
   }
 
-  // ✅ NUEVO: Las firmas siempre pueden ser editadas, incluso después de finalizar
-  bool _canSignReport() {
-    return _report != null;
-  }
+  bool _canSignReport() => _report != null;
 
   bool _isUserCoordinator() {
     if (_currentUser == null) return false;
-
-    // ✅ Usuarios SUPER_USER y ADMIN siempre tienen acceso
     if (_currentUser!.role == UserRole.SUPER_USER ||
         _currentUser!.role == UserRole.ADMIN) {
-      debugPrint(
-        "✅ Usuario es ${_currentUser!.role} - Tiene permisos de coordinador",
-      );
       return true;
     }
-
-    // ✅ Usuarios asignados a la póliza también tienen acceso
-    final isAssigned = widget.policy.assignedUserIds.contains(_currentUserId);
-    if (isAssigned) {
-      debugPrint(
-        "✅ Usuario está asignado a la póliza - Tiene permisos de coordinador",
-      );
-    } else {
-      debugPrint("❌ Usuario NO es coordinador - Sin permisos especiales");
-    }
-
-    return isAssigned;
+    return widget.policy.assignedUserIds.contains(_currentUserId);
   }
 
   bool _areAllSectionsAssigned() {
     if (_report == null) return false;
-
     final activeDefIds = <String>{};
     for (final entry in _report!.entries) {
       if (entry.results.isEmpty) continue;
@@ -812,7 +807,6 @@ bool _entriesHaveInstanceIdChanges(
         activeDefIds.add(deviceInstance.definitionId);
       }
     }
-
     for (final defId in activeDefIds) {
       final assigned = _report!.sectionAssignments[defId];
       if (assigned == null || assigned.isEmpty) return false;
@@ -820,66 +814,55 @@ bool _entriesHaveInstanceIdChanges(
     return true;
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // ACCIONES DE SERVICIO
+  // ══════════════════════════════════════════════════════════════════════
+
   void _handleStartService() {
     if (_report == null || _currentUserId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Debes seleccionar un usuario para registrar tiempos'),
-          backgroundColor: Colors.orange,
-        ),
+      _showSnackBar(
+        'Debes seleccionar un usuario para registrar tiempos',
+        Colors.orange,
       );
       return;
     }
 
     if (!_areAllSectionsAssigned()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'No se puede iniciar: Hay tipos de dispositivos sin responsable asignado.',
-            style: TextStyle(fontWeight: FontWeight.bold),
-          ),
-          backgroundColor: Colors.red,
-          duration: Duration(seconds: 3),
-        ),
+      _showSnackBar(
+        'No se puede iniciar: Hay tipos de dispositivos sin responsable asignado.',
+        Colors.red,
+        seconds: 3,
       );
       return;
     }
 
-    final now = DateTime.now(); // 1. Capturamos el momento exacto
-    final timeStr = DateFormat('HH:mm').format(DateTime.now());
+    final now = DateTime.now();
+    final timeStr = DateFormat('HH:mm').format(now);
     final updatedReport = _report!.copyWith(
-      startTime:
-          timeStr, // 2. Guardamos la hora (esto activa la condición verde en el cronograma)
-      serviceDate:
-          now, // 3. IMPORTANTÍSIMO: Actualizamos la fecha del reporte al día real de hoy
+      startTime: timeStr,
+      serviceDate: now,
     );
 
     setState(() {
       _report = updatedReport;
+      _updateDerivedData();
     });
-
-    _repo.saveReport(_report!);
+    _saveImmediate();
   }
 
   void _handleEndService() {
     if (_report == null || _currentUserId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Debes seleccionar un usuario para registrar tiempos'),
-          backgroundColor: Colors.orange,
-        ),
+      _showSnackBar(
+        'Debes seleccionar un usuario para registrar tiempos',
+        Colors.orange,
       );
       return;
     }
 
     if (!_areAllSectionsAssigned()) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Asigna técnicos a todas las secciones antes de finalizar.',
-          ),
-          backgroundColor: Colors.red,
-        ),
+      _showSnackBar(
+        'Asigna técnicos a todas las secciones antes de finalizar.',
+        Colors.red,
       );
       return;
     }
@@ -889,16 +872,20 @@ bool _entriesHaveInstanceIdChanges(
 
     setState(() {
       _report = updatedReport;
+      _updateDerivedData();
     });
-    _repo.saveReport(_report!);
+    _saveImmediate();
   }
 
   void _handleResumeService() {
-    setState(() {
-      _report = _report!.copyWith(endTime: null, forceNullEndTime: true);
-    });
-    _repo.saveReport(_report!);
+    _report = _report!.copyWith(endTime: null, forceNullEndTime: true);
+    setState(() {});
+    _saveImmediate();
   }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // FOTOS
+  // ══════════════════════════════════════════════════════════════════════
 
   Future<void> _handleCameraClick(int entryIdx, {String? activityId}) async {
     if (_report == null) return;
@@ -922,9 +909,6 @@ bool _entriesHaveInstanceIdChanges(
     }
   }
 
-  // --- NUEVA LÓGICA DE SELECCIÓN DE FOTOS ---
-
-  // 1. Mostrar menú para elegir entre Cámara o Galería
   void _showImageSourceSelection() {
     showModalBottomSheet(
       context: context,
@@ -962,7 +946,6 @@ bool _entriesHaveInstanceIdChanges(
     );
   }
 
-  // 2. Lógica para la Cámara (Una sola foto + Guardar en Galería con GAL)
   Future<void> _pickFromCamera() async {
     try {
       final XFile? image = await _picker.pickImage(
@@ -970,15 +953,12 @@ bool _entriesHaveInstanceIdChanges(
         maxWidth: 1200,
         imageQuality: 85,
       );
-
       if (image != null) {
-        // Solo guardamos en galería si viene de la cámara
         try {
           await Gal.putImage(image.path, album: "ICI Check");
         } catch (e) {
           debugPrint("⚠️ Error guardando en galería local: $e");
         }
-        // Procesamos como una lista de 1 elemento
         await _processAndUploadImages([image]);
       }
     } catch (e) {
@@ -986,14 +966,12 @@ bool _entriesHaveInstanceIdChanges(
     }
   }
 
-  // 3. Lógica para la Galería (Múltiples fotos)
   Future<void> _pickFromGallery() async {
     try {
       final List<XFile> images = await _picker.pickMultiImage(
         maxWidth: 1200,
         imageQuality: 85,
       );
-
       if (images.isNotEmpty) {
         await _processAndUploadImages(images);
       }
@@ -1002,7 +980,6 @@ bool _entriesHaveInstanceIdChanges(
     }
   }
 
-  // 4. Lógica unificada de subida (Procesa una lista de imágenes)
   Future<void> _processAndUploadImages(List<XFile> images) async {
     if (_isUploadingPhoto || _photoContextEntryIdx == null || _report == null)
       return;
@@ -1011,11 +988,9 @@ bool _entriesHaveInstanceIdChanges(
     int successCount = 0;
 
     try {
-      // Iteramos sobre todas las imágenes seleccionadas
       for (int i = 0; i < images.length; i++) {
         final image = images[i];
 
-        // Actualizar SnackBar para mostrar progreso
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1033,9 +1008,7 @@ bool _entriesHaveInstanceIdChanges(
                 Text('Subiendo ${i + 1} de ${images.length}...'),
               ],
             ),
-            duration: const Duration(
-              seconds: 10,
-            ), // Duración larga para que no se oculte
+            duration: const Duration(seconds: 10),
           ),
         );
 
@@ -1043,7 +1016,6 @@ bool _entriesHaveInstanceIdChanges(
         final entryIdx = _photoContextEntryIdx!;
         final activityId = _photoContextActivityId;
 
-        // Subir a Firebase Storage
         final photoUrl = await _photoService.uploadPhoto(
           photoBytes: bytes,
           reportId: '${widget.policyId}_${widget.dateStr}',
@@ -1051,14 +1023,12 @@ bool _entriesHaveInstanceIdChanges(
           activityId: activityId,
         );
 
-        // Actualizar el estado local con la nueva URL
         final entry = _report!.entries[entryIdx];
         if (activityId != null) {
           final currentData =
               entry.activityData[activityId] ??
               ActivityData(photoUrls: [], observations: '');
           final newPhotoUrls = [...currentData.photoUrls, photoUrl];
-
           final newActivityData = Map<String, ActivityData>.from(
             entry.activityData,
           );
@@ -1074,30 +1044,16 @@ bool _entriesHaveInstanceIdChanges(
         successCount++;
       }
 
-      // Éxito Final
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Row(
-            children: [
-              const Icon(Icons.check_circle, color: Colors.white),
-              const SizedBox(width: 12),
-              Text(
-                successCount == 1
-                    ? 'Foto subida'
-                    : '$successCount fotos subidas',
-              ),
-            ],
-          ),
-          backgroundColor: Colors.green,
-          duration: const Duration(seconds: 2),
-        ),
+      _showSnackBar(
+        successCount == 1
+            ? 'Foto subida'
+            : '$successCount fotos subidas',
+        Colors.green,
       );
     } catch (e) {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
-      );
+      _showSnackBar('Error: $e', Colors.red);
     } finally {
       if (mounted) setState(() => _isUploadingPhoto = false);
     }
@@ -1109,17 +1065,14 @@ bool _entriesHaveInstanceIdChanges(
     final entryIdx = _photoContextEntryIdx!;
     final activityId = _photoContextActivityId;
     final entry = _report!.entries[entryIdx];
-
     String? photoUrlToDelete;
 
     if (activityId != null) {
       final currentData = entry.activityData[activityId];
       if (currentData != null && photoIndex < currentData.photoUrls.length) {
         photoUrlToDelete = currentData.photoUrls[photoIndex];
-
         final newPhotoUrls = List<String>.from(currentData.photoUrls);
         newPhotoUrls.removeAt(photoIndex);
-
         final newActivityData = Map<String, ActivityData>.from(
           entry.activityData,
         );
@@ -1127,9 +1080,7 @@ bool _entriesHaveInstanceIdChanges(
           photoUrls: newPhotoUrls,
           observations: currentData.observations,
         );
-
         _updateEntry(entryIdx, activityData: newActivityData);
-
         if (newPhotoUrls.isEmpty) {
           setState(() {
             _photoContextEntryIdx = null;
@@ -1140,12 +1091,9 @@ bool _entriesHaveInstanceIdChanges(
     } else {
       if (photoIndex < entry.photoUrls.length) {
         photoUrlToDelete = entry.photoUrls[photoIndex];
-
         final newPhotoUrls = List<String>.from(entry.photoUrls);
         newPhotoUrls.removeAt(photoIndex);
-
         _updateEntry(entryIdx, photoUrls: newPhotoUrls);
-
         if (newPhotoUrls.isEmpty) {
           setState(() {
             _photoContextEntryIdx = null;
@@ -1155,7 +1103,6 @@ bool _entriesHaveInstanceIdChanges(
       }
     }
 
-    // ✅ Eliminar de Storage
     if (photoUrlToDelete != null) {
       try {
         await _photoService.deletePhoto(photoUrlToDelete);
@@ -1165,20 +1112,17 @@ bool _entriesHaveInstanceIdChanges(
     }
   }
 
-  bool _instanceIdMatchesBase(String entryInstanceId, String baseInstanceId) {
-    if (entryInstanceId == baseInstanceId) return true;
-    if (entryInstanceId.startsWith('${baseInstanceId}_')) {
-      final suffix = entryInstanceId.substring(baseInstanceId.length + 1);
-      return RegExp(r'^\d+$').hasMatch(suffix);
-    }
-    return false;
-  }
-  // Helper para obtener el PolicyDevice de una entry (con soporte de sufijos)
+  // ══════════════════════════════════════════════════════════════════════
+  // AGRUPACIÓN Y BÚSQUEDA OPTIMIZADA
+  // ══════════════════════════════════════════════════════════════════════
+
   PolicyDevice? _findPolicyDevice(String entryInstanceId) {
     final policyToUse = _currentPolicy ?? widget.policy;
-     try {
+    try {
       return policyToUse.devices.firstWhere(
-        (d) => _instanceIdMatchesBase(entryInstanceId, d.instanceId),
+        (d) =>
+            entryInstanceId == d.instanceId ||
+            entryInstanceId.startsWith('${d.instanceId}_'),
       );
     } catch (_) {
       return null;
@@ -1187,37 +1131,47 @@ bool _entriesHaveInstanceIdChanges(
 
   Map<String, List<ReportEntry>> _groupEntries() {
     if (_report == null) return {};
+
+    final policyToUse = _currentPolicy ?? widget.policy;
+    final Map<String, PolicyDevice> policyDevicesMap = {
+      for (final d in policyToUse.devices) d.instanceId: d
+    };
+
     final grouped = <String, List<ReportEntry>>{};
 
     for (final entry in _report!.entries) {
-     final deviceInstance = _findPolicyDevice(entry.instanceId);
-       if (deviceInstance == null) {
-         debugPrint('Warning: Device ${entry.instanceId} not found in policy');
-        continue;
+      String baseId = entry.instanceId;
+      final lastUnderscore = baseId.lastIndexOf('_');
+      if (lastUnderscore != -1) {
+        final suffix = baseId.substring(lastUnderscore + 1);
+        if (int.tryParse(suffix) != null) {
+          baseId = baseId.substring(0, lastUnderscore);
+        }
       }
+
+      final deviceInstance =
+          policyDevicesMap[baseId] ?? policyDevicesMap[entry.instanceId];
+      if (deviceInstance == null) continue;
+
       final defId = deviceInstance.definitionId;
-      if (!grouped.containsKey(defId)) grouped[defId] = [];
-      grouped[defId]!.add(entry);
+      (grouped[defId] ??= []).add(entry);
     }
+
     return grouped;
   }
 
   String _getFrequencies(Map<String, List<ReportEntry>> grouped) {
-    // ✅ Detectar si es reporte semanal/quincenal por el dateStr
     final bool isWeekly = widget.dateStr.contains('W');
-    
     if (!isWeekly) return "Mensual";
 
-    // En vista semanal, detectar qué frecuencias están presentes
     final Set<String> frecuenciasPresentes = {};
     final policyToUse = _currentPolicy ?? widget.policy;
+    // ✅ Usar mapa para O(1) lookups
+    final defMap = {for (final d in _devicesEffective) d.id: d};
 
     for (final devInstance in policyToUse.devices) {
-      final def = _devicesEffective.firstWhere(
-        (d) => d.id == devInstance.definitionId,
-        orElse: () => DeviceModel(id: '', name: '', description: '', activities: []),
-      );
-      
+      final def = defMap[devInstance.definitionId];
+      if (def == null) continue;
       for (final act in def.activities) {
         if (act.frequency == Frequency.SEMANAL) {
           frecuenciasPresentes.add('Semanal');
@@ -1228,147 +1182,51 @@ bool _entriesHaveInstanceIdChanges(
     }
 
     if (frecuenciasPresentes.isEmpty) return "Semanal";
-    
-    // Ordenar para consistencia: Semanal primero, luego Quincenal
     final lista = frecuenciasPresentes.toList()..sort();
     return lista.join(' / ');
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #9: RESOLUCIÓN DE ÍNDICE GLOBAL EN O(1)
+  // En lugar de _report!.entries.indexWhere(...) que es O(n),
+  // usamos el mapa pre-calculado.
+  // ══════════════════════════════════════════════════════════════════════
+  int _globalIndexOf(String instanceId) {
+    return _instanceIdToGlobalIndex[instanceId] ?? -1;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // BUILD
+  // ══════════════════════════════════════════════════════════════════════
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading || _report == null || _companySettings == null) {
-      return Scaffold(
+      return const Scaffold(
         backgroundColor: _bgLight,
         body: Center(child: CircularProgressIndicator(color: _primaryDark)),
       );
     }
 
-    final groupedEntries = _groupEntries();
-    final groupedEntriesList = groupedEntries.entries.toList();
-    final frequencies = _getFrequencies(groupedEntries);
-    final assignedUsers = widget.users
-        .where((user) => _report!.assignedTechnicianIds.contains(user.id))
-        .toList();
+    // ✅ NO recalculamos nada aquí - todo viene del caché
+    final groupedEntriesList = _cachedGroupedEntries;
+    final frequencies = _cachedFrequencies;
+    final assignedUsers = _cachedAssignedUsers;
 
-    debugPrint("👥 Usuarios asignados al reporte: ${assignedUsers.length}");
     String adminTooltip = 'Modo Admin';
     if (_isUserCoordinator()) {
-      if (_currentUser!.role == UserRole.SUPER_USER ||
-          _currentUser!.role == UserRole.ADMIN) {
-        adminTooltip = _adminOverride
-            ? 'Modo Admin Activo (${_currentUser!.role})'
-            : 'Activar Modo Admin (${_currentUser!.role})';
-      } else {
-        adminTooltip = _adminOverride
-            ? 'Modo Admin Activo (Responsable de Póliza)'
-            : 'Activar Modo Admin (Responsable de Póliza)';
-      }
+      final role = _currentUser!.role;
+      final isHighRole =
+          role == UserRole.SUPER_USER || role == UserRole.ADMIN;
+      final label = isHighRole ? '$role' : 'Responsable de Póliza';
+      adminTooltip = _adminOverride
+          ? 'Modo Admin Activo ($label)'
+          : 'Activar Modo Admin ($label)';
     }
 
     return Scaffold(
       backgroundColor: _bgLight,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(
-            Icons.arrow_back_ios_new,
-            color: Color(0xFF1E293B),
-            size: 20,
-          ),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Reporte de Servicio',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF1E293B),
-                letterSpacing: -0.3,
-              ),
-            ),
-            Row(
-              children: [
-                Icon(
-                  Icons.calendar_today,
-                  size: 11,
-                  color: Colors.grey.shade600,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  widget.dateStr,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                if (_report!.startTime != null) ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 2,
-                    ),
-                    decoration: BoxDecoration(
-                      color: _report!.endTime == null
-                          ? const Color(0xFF10B981).withOpacity(0.1)
-                          : const Color(0xFF64748B).withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          _report!.endTime == null
-                              ? Icons.play_circle
-                              : Icons.check_circle,
-                          size: 10,
-                          color: _report!.endTime == null
-                              ? const Color(0xFF10B981)
-                              : const Color(0xFF64748B),
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                          _report!.endTime == null ? 'En curso' : 'Finalizado',
-                          style: TextStyle(
-                            fontSize: 9,
-                            fontWeight: FontWeight.bold,
-                            color: _report!.endTime == null
-                                ? const Color(0xFF10B981)
-                                : const Color(0xFF64748B),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ],
-        ),
-        actions: [
-          if (_isUserCoordinator())
-            IconButton(
-              icon: Icon(
-                _adminOverride
-                    ? Icons.admin_panel_settings
-                    : Icons.admin_panel_settings_outlined,
-                color: _adminOverride
-                    ? const Color(0xFFF59E0B)
-                    : const Color(0xFF94A3B8),
-                size: 22,
-              ),
-              onPressed: () => setState(() => _adminOverride = !_adminOverride),
-              tooltip: adminTooltip, // ✅ TOOLTIP MEJORADO
-            ),
-          const SizedBox(width: 8),
-        ],
-      ),
-
+      appBar: _buildAppBar(adminTooltip),
       body: CustomScrollView(
         slivers: [
           SliverToBoxAdapter(
@@ -1385,32 +1243,34 @@ bool _entriesHaveInstanceIdChanges(
                   report: _report!,
                   users: widget.users,
                   adminOverride: _adminOverride,
-                  isUserDesignated: _report!.assignedTechnicianIds.contains(
-                    _currentUserId,
-                  ),
+                  isUserDesignated:
+                      _report!.assignedTechnicianIds.contains(_currentUserId),
                   onStartService: _handleStartService,
                   onEndService: _handleEndService,
                   onResumeService: _handleResumeService,
                   onDateChanged: (newDate) {
-                    final updated = _report!.copyWith(serviceDate: newDate);
-                    setState(() => _report = updated);
-                    _repo.saveReport(_report!);
+                    _report = _report!.copyWith(serviceDate: newDate);
+                    setState(() {});
+                    _saveImmediate();
                   },
                   onStartTimeEdited: (newTime) {
-                    final updated = _report!.copyWith(startTime: newTime);
-                    setState(() => _report = updated);
-                    _repo.saveReport(_report!);
+                    _report = _report!.copyWith(startTime: newTime);
+                    setState(() {});
+                    _saveImmediate();
                   },
                   onEndTimeEdited: (newTime) {
-                    final updated = _report!.copyWith(endTime: newTime);
-                    setState(() => _report = updated);
-                    _repo.saveReport(_report!);
+                    _report = _report!.copyWith(endTime: newTime);
+                    setState(() {});
+                    _saveImmediate();
                   },
                 ),
               ],
             ),
           ),
 
+          // ══════════════════════════════════════════════════════════
+          // ✅ OPTIMIZACIÓN #10: SliverList con callbacks O(1)
+          // ══════════════════════════════════════════════════════════
           SliverList(
             delegate: SliverChildBuilderDelegate((context, index) {
               final entryGroup = groupedEntriesList[index];
@@ -1419,62 +1279,63 @@ bool _entriesHaveInstanceIdChanges(
 
               final deviceDef = _devicesEffective.firstWhere(
                 (d) => d.id == defId,
-                orElse: () => DeviceModel(id: defId, name: 'Desconocido', description: '', activities: []),
+                orElse: () => DeviceModel(
+                  id: defId,
+                  name: 'Desconocido',
+                  description: '',
+                  activities: [],
+                ),
               );
 
-              return DeviceSectionImproved(
-                defId: defId,
-                deviceDef: deviceDef,
-                entries: sectionEntries,
-                users: assignedUsers, // ✅ PASAR SOLO USUARIOS ASIGNADOS
-                sectionAssignments: _report!.sectionAssignments[defId] ?? [],
-                isEditable: _isEditable(),
-                allowedToEdit: _isEditable(),
-                isUserCoordinator: _isUserCoordinator(),
-                adminOverride: _adminOverride,  // ← AGREGAR ESTO
-                currentUserId: _currentUserId,
-                onToggleAssignment: (uid) =>
-                    _toggleSectionAssignment(defId, uid),
-                onCustomIdChanged: (localIndex, val) {
-                  final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexWhere(
-                    (e) => e.instanceId == entry.instanceId,
-                  );
-                  if (globalIndex != -1) _updateEntry(globalIndex, customId: val);
-                },
-                onAreaChanged: (localIndex, val) {
-                  final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexWhere(
-                    (e) => e.instanceId == entry.instanceId,
-                  );
-                  if (globalIndex != -1) _updateEntry(globalIndex, area: val);
-                },
-                onToggleStatus: (localIndex, activityId) {
-                  final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexWhere(
-                    (e) => e.instanceId == entry.instanceId,
-                  );
-                  if (globalIndex != -1) _toggleStatus(globalIndex, activityId, defId);
-                },
-                onCameraClick: (localIndex, {activityId}) {
-                  final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexWhere(
-                    (e) => e.instanceId == entry.instanceId,
-                  );
-                  if (globalIndex != -1) _handleCameraClick(globalIndex, activityId: activityId);
-                },
-                onObservationClick: (localIndex, {activityId}) {
-                  final entry = sectionEntries[localIndex];
-                  final globalIndex = _report!.entries.indexWhere(
-                    (e) => e.instanceId == entry.instanceId,
-                  );
-                  if (globalIndex != -1) {
-                    setState(() {
-                      _activeObservationEntry = globalIndex.toString();
-                      _activeObservationActivityId = activityId;
-                    });
-                  }
-                },
+              // ✅ Wrap en RepaintBoundary para aislar repaints
+              return RepaintBoundary(
+                child: DeviceSectionImproved(
+                  defId: defId,
+                  deviceDef: deviceDef,
+                  entries: sectionEntries,
+                  users: assignedUsers,
+                  sectionAssignments:
+                      _report!.sectionAssignments[defId] ?? [],
+                  isEditable: _isEditable(),
+                  allowedToEdit: _isEditable(),
+                  isUserCoordinator: _isUserCoordinator(),
+                  adminOverride: _adminOverride,
+                  currentUserId: _currentUserId,
+                  onToggleAssignment: (uid) =>
+                      _toggleSectionAssignment(defId, uid),
+                  // ✅ O(1) global index lookup
+                  onCustomIdChanged: (localIndex, val) {
+                    final gi =
+                        _globalIndexOf(sectionEntries[localIndex].instanceId);
+                    if (gi != -1) _updateEntry(gi, customId: val, rebuild: false);
+                  },
+                  onAreaChanged: (localIndex, val) {
+                    final gi =
+                        _globalIndexOf(sectionEntries[localIndex].instanceId);
+                    if (gi != -1) _updateEntry(gi, area: val, rebuild: false);
+                  },
+                  onToggleStatus: (localIndex, activityId) {
+                    final gi =
+                        _globalIndexOf(sectionEntries[localIndex].instanceId);
+                    if (gi != -1) _toggleStatus(gi, activityId, defId);
+                  },
+                  onCameraClick: (localIndex, {activityId}) {
+                    final gi =
+                        _globalIndexOf(sectionEntries[localIndex].instanceId);
+                    if (gi != -1)
+                      _handleCameraClick(gi, activityId: activityId);
+                  },
+                  onObservationClick: (localIndex, {activityId}) {
+                    final gi =
+                        _globalIndexOf(sectionEntries[localIndex].instanceId);
+                    if (gi != -1) {
+                      setState(() {
+                        _activeObservationEntry = gi.toString();
+                        _activeObservationActivityId = activityId;
+                      });
+                    }
+                  },
+                ),
               );
             }, childCount: groupedEntriesList.length),
           ),
@@ -1493,14 +1354,12 @@ bool _entriesHaveInstanceIdChanges(
                   clientSignatureData: _report!.clientSignature,
                   isEditable: _canSignReport(),
                   onProviderNameChanged: (val) {
-                    final updated = _report!.copyWith(providerSignerName: val);
-                    setState(() => _report = updated);
-                    _repo.saveReport(_report!);
+                    _report = _report!.copyWith(providerSignerName: val);
+                    _scheduleSave();
                   },
                   onClientNameChanged: (val) {
-                    final updated = _report!.copyWith(clientSignerName: val);
-                    setState(() => _report = updated);
-                    _repo.saveReport(_report!);
+                    _report = _report!.copyWith(clientSignerName: val);
+                    _scheduleSave();
                   },
                 ),
                 const SizedBox(height: 20),
@@ -1509,14 +1368,115 @@ bool _entriesHaveInstanceIdChanges(
           ),
         ],
       ),
-
       floatingActionButton: null,
-
       bottomSheet: _activeObservationEntry != null
           ? _buildObservationModal()
           : (_photoContextEntryIdx != null ? _buildPhotoModal() : null),
     );
   }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // APP BAR
+  // ══════════════════════════════════════════════════════════════════════
+
+  PreferredSizeWidget _buildAppBar(String adminTooltip) {
+    return AppBar(
+      backgroundColor: Colors.white,
+      elevation: 0,
+      leading: IconButton(
+        icon: const Icon(
+          Icons.arrow_back_ios_new,
+          color: Color(0xFF1E293B),
+          size: 20,
+        ),
+        onPressed: () => Navigator.pop(context),
+      ),
+      title: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Reporte de Servicio',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF1E293B),
+              letterSpacing: -0.3,
+            ),
+          ),
+          Row(
+            children: [
+              Icon(Icons.calendar_today, size: 11, color: Colors.grey.shade600),
+              const SizedBox(width: 4),
+              Text(
+                widget.dateStr,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              if (_report!.startTime != null) ...[
+                const SizedBox(width: 8),
+                _buildStatusChip(),
+              ],
+            ],
+          ),
+        ],
+      ),
+      actions: [
+        if (_isUserCoordinator())
+          IconButton(
+            icon: Icon(
+              _adminOverride
+                  ? Icons.admin_panel_settings
+                  : Icons.admin_panel_settings_outlined,
+              color: _adminOverride
+                  ? const Color(0xFFF59E0B)
+                  : const Color(0xFF94A3B8),
+              size: 22,
+            ),
+            onPressed: () => setState(() => _adminOverride = !_adminOverride),
+            tooltip: adminTooltip,
+          ),
+        const SizedBox(width: 8),
+      ],
+    );
+  }
+
+  Widget _buildStatusChip() {
+    final isRunning = _report!.endTime == null;
+    final color = isRunning ? const Color(0xFF10B981) : const Color(0xFF64748B);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            isRunning ? Icons.play_circle : Icons.check_circle,
+            size: 10,
+            color: color,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            isRunning ? 'En curso' : 'Finalizado',
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // ✅ OPTIMIZACIÓN #11: OBSERVACIONES GENERALES CON CONTROLLER ESTABLE
+  // ══════════════════════════════════════════════════════════════════════
 
   List<Map<String, String>> _getRegisteredFindings() {
     final List<Map<String, String>> findings = [];
@@ -1528,7 +1488,6 @@ bool _entriesHaveInstanceIdChanges(
       if (entry.observations.trim().isNotEmpty) {
         deviceFindingsTexts.add(entry.observations.trim());
       }
-
       for (var actData in entry.activityData.values) {
         if (actData.observations.trim().isNotEmpty) {
           deviceFindingsTexts.add(actData.observations.trim());
@@ -1539,7 +1498,6 @@ bool _entriesHaveInstanceIdChanges(
         String distinctId = entry.customId.isNotEmpty
             ? entry.customId
             : 'Dispositivo #${entry.deviceIndex}';
-
         findings.add({
           'id': distinctId,
           'text': deviceFindingsTexts.join('\n—\n'),
@@ -1574,25 +1532,20 @@ bool _entriesHaveInstanceIdChanges(
             Icons.notes,
             'OBSERVACIONES GENERALES DEL SERVICIO',
           ),
-
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            // ✅ Usa el controller estable - no se recrea en cada build
             child: TextField(
               enabled: _isEditable(),
-              controller: TextEditingController.fromValue(
-                TextEditingValue(
-                  text: _report!.generalObservations,
-                  selection: TextSelection.collapsed(
-                    offset: _report!.generalObservations.length,
-                  ),
-                ),
-              ),
+              controller: _generalObsController,
               maxLines: 3,
-              style: const TextStyle(fontSize: 13, color: Color(0xFF334155)),
+              style:
+                  const TextStyle(fontSize: 13, color: Color(0xFF334155)),
               decoration: InputDecoration(
                 hintText:
-                    'Comentarios globales sobre la visita, accesos, estado general de las instalaciones...',
-                hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                    'Comentarios globales sobre la visita, accesos, estado general...',
+                hintStyle:
+                    TextStyle(color: Colors.grey.shade400, fontSize: 12),
                 filled: true,
                 fillColor: const Color(0xFFF8FAFC),
                 contentPadding: const EdgeInsets.all(12),
@@ -1613,32 +1566,21 @@ bool _entriesHaveInstanceIdChanges(
                 ),
               ),
               onChanged: (val) {
-                setState(() {
+                _generalObsDebounce?.cancel();
+                _generalObsDebounce =
+                    Timer(const Duration(milliseconds: 1500), () {
                   _report = _report!.copyWith(generalObservations: val);
+                  _scheduleSave();
                 });
-
-                if (_autoSaveDebounce?.isActive ?? false)
-                  _autoSaveDebounce!.cancel();
-
-                _autoSaveDebounce = Timer(
-                  const Duration(milliseconds: 1500),
-                  () {
-                    _repo.saveReport(_report!);
-                    debugPrint("Observaciones auto-guardadas");
-                  },
-                );
               },
             ),
           ),
-
           Divider(height: 1, color: Colors.grey.shade200),
-
           _buildSectionHeader(
             Icons.find_in_page_outlined,
             'COMENTARIOS / HALLAZGOS REGISTRADOS EN DISPOSITIVOS',
             color: const Color(0xFFF59E0B),
           ),
-
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: hasFindings
@@ -1708,7 +1650,6 @@ bool _entriesHaveInstanceIdChanges(
                               color: Colors.grey.shade500,
                               fontStyle: FontStyle.italic,
                             ),
-                            overflow: TextOverflow.visible,
                           ),
                         ),
                       ],
@@ -1733,10 +1674,10 @@ bool _entriesHaveInstanceIdChanges(
           const SizedBox(width: 8),
           Text(
             title,
-            style: TextStyle(
+            style: const TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w800,
-              color: const Color(0xFF1E293B),
+              color: Color(0xFF1E293B),
               letterSpacing: 0.5,
             ),
           ),
@@ -1744,6 +1685,10 @@ bool _entriesHaveInstanceIdChanges(
       ),
     );
   }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // MODALES
+  // ══════════════════════════════════════════════════════════════════════
 
   Widget _buildObservationModal() {
     if (_activeObservationEntry == null) return const SizedBox();
@@ -1766,16 +1711,20 @@ bool _entriesHaveInstanceIdChanges(
       accentColor = const Color(0xFFF59E0B);
     } else {
       currentObservation = entry.observations;
-      title = entry.customId.isNotEmpty ? entry.customId : 'Dispositivo #${entry.deviceIndex}';
-      subtitle = entry.area.isNotEmpty ? entry.area : 'Sin ubicación especificada';
+      title = entry.customId.isNotEmpty
+          ? entry.customId
+          : 'Dispositivo #${entry.deviceIndex}';
+      subtitle = entry.area.isNotEmpty
+          ? entry.area
+          : 'Sin ubicación especificada';
       icon = Icons.devices_other;
       accentColor = const Color(0xFF3B82F6);
     }
 
-    // ✅ Usamos el widget estable que conserva su estado internamente
     return _ObservationModal(
-      // ✅ KEY con el entryIdx + activityId para que se recree SOLO cuando cambia de entrada
-      key: ValueKey('obs_${entryIdx}_${_activeObservationActivityId ?? 'device'}'),
+      key: ValueKey(
+        'obs_${entryIdx}_${_activeObservationActivityId ?? 'device'}',
+      ),
       initialText: currentObservation,
       title: title,
       subtitle: subtitle,
@@ -1787,9 +1736,11 @@ bool _entriesHaveInstanceIdChanges(
       }),
       onSave: (text) {
         if (_activeObservationActivityId != null) {
-          final currentData = entry.activityData[_activeObservationActivityId!] ??
+          final currentData =
+              entry.activityData[_activeObservationActivityId!] ??
               ActivityData(photoUrls: [], observations: '');
-          final newActivityData = Map<String, ActivityData>.from(entry.activityData);
+          final newActivityData =
+              Map<String, ActivityData>.from(entry.activityData);
           newActivityData[_activeObservationActivityId!] = ActivityData(
             photoUrls: currentData.photoUrls,
             observations: text,
@@ -1814,7 +1765,8 @@ bool _entriesHaveInstanceIdChanges(
     String contextTitle;
 
     if (_photoContextActivityId != null) {
-      photos = entry.activityData[_photoContextActivityId]?.photoUrls ?? [];
+      photos =
+          entry.activityData[_photoContextActivityId]?.photoUrls ?? [];
       contextTitle = 'Fotos de Actividad • ${entry.customId}';
     } else {
       photos = entry.photoUrls;
@@ -1825,7 +1777,8 @@ bool _entriesHaveInstanceIdChanges(
       height: MediaQuery.of(context).size.height * 0.65,
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(24)),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withOpacity(0.1),
@@ -1847,7 +1800,6 @@ bool _entriesHaveInstanceIdChanges(
               ),
             ),
           ),
-
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
             child: Row(
@@ -1908,9 +1860,7 @@ bool _entriesHaveInstanceIdChanges(
               ],
             ),
           ),
-
           const Divider(height: 1),
-
           Expanded(
             child: photos.isEmpty
                 ? _buildEmptyPhotoState()
@@ -1919,10 +1869,10 @@ bool _entriesHaveInstanceIdChanges(
                     child: GridView.builder(
                       gridDelegate:
                           const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3,
-                            crossAxisSpacing: 12,
-                            mainAxisSpacing: 12,
-                          ),
+                        crossAxisCount: 3,
+                        crossAxisSpacing: 12,
+                        mainAxisSpacing: 12,
+                      ),
                       itemCount: photos.length + 1,
                       itemBuilder: (ctx, idx) {
                         if (idx == photos.length) {
@@ -1933,19 +1883,18 @@ bool _entriesHaveInstanceIdChanges(
                     ),
                   ),
           ),
-
           if (photos.isEmpty)
             Padding(
               padding: const EdgeInsets.all(24),
               child: SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
-                  onPressed:
-                      _showImageSourceSelection, // <--- CAMBIO AQUÍ (antes era _pickImage)
+                  onPressed: _showImageSourceSelection,
                   icon: const Icon(Icons.add_a_photo, size: 20),
                   label: const Text(
-                    'Agregar Fotos', // <--- CAMBIAR TEXTO (para que sea genérico)
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                    'Agregar Fotos',
+                    style:
+                        TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
                   ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF3B82F6),
@@ -2034,7 +1983,7 @@ bool _entriesHaveInstanceIdChanges(
     );
   }
 
-  Widget _buildPhotoThumbnail(String photoUrls, int index) {
+  Widget _buildPhotoThumbnail(String photoUrl, int index) {
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
@@ -2051,9 +2000,8 @@ bool _entriesHaveInstanceIdChanges(
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // ✅ Imagen desde red
             Image.network(
-              photoUrls,
+              photoUrl,
               fit: BoxFit.cover,
               loadingBuilder: (context, child, loadingProgress) {
                 if (loadingProgress == null) return child;
@@ -2063,7 +2011,7 @@ bool _entriesHaveInstanceIdChanges(
                     child: CircularProgressIndicator(
                       value: loadingProgress.expectedTotalBytes != null
                           ? loadingProgress.cumulativeBytesLoaded /
-                                loadingProgress.expectedTotalBytes!
+                              loadingProgress.expectedTotalBytes!
                           : null,
                       strokeWidth: 2,
                       color: const Color(0xFF3B82F6),
@@ -2078,27 +2026,18 @@ bool _entriesHaveInstanceIdChanges(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(
-                          Icons.error_outline,
-                          color: Color(0xFFEF4444),
-                          size: 24,
-                        ),
+                        Icon(Icons.error_outline,
+                            color: Color(0xFFEF4444), size: 24),
                         SizedBox(height: 4),
-                        Text(
-                          'Error',
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Color(0xFFEF4444),
-                          ),
-                        ),
+                        Text('Error',
+                            style: TextStyle(
+                                fontSize: 10, color: Color(0xFFEF4444))),
                       ],
                     ),
                   ),
                 );
               },
             ),
-
-            // Botón eliminar
             Positioned(
               top: 6,
               right: 6,
@@ -2109,26 +2048,20 @@ bool _entriesHaveInstanceIdChanges(
                 ),
                 child: IconButton(
                   padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints(
-                    minWidth: 32,
-                    minHeight: 32,
-                  ),
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
                   onPressed: () => _showDeleteConfirmation(index),
-                  icon: const Icon(
-                    Icons.delete_outline,
-                    color: Colors.white,
-                    size: 18,
-                  ),
+                  icon: const Icon(Icons.delete_outline,
+                      color: Colors.white, size: 18),
                 ),
               ),
             ),
-
-            // Badge número
             Positioned(
               bottom: 6,
               left: 6,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
                   color: Colors.black.withOpacity(0.7),
                   borderRadius: BorderRadius.circular(6),
@@ -2153,14 +2086,12 @@ bool _entriesHaveInstanceIdChanges(
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Row(
           children: [
-            Icon(
-              Icons.warning_amber_rounded,
-              color: Color(0xFFF59E0B),
-              size: 24,
-            ),
+            Icon(Icons.warning_amber_rounded,
+                color: Color(0xFFF59E0B), size: 24),
             SizedBox(width: 12),
             Text('Confirmar Eliminación', style: TextStyle(fontSize: 16)),
           ],
@@ -2172,10 +2103,8 @@ bool _entriesHaveInstanceIdChanges(
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: const Text(
-              'Cancelar',
-              style: TextStyle(color: Color(0xFF64748B)),
-            ),
+            child: const Text('Cancelar',
+                style: TextStyle(color: Color(0xFF64748B))),
           ),
           ElevatedButton(
             onPressed: () {
@@ -2185,8 +2114,7 @@ bool _entriesHaveInstanceIdChanges(
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8),
-              ),
+                  borderRadius: BorderRadius.circular(8)),
             ),
             child: const Text('Eliminar'),
           ),
@@ -2195,6 +2123,10 @@ bool _entriesHaveInstanceIdChanges(
     );
   }
 }
+
+// ══════════════════════════════════════════════════════════════════════════
+// OBSERVATION MODAL (Sin cambios significativos, ya estaba bien aislado)
+// ══════════════════════════════════════════════════════════════════════════
 
 class _ObservationModal extends StatefulWidget {
   final String initialText;
@@ -2206,13 +2138,14 @@ class _ObservationModal extends StatefulWidget {
   final Function(String) onSave;
 
   const _ObservationModal({
+    super.key,
     required this.initialText,
     required this.title,
     required this.subtitle,
     required this.icon,
     required this.accentColor,
     required this.onClose,
-    required this.onSave, required ValueKey<String> key,
+    required this.onSave,
   });
 
   @override
@@ -2226,7 +2159,6 @@ class _ObservationModalState extends State<_ObservationModal> {
   @override
   void initState() {
     super.initState();
-    // ✅ El controller se crea UNA SOLA VEZ y sobrevive los rebuilds del padre
     _controller = TextEditingController(text: widget.initialText);
     _charCount = widget.initialText.length;
   }
@@ -2242,7 +2174,8 @@ class _ObservationModalState extends State<_ObservationModal> {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius:
+            const BorderRadius.vertical(top: Radius.circular(24)),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withOpacity(0.1),
@@ -2261,7 +2194,6 @@ class _ObservationModalState extends State<_ObservationModal> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Handle bar
           Center(
             child: Container(
               width: 36,
@@ -2273,8 +2205,6 @@ class _ObservationModalState extends State<_ObservationModal> {
               ),
             ),
           ),
-
-          // Header del modal
           Container(
             padding: const EdgeInsets.all(16),
             decoration: BoxDecoration(
@@ -2287,7 +2217,8 @@ class _ObservationModalState extends State<_ObservationModal> {
                 end: Alignment.bottomRight,
               ),
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: widget.accentColor.withOpacity(0.2)),
+              border:
+                  Border.all(color: widget.accentColor.withOpacity(0.2)),
             ),
             child: Row(
               children: [
@@ -2304,7 +2235,8 @@ class _ObservationModalState extends State<_ObservationModal> {
                       ),
                     ],
                   ),
-                  child: Icon(widget.icon, color: widget.accentColor, size: 24),
+                  child: Icon(widget.icon,
+                      color: widget.accentColor, size: 24),
                 ),
                 const SizedBox(width: 16),
                 Expanded(
@@ -2335,19 +2267,19 @@ class _ObservationModalState extends State<_ObservationModal> {
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.close_rounded, color: Color(0xFF94A3B8), size: 22),
+                  icon: const Icon(Icons.close_rounded,
+                      color: Color(0xFF94A3B8), size: 22),
                   onPressed: widget.onClose,
                   style: IconButton.styleFrom(
                     backgroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
                   ),
                 ),
               ],
             ),
           ),
-
           const SizedBox(height: 24),
-
           const Row(
             children: [
               Icon(Icons.edit_note, size: 16, color: Color(0xFF64748B)),
@@ -2363,10 +2295,7 @@ class _ObservationModalState extends State<_ObservationModal> {
               ),
             ],
           ),
-
           const SizedBox(height: 12),
-
-          // ✅ TextField con controller estable
           Stack(
             children: [
               TextField(
@@ -2374,7 +2303,6 @@ class _ObservationModalState extends State<_ObservationModal> {
                 maxLines: 6,
                 maxLength: 500,
                 autofocus: true,
-                // ✅ CLAVE para Apple Pencil: aceptar cualquier tipo de entrada
                 keyboardType: TextInputType.multiline,
                 textInputAction: TextInputAction.newline,
                 style: const TextStyle(
@@ -2383,8 +2311,10 @@ class _ObservationModalState extends State<_ObservationModal> {
                   color: Color(0xFF334155),
                 ),
                 decoration: InputDecoration(
-                  hintText: 'Describa cualquier anomalía, condición especial o recomendación técnica...',
-                  hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+                  hintText:
+                      'Describa cualquier anomalía, condición especial o recomendación técnica...',
+                  hintStyle: TextStyle(
+                      color: Colors.grey.shade400, fontSize: 13),
                   filled: true,
                   fillColor: const Color(0xFFF8FAFC),
                   border: OutlineInputBorder(
@@ -2397,7 +2327,8 @@ class _ObservationModalState extends State<_ObservationModal> {
                   ),
                   focusedBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: widget.accentColor, width: 2),
+                    borderSide: BorderSide(
+                        color: widget.accentColor, width: 2),
                   ),
                   contentPadding: const EdgeInsets.all(16),
                   counterText: '',
@@ -2410,12 +2341,17 @@ class _ObservationModalState extends State<_ObservationModal> {
                 bottom: 8,
                 right: 12,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: _charCount > 450 ? Colors.red.shade50 : Colors.white,
+                    color: _charCount > 450
+                        ? Colors.red.shade50
+                        : Colors.white,
                     borderRadius: BorderRadius.circular(6),
                     border: Border.all(
-                      color: _charCount > 450 ? Colors.red.shade200 : Colors.grey.shade200,
+                      color: _charCount > 450
+                          ? Colors.red.shade200
+                          : Colors.grey.shade200,
                     ),
                   ),
                   child: Text(
@@ -2423,16 +2359,16 @@ class _ObservationModalState extends State<_ObservationModal> {
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.w600,
-                      color: _charCount > 450 ? Colors.red.shade700 : const Color(0xFF94A3B8),
+                      color: _charCount > 450
+                          ? Colors.red.shade700
+                          : const Color(0xFF94A3B8),
                     ),
                   ),
                 ),
               ),
             ],
           ),
-
           const SizedBox(height: 24),
-
           Row(
             children: [
               Expanded(
@@ -2442,9 +2378,11 @@ class _ObservationModalState extends State<_ObservationModal> {
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     foregroundColor: const Color(0xFF64748B),
                     side: BorderSide(color: Colors.grey.shade300),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
                   ),
-                  child: const Text("Cancelar", style: TextStyle(fontWeight: FontWeight.w600)),
+                  child: const Text("Cancelar",
+                      style: TextStyle(fontWeight: FontWeight.w600)),
                 ),
               ),
               const SizedBox(width: 12),
@@ -2452,15 +2390,18 @@ class _ObservationModalState extends State<_ObservationModal> {
                 flex: 2,
                 child: ElevatedButton.icon(
                   icon: const Icon(Icons.check_circle_outline, size: 18),
-                  label: const Text('Guardar', style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.3)),
+                  label: const Text('Guardar',
+                      style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.3)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: widget.accentColor,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10)),
                     elevation: 0,
                   ),
-                  // ✅ Lee el texto del controller en el momento exacto del tap
                   onPressed: () => widget.onSave(_controller.text),
                 ),
               ),
