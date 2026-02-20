@@ -1,13 +1,7 @@
-// lib/features/reports/widgets/device_section_improved.dart
-//
 // ═══════════════════════════════════════════════════════════════════════
 // DeviceSectionImproved — Refactorizado con Riverpod
 //
-// ANTES: Recibía List<ReportEntry> entries + todos los callbacks desde
-//        ServiceReportScreen. Cada setState en la raíz reconstruía
-//        TODAS las secciones y TODAS las filas.
-//
-// DESPUÉS: ConsumerWidget que escucha sectionEntriesProvider(defId)
+// ConsumerWidget que escucha sectionEntriesProvider(defId)
 //          y sectionAssignmentsProvider(defId). Solo se reconstruye
 //          cuando cambian las entries de SU sección o SUS assignments.
 //          Cada fila individual es un ConsumerWidget aislado (EntryRow)
@@ -777,9 +771,6 @@ class _UserChip extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// TABLE VIEW — Cada fila es un _TableEntryRow (ConsumerWidget aislado)
-// ═══════════════════════════════════════════════════════════════════════
 class _TableView extends StatelessWidget {
   final List<ReportEntry> entries;
   final List<ActivityConfig> activities;
@@ -803,6 +794,17 @@ class _TableView extends StatelessWidget {
   Widget build(BuildContext context) {
     final ScrollController horizontalScrollController = ScrollController();
     final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0;
+
+    // ★ FIX: Altura pre-calculada para EVITAR shrinkWrap
+    // Header (~50) + filas (52 cada una)
+    // Limitamos a un máximo razonable para no crear un widget enorme
+    const double headerHeight = 50.0;
+    const double rowHeight = 52.0;
+    // Mostrar máximo 15 filas sin scroll interno, el resto usa scroll del ListView
+    final int maxVisibleRows = entries.length;
+    final double bodyHeight = maxVisibleRows * rowHeight;
+    // ignore: unused_local_variable
+    final double totalHeight = headerHeight + bodyHeight;
 
     return Scrollbar(
       controller: horizontalScrollController,
@@ -834,30 +836,41 @@ class _TableView extends StatelessWidget {
                 ),
               ),
 
-              // ★ CUERPO — Cada fila es un ConsumerWidget aislado
-              ListView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: entries.length,
-                itemExtent: 52.0,
-                itemBuilder: (context, localIndex) {
-                  final entry = entries[localIndex];
-                  final globalIndex = indexMap[entry.instanceId] ?? -1;
+              // ★ FIX: SizedBox con altura fija en vez de shrinkWrap
+              // Esto permite que el ListView tenga su propio viewport
+              // y SOLO construya las filas visibles (~10-15)
+              SizedBox(
+                height: bodyHeight,
+                child: ListView.builder(
+                  // ★ SIN shrinkWrap, SIN NeverScrollableScrollPhysics
+                  // El scroll horizontal ya está manejado por SingleChildScrollView
+                  // El scroll vertical lo maneja el CustomScrollView padre
+                  // Este ListView solo virtualiza las filas
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: entries.length,
+                  itemExtent: rowHeight,
+                  // ★ addAutomaticKeepAlives false para menos memoria
+                  addAutomaticKeepAlives: false,
+                  addRepaintBoundaries: false, // Ya los ponemos manualmente
+                  itemBuilder: (context, localIndex) {
+                    final entry = entries[localIndex];
+                    final globalIndex = indexMap[entry.instanceId] ?? -1;
 
-                  if (globalIndex == -1) return const SizedBox(height: 52);
+                    if (globalIndex == -1) return const SizedBox(height: 52);
 
-                  return RepaintBoundary(
-                    child: _TableEntryRow(
-                      key: ValueKey('trow_${entry.instanceId}'),
-                      globalIndex: globalIndex,
-                      activities: activities,
-                      canEdit: canEdit,
-                      notifier: notifier,
-                      onCameraClick: onCameraClick,
-                      onObservationClick: onObservationClick,
-                    ),
-                  );
-                },
+                    return RepaintBoundary(
+                      child: _TableEntryRow(
+                        key: ValueKey('trow_${entry.instanceId}'),
+                        globalIndex: globalIndex,
+                        activities: activities,
+                        canEdit: canEdit,
+                        notifier: notifier,
+                        onCameraClick: onCameraClick,
+                        onObservationClick: onObservationClick,
+                      ),
+                    );
+                  },
+                ),
               ),
             ],
           ),
@@ -1030,36 +1043,46 @@ class _ListView extends StatelessWidget {
         const double spacing = 12.0;
         final double itemHeight = 80.0 + (activities.length * 40.0) + 24.0;
 
+        // ★ FIX: Calcular altura total para evitar shrinkWrap
+        final int totalRows = (entries.length / columns).ceil();
+        final double totalHeight =
+            (totalRows * itemHeight) + ((totalRows - 1) * spacing) + 32.0;
+
         return Padding(
           padding: const EdgeInsets.all(16),
-          child: GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: entries.length,
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              crossAxisSpacing: spacing,
-              mainAxisSpacing: spacing,
-              mainAxisExtent: itemHeight,
+          child: SizedBox(
+            height: totalHeight,
+            child: GridView.builder(
+              // ★ SIN shrinkWrap
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: entries.length,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                crossAxisSpacing: spacing,
+                mainAxisSpacing: spacing,
+                mainAxisExtent: itemHeight,
+              ),
+              addAutomaticKeepAlives: false,
+              addRepaintBoundaries: false,
+              itemBuilder: (context, localIndex) {
+                final entry = entries[localIndex];
+                final globalIndex = indexMap[entry.instanceId] ?? -1;
+
+                if (globalIndex == -1) return const SizedBox();
+
+                return RepaintBoundary(
+                  child: _ListEntryCard(
+                    key: ValueKey('card_${entry.instanceId}'),
+                    globalIndex: globalIndex,
+                    activities: activities,
+                    canEdit: canEdit,
+                    notifier: notifier,
+                    onCameraClick: onCameraClick,
+                    onObservationClick: onObservationClick,
+                  ),
+                );
+              },
             ),
-            itemBuilder: (context, localIndex) {
-              final entry = entries[localIndex];
-              final globalIndex = indexMap[entry.instanceId] ?? -1;
-
-              if (globalIndex == -1) return const SizedBox();
-
-              return RepaintBoundary(
-                child: _ListEntryCard(
-                  key: ValueKey('card_${entry.instanceId}'),
-                  globalIndex: globalIndex,
-                  activities: activities,
-                  canEdit: canEdit,
-                  notifier: notifier,
-                  onCameraClick: onCameraClick,
-                  onObservationClick: onObservationClick,
-                ),
-              );
-            },
           ),
         );
       },

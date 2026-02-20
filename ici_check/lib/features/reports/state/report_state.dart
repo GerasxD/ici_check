@@ -1,14 +1,9 @@
 // lib/features/reports/state/report_state.dart
-//
-// ═══════════════════════════════════════════════════════════════════
-// MODELO DE ESTADO GRANULAR + PROVIDERS
-// Prerequisito: Estos archivos deben existir ANTES de usar los widgets.
-// ═══════════════════════════════════════════════════════════════════
 
 import 'package:ici_check/features/reports/data/report_model.dart';
 
 // ─────────────────────────────────────────────────────────────────
-// 1. ReportStats — Estadísticas pre-computadas, inmutables
+// 1. ReportStats
 // ─────────────────────────────────────────────────────────────────
 class ReportStats {
   final int ok;
@@ -16,7 +11,7 @@ class ReportStats {
   final int na;
   final int nr;
   final int total;
-  final int pending; // nulls (sin contestar)
+  final int pending;
 
   const ReportStats({
     required this.ok,
@@ -60,8 +55,6 @@ class ReportStats {
     );
   }
 
-  /// ★ CLAVE: operator == permite que Riverpod select() compare
-  /// y evite rebuilds cuando las stats no cambiaron.
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -77,7 +70,7 @@ class ReportStats {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 2. ReportMeta — Solo los campos que ReportControls necesita
+// 2. ReportMeta
 // ─────────────────────────────────────────────────────────────────
 class ReportMeta {
   final String? startTime;
@@ -112,10 +105,7 @@ class ReportMeta {
 
   @override
   int get hashCode => Object.hash(
-        startTime,
-        endTime,
-        serviceDate,
-        isFullyComplete,
+        startTime, endTime, serviceDate, isFullyComplete,
         assignedTechnicianIds.length,
       );
 
@@ -129,22 +119,28 @@ class ReportMeta {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// 3. ReportState — Estado completo con caché derivado
+// 3. ReportState — Con Map para O(1) lookups de secciones
 // ─────────────────────────────────────────────────────────────────
 class ReportState {
   final ServiceReportModel report;
   final ReportStats stats;
   final bool isFullyComplete;
   final Map<String, int> instanceIdToGlobalIndex;
-  final List<MapEntry<String, List<ReportEntry>>> groupedEntries;
   final String frequencies;
 
-  const ReportState({
+  /// ★ FIX: Map para O(1) lookups en providers
+  final Map<String, List<ReportEntry>> groupedEntriesMap;
+
+  /// Lista para iterar en build() del screen (derivada del map)
+  late final List<MapEntry<String, List<ReportEntry>>> groupedEntries =
+      groupedEntriesMap.entries.toList();
+
+  ReportState({
     required this.report,
     required this.stats,
     required this.isFullyComplete,
     required this.instanceIdToGlobalIndex,
-    required this.groupedEntries,
+    required this.groupedEntriesMap,
     required this.frequencies,
   });
 
@@ -153,34 +149,38 @@ class ReportState {
     required List<MapEntry<String, List<ReportEntry>>> groupedEntries,
     required String frequencies,
   }) {
+    // Convertir la lista a mapa
+    final map = <String, List<ReportEntry>>{};
+    for (final entry in groupedEntries) {
+      map[entry.key] = entry.value;
+    }
+
     return ReportState(
       report: report,
       stats: ReportStats.compute(report.entries),
       isFullyComplete: _computeIsComplete(report.entries),
       instanceIdToGlobalIndex: _buildIndexMap(report.entries),
-      groupedEntries: groupedEntries,
+      groupedEntriesMap: map,
       frequencies: frequencies,
     );
   }
 
   /// Copia BARATA: solo cambia el report, NO recalcula stats.
-  /// Para: observaciones, firmas, customId, area, generalObservations.
   ReportState copyWithReportOnly(ServiceReportModel newReport) {
     return ReportState(
       report: newReport,
       stats: stats,
       isFullyComplete: isFullyComplete,
       instanceIdToGlobalIndex: instanceIdToGlobalIndex,
-      groupedEntries: groupedEntries,
+      groupedEntriesMap: groupedEntriesMap,
       frequencies: frequencies,
     );
   }
 
   /// Copia COMPLETA: recalcula stats e isComplete.
-  /// Solo para: toggleStatus (OK/NOK/NA/NR).
   ReportState copyWithFullRecompute(
     ServiceReportModel newReport, {
-    List<MapEntry<String, List<ReportEntry>>>? newGrouped,
+    Map<String, List<ReportEntry>>? newGroupedMap,
     String? newFrequencies,
   }) {
     return ReportState(
@@ -188,12 +188,11 @@ class ReportState {
       stats: ReportStats.compute(newReport.entries),
       isFullyComplete: _computeIsComplete(newReport.entries),
       instanceIdToGlobalIndex: _buildIndexMap(newReport.entries),
-      groupedEntries: newGrouped ?? groupedEntries,
+      groupedEntriesMap: newGroupedMap ?? groupedEntriesMap,
       frequencies: newFrequencies ?? frequencies,
     );
   }
 
-  /// Extrae el ReportMeta para ReportControls
   ReportMeta get meta => ReportMeta(
         startTime: report.startTime,
         endTime: report.endTime,

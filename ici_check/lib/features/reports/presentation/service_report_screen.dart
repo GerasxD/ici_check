@@ -361,9 +361,45 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     return false;
   }
 
-  void _syncAndLoadReport(ServiceReportModel existingReport) {
+   void _syncAndLoadReport(ServiceReportModel existingReport) {
     // No pisar cambios locales pendientes
     if (_notifier.hasPendingChanges) return;
+
+    // ★ FIX: Early-return si ya estamos inicializados y es un eco de Firebase
+    // Cuando hacemos _saveImmediate, Firebase nos devuelve el snapshot que
+    // acabamos de guardar. Sin este check, procesamos todo de nuevo
+    // (generateEntries + merge + buildGrouped + computeStats) = ANR
+    final currentState = ref.read(reportNotifierProvider);
+    if (currentState != null && !_isLoading) {
+      final current = currentState.report;
+      // Comparación rápida de campos que cambian frecuentemente
+      if (current.entries.length == existingReport.entries.length &&
+          current.startTime == existingReport.startTime &&
+          current.endTime == existingReport.endTime &&
+          current.generalObservations == existingReport.generalObservations &&
+          current.providerSignerName == existingReport.providerSignerName &&
+          current.clientSignerName == existingReport.clientSignerName) {
+        // Probablemente es el eco de nuestro propio save
+        // Verificar un poco más a fondo: comparar un par de entries al azar
+        bool likelySame = true;
+        if (current.entries.isNotEmpty) {
+          final lastIdx = current.entries.length - 1;
+          // Comparar primera y última entry
+          for (final idx in [0, lastIdx]) {
+            if (idx < existingReport.entries.length) {
+              final a = current.entries[idx];
+              final b = existingReport.entries[idx];
+              if (a.instanceId != b.instanceId ||
+                  a.results.length != b.results.length) {
+                likelySame = false;
+                break;
+              }
+            }
+          }
+        }
+        if (likelySame) return; // Skip procesamiento pesado
+      }
+    }
 
     if (_devicesEffective.isEmpty) {
       _initializeNotifier(existingReport);

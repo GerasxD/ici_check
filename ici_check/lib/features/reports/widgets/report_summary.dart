@@ -1,28 +1,12 @@
-// lib/features/reports/widgets/report_summary.dart
-//
-// ═══════════════════════════════════════════════════════════════════════
-// ReportSummary — Refactorizado con Riverpod
-//
-// ANTES: Recibía `ServiceReportModel report` completo, ejecutaba
-//        _calculateStats() en build() → O(N×M) en cada rebuild.
-//
-// DESPUÉS: Escucha SOLO reportStatsProvider.
-//          Si el usuario teclea una observación o cambia un customId,
-//          las stats no cambian → este widget NO se reconstruye.
-//          Solo se reconstruye cuando alguien hace tap en un toggle.
-// ═══════════════════════════════════════════════════════════════════════
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:ici_check/features/reports/state/report_notifier.dart';
+import 'package:ici_check/features/reports/state/report_providers.dart';
 
 class ReportSummary extends ConsumerWidget {
   const ReportSummary({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // ★ CLAVE: select() compara con ReportStats.operator ==
-    // Si ok/nok/na/nr no cambiaron → build() NO se ejecuta
     final stats = ref.watch(reportStatsProvider);
 
     if (stats == null) {
@@ -47,7 +31,6 @@ class ReportSummary extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ─── Header del Resumen ───
           Padding(
             padding: const EdgeInsets.only(bottom: 16),
             child: Row(
@@ -91,8 +74,6 @@ class ReportSummary extends ConsumerWidget {
               ],
             ),
           ),
-
-          // ─── Grid de Estadísticas (Fila 1: OK + NOK) ───
           Row(
             children: [
               Expanded(
@@ -116,10 +97,7 @@ class ReportSummary extends ConsumerWidget {
               ),
             ],
           ),
-
           const SizedBox(height: 12),
-
-          // ─── Grid de Estadísticas (Fila 2: NA + NR) ───
           Row(
             children: [
               Expanded(
@@ -149,9 +127,6 @@ class ReportSummary extends ConsumerWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// _StatCard — Sin cambios visuales, exactamente igual que antes
-// ═══════════════════════════════════════════════════════════════════════
 class _StatCard extends StatelessWidget {
   final String label;
   final int value;
@@ -185,7 +160,6 @@ class _StatCard extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // Icono con fondo circular
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
@@ -195,8 +169,6 @@ class _StatCard extends StatelessWidget {
             child: Icon(icon, size: 20, color: color),
           ),
           const SizedBox(height: 12),
-
-          // Número Grande
           Text(
             value.toString(),
             style: TextStyle(
@@ -208,8 +180,6 @@ class _StatCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 4),
-
-          // Etiqueta
           Text(
             label,
             style: const TextStyle(

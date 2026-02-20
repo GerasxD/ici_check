@@ -1,8 +1,8 @@
 // lib/features/reports/state/report_providers.dart
 //
-// ═══════════════════════════════════════════════════════════════════
-// PROVIDERS GRANULARES — Cada widget escucha SOLO lo que necesita
-// ═══════════════════════════════════════════════════════════════════
+// ★ ESTE ES EL ÚNICO ARCHIVO DE PROVIDERS.
+// ★ ELIMINAR report_notifier.dart — ya no debe existir.
+// ★ TODOS los imports deben apuntar a ESTE archivo.
 
 import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -58,13 +58,12 @@ class ReportNotifier extends Notifier<ReportState?> {
     entries[entryIndex] = _copyEntry(entry, results: newResults);
     final newReport = report.copyWith(entries: entries);
 
-    // ★ FULL RECOMPUTE — stats e isComplete cambian
     state = state!.copyWithFullRecompute(newReport);
     _saveImmediate(newReport);
   }
 
   // ═══════════════════════════════════════════════════════
-  // OBSERVACIONES — NO recalcula stats
+  // OBSERVACIONES
   // ═══════════════════════════════════════════════════════
   void updateObservation(int entryIndex, String text) {
     if (state == null) return;
@@ -77,7 +76,7 @@ class ReportNotifier extends Notifier<ReportState?> {
   }
 
   // ═══════════════════════════════════════════════════════
-  // ACTIVITY DATA (fotos/obs de actividad)
+  // ACTIVITY DATA
   // ═══════════════════════════════════════════════════════
   void updateActivityData(int entryIndex, Map<String, ActivityData> activityData) {
     if (state == null) return;
@@ -230,14 +229,14 @@ class ReportNotifier extends Notifier<ReportState?> {
   }
 
   // ═══════════════════════════════════════════════════════
-  // FULL REPORT UPDATE (para sync con Firebase stream)
+  // SYNC FROM FIREBASE
   // ═══════════════════════════════════════════════════════
   void syncFromFirebase(
     ServiceReportModel updatedReport, {
     required List<MapEntry<String, List<ReportEntry>>> groupedEntries,
     required String frequencies,
   }) {
-    if (_hasPendingChanges) return; // No pisar cambios locales
+    if (_hasPendingChanges) return;
     state = ReportState.fromReport(
       updatedReport,
       groupedEntries: groupedEntries,
@@ -255,7 +254,6 @@ class ReportNotifier extends Notifier<ReportState?> {
     _saveDebounce = Timer(const Duration(milliseconds: 800), _flushPendingChanges);
   }
 
-  /// Guarda sin notificar a listeners. Para campos con controller local.
   void _scheduleSaveQuiet(ServiceReportModel report) {
     _hasPendingChanges = true;
     _pendingReport = report;
@@ -311,32 +309,25 @@ class ReportNotifier extends Notifier<ReportState?> {
 // PROVIDERS
 // ─────────────────────────────────────────────────────────────────
 
-/// Provider central del estado del reporte
 final reportNotifierProvider =
     NotifierProvider<ReportNotifier, ReportState?>(ReportNotifier.new);
 
-/// ★ ReportSummary escucha SOLO esto.
-/// Si ok/nok/na/nr no cambiaron → build() NO se ejecuta.
 final reportStatsProvider = Provider<ReportStats?>((ref) {
   return ref.watch(reportNotifierProvider.select((s) => s?.stats));
 });
 
-/// ★ ReportControls escucha SOLO esto.
-/// Si startTime/endTime/isComplete no cambiaron → NO rebuild.
 final reportMetaProvider = Provider<ReportMeta?>((ref) {
   return ref.watch(reportNotifierProvider.select((s) => s?.meta));
 });
 
-/// Para una sección específica de dispositivos
+/// ★ FIX: O(1) lookup con Map en vez de .where() lineal
 final sectionEntriesProvider =
     Provider.family<List<ReportEntry>, String>((ref, defId) {
   final state = ref.watch(reportNotifierProvider);
   if (state == null) return [];
-  final group = state.groupedEntries.where((e) => e.key == defId).firstOrNull;
-  return group?.value ?? [];
+  return state.groupedEntriesMap[defId] ?? [];
 });
 
-/// Assignments de una sección
 final sectionAssignmentsProvider =
     Provider.family<List<String>, String>((ref, defId) {
   return ref.watch(
@@ -344,7 +335,6 @@ final sectionAssignmentsProvider =
   );
 });
 
-/// Provider de una sola entry por índice global
 final singleEntryProvider = Provider.family<ReportEntry?, int>((ref, index) {
   return ref.watch(reportNotifierProvider.select((s) {
     if (s == null || index < 0 || index >= s.report.entries.length) return null;
