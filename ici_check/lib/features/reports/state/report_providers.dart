@@ -29,7 +29,7 @@ class ReportNotifier extends Notifier<ReportState?> {
   // ═══════════════════════════════════════════════════════
   // TOGGLE STATUS — ÚNICO path que recalcula stats
   // ═══════════════════════════════════════════════════════
-  void toggleStatus(int entryIndex, String activityId) {
+ void toggleStatus(int entryIndex, String activityId) {
     if (state == null) return;
     final report = state!.report;
     if (entryIndex < 0 || entryIndex >= report.entries.length) return;
@@ -39,6 +39,8 @@ class ReportNotifier extends Notifier<ReportState?> {
 
     final current = entry.results[activityId];
     String? next;
+    
+    // Determinamos el siguiente estado
     if (current == null) {
       next = 'OK';
     } else if (current == 'OK') {
@@ -51,6 +53,44 @@ class ReportNotifier extends Notifier<ReportState?> {
       next = null;
     }
 
+    // =========================================================
+    // 1. ARITMÉTICA DELTA (O(1) en lugar de O(N))
+    // En lugar de iterar 600 equipos, solo sumamos/restamos 1
+    // =========================================================
+    final currentStats = state!.stats;
+    int ok = currentStats.ok;
+    int nok = currentStats.nok;
+    int na = currentStats.na;
+    int nr = currentStats.nr;
+    int pending = currentStats.pending;
+
+    // Restamos el estado anterior
+    if (current == 'OK') ok--;
+    else if (current == 'NOK') nok--;
+    else if (current == 'NA') na--;
+    else if (current == 'NR') nr--;
+    else pending--; // Si era null
+
+    // Sumamos el nuevo estado
+    if (next == 'OK') ok++;
+    else if (next == 'NOK') nok++;
+    else if (next == 'NA') na++;
+    else if (next == 'NR') nr++;
+    else pending++; // Si es null
+
+    // Creamos las nuevas estadísticas instantáneamente
+    final newStats = ReportStats(
+      ok: ok, 
+      nok: nok, 
+      na: na, 
+      nr: nr, 
+      total: currentStats.total, 
+      pending: pending
+    );
+
+    // =========================================================
+    // 2. ACTUALIZACIÓN DE LA ENTRADA
+    // =========================================================
     final newResults = Map<String, String?>.from(entry.results);
     newResults[activityId] = next;
 
@@ -58,10 +98,28 @@ class ReportNotifier extends Notifier<ReportState?> {
     entries[entryIndex] = _copyEntry(entry, results: newResults);
     final newReport = report.copyWith(entries: entries);
 
-    state = state!.copyWithFullRecompute(newReport);
-    _saveImmediate(newReport);
-  }
+    // =========================================================
+    // 3. CONSTRUCCIÓN DEL NUEVO ESTADO SIN BUCLES
+    // Adiós al costoso state!.copyWithFullRecompute(newReport)
+    // =========================================================
+    state = ReportState(
+      report: newReport,
+      stats: newStats,
+      isFullyComplete: pending == 0,
+      // Reutilizamos los mapas pesados que ya estaban en memoria
+      instanceIdToGlobalIndex: state!.instanceIdToGlobalIndex,
+      groupedEntriesMap: state!.groupedEntriesMap,
+      frequencies: state!.frequencies,
+    );
 
+    // =========================================================
+    // 4. GUARDADO ENCOLADO (DEBOUNCE)
+    // Cambiamos _saveImmediate por _scheduleSave para no 
+    // bloquear el hilo principal al procesar el JSON masivo.
+    // =========================================================
+    _scheduleSave(newReport);
+  }
+  
   // ═══════════════════════════════════════════════════════
   // OBSERVACIONES
   // ═══════════════════════════════════════════════════════

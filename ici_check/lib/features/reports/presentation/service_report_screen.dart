@@ -138,7 +138,6 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
 
   @override
   void dispose() {
-    _notifier.flushBeforeDispose();
     _locationSaveDebounce?.cancel();
     _signatureDebounce?.cancel();
     _providerSigController.dispose();
