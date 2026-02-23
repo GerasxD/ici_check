@@ -5,10 +5,21 @@
 // ★ TODOS los imports deben apuntar a ESTE archivo.
 
 import 'dart:async';
+import 'package:flutter/foundation.dart'; // ★ CAMBIO 1: Nuevo import para compute()
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/reports/data/reports_repository.dart';
 import 'report_state.dart';
+
+// ★ CAMBIO 2: Función TOP-LEVEL para compute()
+// ─────────────────────────────────────────────────────────────────
+// compute() REQUIERE una función top-level (fuera de cualquier clase).
+// Se ejecuta en un Isolate separado → la serialización pesada de
+// 600+ entries a JSON NO bloquea el main thread.
+// ─────────────────────────────────────────────────────────────────
+Map<String, dynamic> _serializeReportInIsolate(ServiceReportModel report) {
+  return report.toMap();
+}
 
 // ─────────────────────────────────────────────────────────────────
 // NOTIFIER CENTRAL
@@ -18,6 +29,7 @@ class ReportNotifier extends Notifier<ReportState?> {
   Timer? _saveDebounce;
   bool _hasPendingChanges = false;
   ServiceReportModel? _pendingReport;
+  bool _isSaving = false; // ★ CAMBIO 3: Flag anti-concurrencia
 
   @override
   ReportState? build() => null;
@@ -40,7 +52,6 @@ class ReportNotifier extends Notifier<ReportState?> {
     final current = entry.results[activityId];
     String? next;
     
-    // Determinamos el siguiente estado
     if (current == null) {
       next = 'OK';
     } else if (current == 'OK') {
@@ -53,10 +64,7 @@ class ReportNotifier extends Notifier<ReportState?> {
       next = null;
     }
 
-    // =========================================================
-    // 1. ARITMÉTICA DELTA (O(1) en lugar de O(N))
-    // En lugar de iterar 600 equipos, solo sumamos/restamos 1
-    // =========================================================
+    // ARITMÉTICA DELTA O(1)
     final currentStats = state!.stats;
     int ok = currentStats.ok;
     int nok = currentStats.nok;
@@ -64,33 +72,23 @@ class ReportNotifier extends Notifier<ReportState?> {
     int nr = currentStats.nr;
     int pending = currentStats.pending;
 
-    // Restamos el estado anterior
     if (current == 'OK') ok--;
     else if (current == 'NOK') nok--;
     else if (current == 'NA') na--;
     else if (current == 'NR') nr--;
-    else pending--; // Si era null
+    else pending--;
 
-    // Sumamos el nuevo estado
     if (next == 'OK') ok++;
     else if (next == 'NOK') nok++;
     else if (next == 'NA') na++;
     else if (next == 'NR') nr++;
-    else pending++; // Si es null
+    else pending++;
 
-    // Creamos las nuevas estadísticas instantáneamente
     final newStats = ReportStats(
-      ok: ok, 
-      nok: nok, 
-      na: na, 
-      nr: nr, 
-      total: currentStats.total, 
-      pending: pending
+      ok: ok, nok: nok, na: na, nr: nr, 
+      total: currentStats.total, pending: pending,
     );
 
-    // =========================================================
-    // 2. ACTUALIZACIÓN DE LA ENTRADA
-    // =========================================================
     final newResults = Map<String, String?>.from(entry.results);
     newResults[activityId] = next;
 
@@ -98,25 +96,15 @@ class ReportNotifier extends Notifier<ReportState?> {
     entries[entryIndex] = _copyEntry(entry, results: newResults);
     final newReport = report.copyWith(entries: entries);
 
-    // =========================================================
-    // 3. CONSTRUCCIÓN DEL NUEVO ESTADO SIN BUCLES
-    // Adiós al costoso state!.copyWithFullRecompute(newReport)
-    // =========================================================
     state = ReportState(
       report: newReport,
       stats: newStats,
       isFullyComplete: pending == 0,
-      // Reutilizamos los mapas pesados que ya estaban en memoria
       instanceIdToGlobalIndex: state!.instanceIdToGlobalIndex,
       groupedEntriesMap: state!.groupedEntriesMap,
       frequencies: state!.frequencies,
     );
 
-    // =========================================================
-    // 4. GUARDADO ENCOLADO (DEBOUNCE)
-    // Cambiamos _saveImmediate por _scheduleSave para no 
-    // bloquear el hilo principal al procesar el JSON masivo.
-    // =========================================================
     _scheduleSave(newReport);
   }
   
@@ -196,42 +184,42 @@ class ReportNotifier extends Notifier<ReportState?> {
     if (state == null) return;
     final newReport = state!.report.copyWith(startTime: timeStr, serviceDate: date);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediate(newReport);
+    _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
   void endService(String timeStr) {
     if (state == null) return;
     final newReport = state!.report.copyWith(endTime: timeStr);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediate(newReport);
+    _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
   void resumeService() {
     if (state == null) return;
     final newReport = state!.report.copyWith(endTime: null, forceNullEndTime: true);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediate(newReport);
+    _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
   void updateServiceDate(DateTime date) {
     if (state == null) return;
     final newReport = state!.report.copyWith(serviceDate: date);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediate(newReport);
+    _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
   void updateStartTime(String time) {
     if (state == null) return;
     final newReport = state!.report.copyWith(startTime: time);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediate(newReport);
+    _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
   void updateEndTime(String time) {
     if (state == null) return;
     final newReport = state!.report.copyWith(endTime: time);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediate(newReport);
+    _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
   // ═══════════════════════════════════════════════════════
@@ -251,7 +239,7 @@ class ReportNotifier extends Notifier<ReportState?> {
       clientSignerName: clientName,
     );
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediate(newReport);
+    _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
   // ═══════════════════════════════════════════════════════
@@ -283,7 +271,7 @@ class ReportNotifier extends Notifier<ReportState?> {
     );
 
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediate(newReport);
+    _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
   // ═══════════════════════════════════════════════════════
@@ -302,39 +290,97 @@ class ReportNotifier extends Notifier<ReportState?> {
     );
   }
 
-  // ═══════════════════════════════════════════════════════
-  // SAVE STRATEGIES
-  // ═══════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════
+  // ★ CAMBIO 4: SAVE STRATEGIES — CON ISOLATE
+  //
+  // ANTES:
+  //   _saveImmediate(report) → _repo.saveReport(report)
+  //   internamente: report.toMap() en main thread → 100-300ms jank
+  //
+  // DESPUÉS:
+  //   _saveImmediateAsync(report) → compute(toMap, report) en isolate
+  //   → _repo.saveReportRaw(id, data) → 0ms jank en main thread
+  // ═══════════════════════════════════════════════════════════════
+
   void _scheduleSave(ServiceReportModel report) {
     _hasPendingChanges = true;
     _pendingReport = report;
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 800), _flushPendingChanges);
+    _saveDebounce = Timer(const Duration(milliseconds: 800), _flushPendingChangesAsync);
   }
 
   void _scheduleSaveQuiet(ServiceReportModel report) {
     _hasPendingChanges = true;
     _pendingReport = report;
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 800), _flushPendingChanges);
+    _saveDebounce = Timer(const Duration(milliseconds: 800), _flushPendingChangesAsync);
   }
 
-  void _saveImmediate(ServiceReportModel report) {
+  /// ★ REEMPLAZA a _saveImmediate
+  void _saveImmediateAsync(ServiceReportModel report) {
     _saveDebounce?.cancel();
     _hasPendingChanges = false;
     _pendingReport = null;
-    _repo.saveReport(report);
+    _saveInIsolate(report);
   }
 
-  void _flushPendingChanges() {
+  /// ★ REEMPLAZA a _flushPendingChanges
+  void _flushPendingChangesAsync() {
+    if (_hasPendingChanges && _pendingReport != null) {
+      _hasPendingChanges = false;
+      final report = _pendingReport!;
+      _pendingReport = null;
+      _saveInIsolate(report);
+    }
+  }
+
+  /// ★ CORE: Serializa en Isolate, escribe en Firestore
+  Future<void> _saveInIsolate(ServiceReportModel report) async {
+    if (_isSaving) {
+      _hasPendingChanges = true;
+      _pendingReport = report;
+      _saveDebounce?.cancel();
+      _saveDebounce = Timer(
+        const Duration(milliseconds: 500),
+        _flushPendingChangesAsync,
+      );
+      return;
+    }
+
+    _isSaving = true;
+
+    try {
+      // ★ Serialización en Isolate — NO bloquea main thread
+      final Map<String, dynamic> data = await compute(
+        _serializeReportInIsolate,
+        report,
+      );
+
+      // ★ Solo Firestore write en main thread (rápido)
+      await _repo.saveReportRaw(report.id, data);
+    } catch (e) {
+      debugPrint('Error en _saveInIsolate: $e');
+      try {
+        await _repo.saveReport(report);
+      } catch (e2) {
+        debugPrint('Error en fallback save: $e2');
+      }
+    } finally {
+      _isSaving = false;
+      if (_hasPendingChanges && _pendingReport != null) {
+        _flushPendingChangesAsync();
+      }
+    }
+  }
+
+  /// Para dispose() — sync fallback para no perder cambios
+  void flushBeforeDispose() {
     if (_hasPendingChanges && _pendingReport != null) {
       _hasPendingChanges = false;
       _repo.saveReport(_pendingReport!);
       _pendingReport = null;
     }
   }
-
-  void flushBeforeDispose() => _flushPendingChanges();
 
   bool get hasPendingChanges => _hasPendingChanges;
 
@@ -398,4 +444,36 @@ final singleEntryProvider = Provider.family<ReportEntry?, int>((ref, index) {
     if (s == null || index < 0 || index >= s.report.entries.length) return null;
     return s.report.entries[index];
   }));
+});
+
+/// ★ NUEVO PROVIDER: Calcula el progreso de una sección específica
+/// Escucha SOLO los entries de esa sección usando sectionEntriesProvider
+/// → Recalcula automáticamente cuando un entry de la sección cambia
+/// → No afecta virtualization porque solo actualiza el header
+final sectionProgressProvider =
+    Provider.family<Map<String, dynamic>, String>((ref, defId) {
+  final entries = ref.watch(sectionEntriesProvider(defId));
+  
+  int totalActivities = 0;
+  int completedActivities = 0;
+  
+  for (var entry in entries) {
+    for (var activityId in entry.results.keys) {
+      totalActivities++;
+      final value = entry.results[activityId];
+      if (value == 'OK' || value == 'NOK' || value == 'NA') {
+        completedActivities++;
+      }
+    }
+  }
+  
+  final percentage = totalActivities > 0
+      ? (completedActivities / totalActivities) * 100
+      : 0.0;
+  
+  return {
+    'total': totalActivities,
+    'completed': completedActivities,
+    'percentage': percentage,
+  };
 });

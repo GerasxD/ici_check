@@ -1,11 +1,19 @@
 // ═══════════════════════════════════════════════════════════════════════
-// DeviceSectionImproved — Refactorizado con Riverpod
+// DeviceSectionImproved — Refactorizado para VIRTUALIZACIÓN REAL
 //
-// ConsumerWidget que escucha sectionEntriesProvider(defId)
-//          y sectionAssignmentsProvider(defId). Solo se reconstruye
-//          cuando cambian las entries de SU sección o SUS assignments.
-//          Cada fila individual es un ConsumerWidget aislado (EntryRow)
-//          que solo escucha SU entry via singleEntryProvider(globalIndex).
+// ANTES: Widget monolítico que contenía un ListView/GridView interno
+//        con NeverScrollableScrollPhysics + SizedBox de altura fija.
+//        → Flutter construía TODAS las filas de golpe = lag en móvil.
+//
+// DESPUÉS: Expone widgets individuales (header + filas) que el
+//          CustomScrollView padre virtualiza directamente.
+//          Solo se construyen las ~10-15 filas visibles en pantalla.
+//
+// ARQUITECTURA:
+//   - DeviceSectionHeader: widget sticky del header de sección
+//   - DeviceSectionTableRow: ConsumerWidget para una fila de tabla
+//   - DeviceSectionListCard: ConsumerWidget para una card de lista
+//   - buildFlatSliverItems(): función que genera los slivers aplanados
 // ═══════════════════════════════════════════════════════════════════════
 
 import 'dart:async';
@@ -15,35 +23,47 @@ import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:ici_check/features/reports/state/report_providers.dart';
-import 'package:sticky_headers/sticky_headers/widget.dart';
 
-class DeviceSectionImproved extends ConsumerWidget {
+// ═══════════════════════════════════════════════════════════════════════
+// FUNCIÓN PRINCIPAL: Genera los slivers aplanados para una sección
+//
+// Retorna una lista de widgets que se insertan directamente en el
+// SliverList del CustomScrollView padre. Esto permite virtualización
+// real: solo se construyen las filas visibles en pantalla.
+// ═══════════════════════════════════════════════════════════════════════
+
+class FlatSectionData {
   final String defId;
   final DeviceModel deviceDef;
+  final List<ReportEntry> entries;
+  final List<String> assignments;
+  final List<ActivityConfig> relevantActivities;
   final List<UserModel> users;
   final bool isEditable;
   final bool isUserCoordinator;
   final bool adminOverride;
   final String? currentUserId;
-
-  // ★ Callbacks para acciones que requieren UI del padre (modales de foto/obs)
+  final Map<String, int> indexMap;
   final Function(int globalIndex, {String? activityId}) onCameraClick;
   final Function(int globalIndex, {String? activityId}) onObservationClick;
 
-  const DeviceSectionImproved({
-    super.key,
+  FlatSectionData({
     required this.defId,
     required this.deviceDef,
+    required this.entries,
+    required this.assignments,
+    required this.relevantActivities,
     required this.users,
     required this.isEditable,
     required this.isUserCoordinator,
     required this.adminOverride,
     this.currentUserId,
+    required this.indexMap,
     required this.onCameraClick,
     required this.onObservationClick,
   });
 
-  bool _canEdit(List<String> assignments) {
+  bool get canEdit {
     if (!isEditable) return false;
     if (adminOverride && isUserCoordinator) return true;
     if (assignments.isNotEmpty) {
@@ -51,99 +71,112 @@ class DeviceSectionImproved extends ConsumerWidget {
     }
     return true;
   }
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // ★ Solo escucha las entries de SU sección
-    final entries = ref.watch(sectionEntriesProvider(defId));
-    // ★ Solo escucha SUS assignments
-    final assignments = ref.watch(sectionAssignmentsProvider(defId));
-
-    if (entries.isEmpty) return const SizedBox.shrink();
-
-    // Obtener el mapa de índices globales (lectura sin escucha)
-    final state = ref.read(reportNotifierProvider);
-    final indexMap = state?.instanceIdToGlobalIndex ?? {};
-
-    // Filtrar actividades relevantes para esta sección
-    final scheduledActivityIds = entries.expand((e) => e.results.keys).toSet();
-    final relevantActivities = deviceDef.activities
-        .where((a) => scheduledActivityIds.contains(a.id))
-        .toList();
-
-    if (relevantActivities.isEmpty) return const SizedBox.shrink();
-
-    final canEdit = _canEdit(assignments);
-    final notifier = ref.read(reportNotifierProvider.notifier);
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(color: const Color(0xFF1E293B), width: 2),
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: StickyHeader(
-          header: _SectionHeader(
-            defId: defId,
-            deviceDef: deviceDef,
-            entries: entries,
-            assignments: assignments,
-            users: users,
-          ),
-          content: Container(
-            color: Colors.white,
-            child: deviceDef.viewMode == 'table'
-                ? _TableView(
-                    entries: entries,
-                    activities: relevantActivities,
-                    canEdit: canEdit,
-                    indexMap: indexMap,
-                    notifier: notifier,
-                    onCameraClick: onCameraClick,
-                    onObservationClick: onObservationClick,
-                  )
-                : _ListView(
-                    entries: entries,
-                    activities: relevantActivities,
-                    canEdit: canEdit,
-                    indexMap: indexMap,
-                    notifier: notifier,
-                    onCameraClick: onCameraClick,
-                    onObservationClick: onObservationClick,
-                  ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
+/// Genera una lista plana de widgets para insertar en un SliverList.
+/// Cada widget es independiente y puede ser virtualizado por el CustomScrollView.
+List<Widget> buildFlatWidgetsForSection(FlatSectionData data, ReportNotifier notifier) {
+  if (data.entries.isEmpty || data.relevantActivities.isEmpty) return [];
+
+  final List<Widget> widgets = [];
+
+  // 1. HEADER DE SECCIÓN (siempre visible cuando la sección está en pantalla)
+  widgets.add(
+    DeviceSectionHeader(
+      key: ValueKey('header_${data.defId}'),
+      defId: data.defId,
+      deviceDef: data.deviceDef,
+      entries: data.entries,
+      assignments: data.assignments,
+      users: data.users,
+      notifier: notifier,
+      isFirst: true,
+    ),
+  );
+
+  final isTableView = data.deviceDef.viewMode == 'table';
+
+  if (isTableView) {
+    // 2a. TABLE VIEW: Header de columnas + filas individuales
+    widgets.add(
+      _TableColumnHeader(
+        key: ValueKey('colheader_${data.defId}'),
+        activities: data.relevantActivities,
+      ),
+    );
+
+    for (int i = 0; i < data.entries.length; i++) {
+      final entry = data.entries[i];
+      final globalIndex = data.indexMap[entry.instanceId] ?? -1;
+      if (globalIndex == -1) continue;
+
+      widgets.add(
+        RepaintBoundary(
+          child: DeviceSectionTableRow(
+            key: ValueKey('trow_${entry.instanceId}'),
+            globalIndex: globalIndex,
+            activities: data.relevantActivities,
+            canEdit: data.canEdit,
+            notifier: notifier,
+            onCameraClick: data.onCameraClick,
+            onObservationClick: data.onObservationClick,
+          ),
+        ),
+      );
+    }
+  } else {
+    // 2b. LIST VIEW: Cards individuales (en filas de 1-3 según ancho)
+    // Como no podemos hacer GridView virtualizado dentro de Slivers fácilmente,
+    // agrupamos las cards en filas manuales
+    for (int i = 0; i < data.entries.length; i++) {
+      final entry = data.entries[i];
+      final globalIndex = data.indexMap[entry.instanceId] ?? -1;
+      if (globalIndex == -1) continue;
+
+      widgets.add(
+        RepaintBoundary(
+          child: DeviceSectionListCard(
+            key: ValueKey('card_${entry.instanceId}'),
+            globalIndex: globalIndex,
+            activities: data.relevantActivities,
+            canEdit: data.canEdit,
+            notifier: notifier,
+            onCameraClick: data.onCameraClick,
+            onObservationClick: data.onObservationClick,
+          ),
+        ),
+      );
+    }
+  }
+
+  // 3. SPACER al final de la sección
+  widgets.add(const SizedBox(height: 16));
+
+  return widgets;
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION HEADER — Extraído como widget independiente
+// SECTION HEADER
 // ═══════════════════════════════════════════════════════════════════════
-class _SectionHeader extends ConsumerWidget {
+class DeviceSectionHeader extends ConsumerWidget {
   final String defId;
   final DeviceModel deviceDef;
   final List<ReportEntry> entries;
   final List<String> assignments;
   final List<UserModel> users;
+  final ReportNotifier notifier;
+  final bool isFirst;
 
-  const _SectionHeader({
+  const DeviceSectionHeader({
+    super.key,
     required this.defId,
     required this.deviceDef,
     required this.entries,
     required this.assignments,
     required this.users,
+    required this.notifier,
+    this.isFirst = false,
   });
 
   Map<String, dynamic> _calculateProgress() {
@@ -179,15 +212,15 @@ class _SectionHeader extends ConsumerWidget {
 
     final isSmallScreen = MediaQuery.of(context).size.width < 600;
     final progress = _calculateProgress();
-    final notifier = ref.read(reportNotifierProvider.notifier);
 
     return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      decoration: const BoxDecoration(
-        color: Color(0xFF1E293B),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
+      margin: EdgeInsets.fromLTRB(16, isFirst ? 0 : 0, 16, 0),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E293B),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+        border: Border.all(color: const Color(0xFF1E293B), width: 2),
       ),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       child: Column(
         children: [
           isSmallScreen
@@ -261,6 +294,331 @@ class _SectionHeader extends ConsumerWidget {
     );
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// TABLE COLUMN HEADER (cabecera de columnas para vista tabla)
+// ═══════════════════════════════════════════════════════════════════════
+class _TableColumnHeader extends StatelessWidget {
+  final List<ActivityConfig> activities;
+
+  const _TableColumnHeader({super.key, required this.activities});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: const Color(0xFF1E293B), width: 2),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SizedBox(
+          width: 230.0 + (activities.length * 100.0) + 110.0,
+          child: Container(
+            color: const Color(0xFFF1F5F9),
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _HeaderCell(text: 'ID', width: 80),
+                  _HeaderCell(text: 'UBICACIÓN', width: 150),
+                  ...activities
+                      .map((act) => _HeaderCell(text: act.name, width: 100)),
+                  _HeaderCell(text: 'FOTO/OBS', width: 110),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TABLE ENTRY ROW — ConsumerWidget que escucha SOLO SU entry
+// ═══════════════════════════════════════════════════════════════════════
+class DeviceSectionTableRow extends ConsumerWidget {
+  final int globalIndex;
+  final List<ActivityConfig> activities;
+  final bool canEdit;
+  final ReportNotifier notifier;
+  final Function(int, {String? activityId}) onCameraClick;
+  final Function(int, {String? activityId}) onObservationClick;
+
+  const DeviceSectionTableRow({
+    super.key,
+    required this.globalIndex,
+    required this.activities,
+    required this.canEdit,
+    required this.notifier,
+    required this.onCameraClick,
+    required this.onObservationClick,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final entry = ref.watch(singleEntryProvider(globalIndex));
+    if (entry == null) return const SizedBox(height: 52);
+
+    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          left: const BorderSide(color: Color(0xFF1E293B), width: 2),
+          right: const BorderSide(color: Color(0xFF1E293B), width: 2),
+          bottom: BorderSide(color: Colors.grey.shade200),
+        ),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SizedBox(
+          width: totalWidth,
+          height: 52.0,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // CustomId
+              SizedBox(
+                width: 80,
+                child: Center(
+                  child: SizedBox(
+                    width: 60,
+                    height: 32,
+                    child: _IsolatedTextField(
+                      key: ValueKey('id_${entry.instanceId}'),
+                      initialValue: entry.customId,
+                      enabled: canEdit,
+                      onChanged: (val) =>
+                          notifier.updateCustomId(globalIndex, val),
+                    ),
+                  ),
+                ),
+              ),
+              // Area
+              SizedBox(
+                width: 150,
+                child: Center(
+                  child: SizedBox(
+                    width: 130,
+                    height: 32,
+                    child: _IsolatedTextField(
+                      key: ValueKey('area_${entry.instanceId}'),
+                      initialValue: entry.area,
+                      hint: '...',
+                      enabled: canEdit,
+                      onChanged: (val) =>
+                          notifier.updateArea(globalIndex, val),
+                    ),
+                  ),
+                ),
+              ),
+              // Status toggles
+              ...activities.map((act) {
+                if (!entry.results.containsKey(act.id)) {
+                  return const SizedBox(width: 100);
+                }
+                return SizedBox(
+                  width: 100,
+                  child: Center(
+                    child: InkWell(
+                      onTap: canEdit
+                          ? () => notifier.toggleStatus(globalIndex, act.id)
+                          : null,
+                      borderRadius: BorderRadius.circular(12),
+                      child: _CompactStatusBadge(status: entry.results[act.id]),
+                    ),
+                  ),
+                );
+              }),
+              // Photo/Obs actions
+              SizedBox(
+                width: 110,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    _CompactActionIcon(
+                      icon: entry.photoUrls.isNotEmpty
+                          ? Icons.camera_alt
+                          : Icons.camera_alt_outlined,
+                      isActive: entry.photoUrls.isNotEmpty,
+                      activeColor: const Color(0xFF3B82F6),
+                      onTap: canEdit
+                          ? () => onCameraClick(globalIndex)
+                          : null,
+                    ),
+                    const SizedBox(width: 8),
+                    _CompactActionIcon(
+                      icon: entry.observations.isNotEmpty
+                          ? Icons.comment
+                          : Icons.comment_outlined,
+                      isActive: entry.observations.isNotEmpty,
+                      activeColor: const Color(0xFFF59E0B),
+                      onTap: canEdit
+                          ? () => onObservationClick(globalIndex)
+                          : null,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// LIST ENTRY CARD — ConsumerWidget que escucha SOLO SU entry
+// ═══════════════════════════════════════════════════════════════════════
+class DeviceSectionListCard extends ConsumerWidget {
+  final int globalIndex;
+  final List<ActivityConfig> activities;
+  final bool canEdit;
+  final ReportNotifier notifier;
+  final Function(int, {String? activityId}) onCameraClick;
+  final Function(int, {String? activityId}) onObservationClick;
+
+  const DeviceSectionListCard({
+    super.key,
+    required this.globalIndex,
+    required this.activities,
+    required this.canEdit,
+    required this.notifier,
+    required this.onCameraClick,
+    required this.onObservationClick,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final entry = ref.watch(singleEntryProvider(globalIndex));
+    if (entry == null) return const SizedBox();
+
+    final entryActivities = activities
+        .where((act) => entry.results.containsKey(act.id))
+        .toList();
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 0),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          left: const BorderSide(color: Color(0xFF1E293B), width: 2),
+          right: const BorderSide(color: Color(0xFF1E293B), width: 2),
+          bottom: BorderSide(color: Colors.grey.shade200),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ID + Area row
+          Row(
+            children: [
+              SizedBox(
+                width: 60,
+                height: 32,
+                child: _IsolatedTextField(
+                  key: ValueKey('grid_id_${entry.instanceId}'),
+                  initialValue: entry.customId,
+                  hint: 'ID',
+                  enabled: canEdit,
+                  onChanged: (val) =>
+                      notifier.updateCustomId(globalIndex, val),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SizedBox(
+                  height: 32,
+                  child: _IsolatedTextField(
+                    key: ValueKey('grid_area_${entry.instanceId}'),
+                    initialValue: entry.area,
+                    hint: 'Ubicación...',
+                    enabled: canEdit,
+                    onChanged: (val) =>
+                        notifier.updateArea(globalIndex, val),
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          if (entryActivities.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            const Divider(height: 1, color: Color(0xFFF1F5F9)),
+            const SizedBox(height: 8),
+          ],
+
+          // Activity rows
+          ...entryActivities.map((act) {
+            final status = entry.results[act.id];
+            final hasPhotos =
+                (entry.activityData[act.id]?.photoUrls.length ?? 0) > 0;
+            final hasObs =
+                (entry.activityData[act.id]?.observations ?? '').isNotEmpty;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: Text(
+                      act.name,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF334155),
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  _CompactActionIcon(
+                    icon: hasPhotos
+                        ? Icons.camera_alt
+                        : Icons.camera_alt_outlined,
+                    isActive: hasPhotos,
+                    activeColor: const Color(0xFF3B82F6),
+                    onTap: canEdit
+                        ? () =>
+                            onCameraClick(globalIndex, activityId: act.id)
+                        : null,
+                  ),
+                  _CompactActionIcon(
+                    icon: hasObs ? Icons.comment : Icons.comment_outlined,
+                    isActive: hasObs,
+                    activeColor: const Color(0xFFF59E0B),
+                    onTap: canEdit
+                        ? () => onObservationClick(globalIndex,
+                            activityId: act.id)
+                        : null,
+                  ),
+                  const SizedBox(width: 4),
+                  InkWell(
+                    onTap: canEdit
+                        ? () => notifier.toggleStatus(globalIndex, act.id)
+                        : null,
+                    child: _CompactStatusBadge(status: status),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // PROGRESS BAR
@@ -463,7 +821,6 @@ class _ResponsiblesRow extends StatelessWidget {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Header
                     Container(
                       padding: const EdgeInsets.symmetric(
                         horizontal: 20,
@@ -500,8 +857,6 @@ class _ResponsiblesRow extends StatelessWidget {
                         ],
                       ),
                     ),
-
-                    // Lista de usuarios
                     Flexible(
                       child: users.isEmpty
                           ? Padding(
@@ -601,8 +956,6 @@ class _ResponsiblesRow extends StatelessWidget {
                               },
                             ),
                     ),
-
-                    // Botón LISTO
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: const BoxDecoration(
@@ -771,475 +1124,6 @@ class _UserChip extends StatelessWidget {
   }
 }
 
-class _TableView extends StatelessWidget {
-  final List<ReportEntry> entries;
-  final List<ActivityConfig> activities;
-  final bool canEdit;
-  final Map<String, int> indexMap;
-  final ReportNotifier notifier;
-  final Function(int, {String? activityId}) onCameraClick;
-  final Function(int, {String? activityId}) onObservationClick;
-
-  const _TableView({
-    required this.entries,
-    required this.activities,
-    required this.canEdit,
-    required this.indexMap,
-    required this.notifier,
-    required this.onCameraClick,
-    required this.onObservationClick,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final ScrollController horizontalScrollController = ScrollController();
-    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0;
-
-    // ★ FIX: Altura pre-calculada para EVITAR shrinkWrap
-    // Header (~50) + filas (52 cada una)
-    // Limitamos a un máximo razonable para no crear un widget enorme
-    const double headerHeight = 50.0;
-    const double rowHeight = 52.0;
-    // Mostrar máximo 15 filas sin scroll interno, el resto usa scroll del ListView
-    final int maxVisibleRows = entries.length;
-    final double bodyHeight = maxVisibleRows * rowHeight;
-    // ignore: unused_local_variable
-    final double totalHeight = headerHeight + bodyHeight;
-
-    return Scrollbar(
-      controller: horizontalScrollController,
-      thumbVisibility: true,
-      trackVisibility: true,
-      child: SingleChildScrollView(
-        controller: horizontalScrollController,
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.only(bottom: 12),
-        child: SizedBox(
-          width: totalWidth,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // CABECERA
-              Container(
-                color: const Color(0xFFF1F5F9),
-                child: IntrinsicHeight(
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _HeaderCell(text: 'ID', width: 80),
-                      _HeaderCell(text: 'UBICACIÓN', width: 150),
-                      ...activities
-                          .map((act) => _HeaderCell(text: act.name, width: 100)),
-                      _HeaderCell(text: 'FOTO/OBS', width: 110),
-                    ],
-                  ),
-                ),
-              ),
-
-              // ★ FIX: SizedBox con altura fija en vez de shrinkWrap
-              // Esto permite que el ListView tenga su propio viewport
-              // y SOLO construya las filas visibles (~10-15)
-              SizedBox(
-                height: bodyHeight,
-                child: ListView.builder(
-                  // ★ SIN shrinkWrap, SIN NeverScrollableScrollPhysics
-                  // El scroll horizontal ya está manejado por SingleChildScrollView
-                  // El scroll vertical lo maneja el CustomScrollView padre
-                  // Este ListView solo virtualiza las filas
-                  physics: const NeverScrollableScrollPhysics(),
-                  itemCount: entries.length,
-                  itemExtent: rowHeight,
-                  // ★ addAutomaticKeepAlives false para menos memoria
-                  addAutomaticKeepAlives: false,
-                  addRepaintBoundaries: false, // Ya los ponemos manualmente
-                  itemBuilder: (context, localIndex) {
-                    final entry = entries[localIndex];
-                    final globalIndex = indexMap[entry.instanceId] ?? -1;
-
-                    if (globalIndex == -1) return const SizedBox(height: 52);
-
-                    return RepaintBoundary(
-                      child: _TableEntryRow(
-                        key: ValueKey('trow_${entry.instanceId}'),
-                        globalIndex: globalIndex,
-                        activities: activities,
-                        canEdit: canEdit,
-                        notifier: notifier,
-                        onCameraClick: onCameraClick,
-                        onObservationClick: onObservationClick,
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// ★ TABLE ENTRY ROW — ConsumerWidget que escucha SOLO SU entry
-//
-// ANTES: La fila recibía `ReportEntry entry` como parámetro del padre.
-//        Si CUALQUIER entry cambiaba → el padre hacía rebuild → TODAS
-//        las filas se reconstruían.
-//
-// DESPUÉS: Cada fila escucha singleEntryProvider(globalIndex).
-//          Si la entry 42 cambia, SOLO la fila 42 se reconstruye.
-// ═══════════════════════════════════════════════════════════════════════
-class _TableEntryRow extends ConsumerWidget {
-  final int globalIndex;
-  final List<ActivityConfig> activities;
-  final bool canEdit;
-  final ReportNotifier notifier;
-  final Function(int, {String? activityId}) onCameraClick;
-  final Function(int, {String? activityId}) onObservationClick;
-
-  const _TableEntryRow({
-    super.key,
-    required this.globalIndex,
-    required this.activities,
-    required this.canEdit,
-    required this.notifier,
-    required this.onCameraClick,
-    required this.onObservationClick,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    // ★ Solo escucha SU entry
-    final entry = ref.watch(singleEntryProvider(globalIndex));
-    if (entry == null) return const SizedBox(height: 52);
-
-    return Container(
-      height: 52.0,
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          // CustomId
-          SizedBox(
-            width: 80,
-            child: Center(
-              child: SizedBox(
-                width: 60,
-                height: 32,
-                child: _IsolatedTextField(
-                  key: ValueKey('id_${entry.instanceId}'),
-                  initialValue: entry.customId,
-                  enabled: canEdit,
-                  onChanged: (val) => notifier.updateCustomId(globalIndex, val),
-                ),
-              ),
-            ),
-          ),
-          // Area
-          SizedBox(
-            width: 150,
-            child: Center(
-              child: SizedBox(
-                width: 130,
-                height: 32,
-                child: _IsolatedTextField(
-                  key: ValueKey('area_${entry.instanceId}'),
-                  initialValue: entry.area,
-                  hint: '...',
-                  enabled: canEdit,
-                  onChanged: (val) => notifier.updateArea(globalIndex, val),
-                ),
-              ),
-            ),
-          ),
-          // Status toggles
-          ...activities.map((act) {
-            if (!entry.results.containsKey(act.id)) {
-              return const SizedBox(width: 100);
-            }
-            return SizedBox(
-              width: 100,
-              child: Center(
-                child: InkWell(
-                  onTap: canEdit
-                      ? () => notifier.toggleStatus(globalIndex, act.id)
-                      : null,
-                  borderRadius: BorderRadius.circular(12),
-                  child: _CompactStatusBadge(status: entry.results[act.id]),
-                ),
-              ),
-            );
-          }),
-          // Photo/Obs actions
-          SizedBox(
-            width: 110,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _CompactActionIcon(
-                  icon: entry.photoUrls.isNotEmpty
-                      ? Icons.camera_alt
-                      : Icons.camera_alt_outlined,
-                  isActive: entry.photoUrls.isNotEmpty,
-                  activeColor: const Color(0xFF3B82F6),
-                  onTap: canEdit
-                      ? () => onCameraClick(globalIndex)
-                      : null,
-                ),
-                const SizedBox(width: 8),
-                _CompactActionIcon(
-                  icon: entry.observations.isNotEmpty
-                      ? Icons.comment
-                      : Icons.comment_outlined,
-                  isActive: entry.observations.isNotEmpty,
-                  activeColor: const Color(0xFFF59E0B),
-                  onTap: canEdit
-                      ? () => onObservationClick(globalIndex)
-                      : null,
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// LIST VIEW (Cards) — Cada card es un _ListEntryCard (ConsumerWidget)
-// ═══════════════════════════════════════════════════════════════════════
-class _ListView extends StatelessWidget {
-  final List<ReportEntry> entries;
-  final List<ActivityConfig> activities;
-  final bool canEdit;
-  final Map<String, int> indexMap;
-  final ReportNotifier notifier;
-  final Function(int, {String? activityId}) onCameraClick;
-  final Function(int, {String? activityId}) onObservationClick;
-
-  const _ListView({
-    required this.entries,
-    required this.activities,
-    required this.canEdit,
-    required this.indexMap,
-    required this.notifier,
-    required this.onCameraClick,
-    required this.onObservationClick,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final double width = constraints.maxWidth;
-        int columns = 1;
-        if (width > 700) columns = 2;
-        if (width > 1100) columns = 3;
-
-        const double spacing = 12.0;
-        final double itemHeight = 80.0 + (activities.length * 40.0) + 24.0;
-
-        // ★ FIX: Calcular altura total para evitar shrinkWrap
-        final int totalRows = (entries.length / columns).ceil();
-        final double totalHeight =
-            (totalRows * itemHeight) + ((totalRows - 1) * spacing) + 32.0;
-
-        return Padding(
-          padding: const EdgeInsets.all(16),
-          child: SizedBox(
-            height: totalHeight,
-            child: GridView.builder(
-              // ★ SIN shrinkWrap
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: entries.length,
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: columns,
-                crossAxisSpacing: spacing,
-                mainAxisSpacing: spacing,
-                mainAxisExtent: itemHeight,
-              ),
-              addAutomaticKeepAlives: false,
-              addRepaintBoundaries: false,
-              itemBuilder: (context, localIndex) {
-                final entry = entries[localIndex];
-                final globalIndex = indexMap[entry.instanceId] ?? -1;
-
-                if (globalIndex == -1) return const SizedBox();
-
-                return RepaintBoundary(
-                  child: _ListEntryCard(
-                    key: ValueKey('card_${entry.instanceId}'),
-                    globalIndex: globalIndex,
-                    activities: activities,
-                    canEdit: canEdit,
-                    notifier: notifier,
-                    onCameraClick: onCameraClick,
-                    onObservationClick: onObservationClick,
-                  ),
-                );
-              },
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// ★ LIST ENTRY CARD — ConsumerWidget que escucha SOLO SU entry
-// ═══════════════════════════════════════════════════════════════════════
-class _ListEntryCard extends ConsumerWidget {
-  final int globalIndex;
-  final List<ActivityConfig> activities;
-  final bool canEdit;
-  final ReportNotifier notifier;
-  final Function(int, {String? activityId}) onCameraClick;
-  final Function(int, {String? activityId}) onObservationClick;
-
-  const _ListEntryCard({
-    super.key,
-    required this.globalIndex,
-    required this.activities,
-    required this.canEdit,
-    required this.notifier,
-    required this.onCameraClick,
-    required this.onObservationClick,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final entry = ref.watch(singleEntryProvider(globalIndex));
-    if (entry == null) return const SizedBox();
-
-    final entryActivities = activities
-        .where((act) => entry.results.containsKey(act.id))
-        .toList();
-
-    return ClipRect(
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFE2E8F0), width: 1.5),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x0A000000),
-              blurRadius: 4,
-              offset: Offset(0, 2),
-            ),
-          ],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ID + Area row
-            Row(
-              children: [
-                SizedBox(
-                  width: 60,
-                  height: 32,
-                  child: _IsolatedTextField(
-                    key: ValueKey('grid_id_${entry.instanceId}'),
-                    initialValue: entry.customId,
-                    hint: 'ID',
-                    enabled: canEdit,
-                    onChanged: (val) =>
-                        notifier.updateCustomId(globalIndex, val),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: SizedBox(
-                    height: 32,
-                    child: _IsolatedTextField(
-                      key: ValueKey('grid_area_${entry.instanceId}'),
-                      initialValue: entry.area,
-                      hint: 'Ubicación...',
-                      enabled: canEdit,
-                      onChanged: (val) =>
-                          notifier.updateArea(globalIndex, val),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-
-            if (entryActivities.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              const Divider(height: 1, color: Color(0xFFF1F5F9)),
-              const SizedBox(height: 8),
-            ],
-
-            // Activity rows
-            ...entryActivities.map((act) {
-              final status = entry.results[act.id];
-              final hasPhotos =
-                  (entry.activityData[act.id]?.photoUrls.length ?? 0) > 0;
-              final hasObs =
-                  (entry.activityData[act.id]?.observations ?? '').isNotEmpty;
-
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        act.name,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF334155),
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    _CompactActionIcon(
-                      icon: hasPhotos
-                          ? Icons.camera_alt
-                          : Icons.camera_alt_outlined,
-                      isActive: hasPhotos,
-                      activeColor: const Color(0xFF3B82F6),
-                      onTap: canEdit
-                          ? () => onCameraClick(globalIndex, activityId: act.id)
-                          : null,
-                    ),
-                    _CompactActionIcon(
-                      icon: hasObs ? Icons.comment : Icons.comment_outlined,
-                      isActive: hasObs,
-                      activeColor: const Color(0xFFF59E0B),
-                      onTap: canEdit
-                          ? () => onObservationClick(globalIndex,
-                              activityId: act.id)
-                          : null,
-                    ),
-                    const SizedBox(width: 4),
-                    InkWell(
-                      onTap: canEdit
-                          ? () => notifier.toggleStatus(globalIndex, act.id)
-                          : null,
-                      child: _CompactStatusBadge(status: status),
-                    ),
-                  ],
-                ),
-              );
-            }),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // SHARED WIDGETS
 // ═══════════════════════════════════════════════════════════════════════
@@ -1385,11 +1269,7 @@ class _CompactStatusBadge extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ★ ISOLATED TEXT FIELD — Controller local con debounce
-//
-// Al teclear, NO notifica al estado global inmediatamente.
-// Solo después de 600ms de inactividad envía el valor al notifier.
-// El notifier usa _scheduleSaveQuiet → NO hace state = ... → 0 rebuilds.
+// ISOLATED TEXT FIELD — Controller local con debounce
 // ═══════════════════════════════════════════════════════════════════════
 class _IsolatedTextField extends StatefulWidget {
   final String initialValue;
@@ -1422,7 +1302,6 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
   @override
   void didUpdateWidget(covariant _IsolatedTextField oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Solo sincronizar si cambió externamente (ej. Firebase push)
     if (oldWidget.initialValue != widget.initialValue &&
         _controller.text != widget.initialValue) {
       _controller.text = widget.initialValue;
@@ -1432,7 +1311,6 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
   @override
   void dispose() {
     _debounce?.cancel();
-    // Flush final: enviar el último valor antes de destruir
     if (_controller.text != widget.initialValue) {
       widget.onChanged(_controller.text);
     }
@@ -1468,7 +1346,6 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
         ),
       ),
       onChanged: (val) {
-        // ★ Debounce local → 0 rebuilds globales mientras teclea
         _debounce?.cancel();
         _debounce = Timer(const Duration(milliseconds: 600), () {
           widget.onChanged(val);

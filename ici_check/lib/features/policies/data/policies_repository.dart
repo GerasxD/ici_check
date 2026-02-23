@@ -6,6 +6,11 @@ class PoliciesRepository {
   final CollectionReference _collection =
       FirebaseFirestore.instance.collection('policies');
 
+  // ══════════════════════════════════════════════════════════════════════
+  // STREAMS
+  // ══════════════════════════════════════════════════════════════════════
+
+  /// Escucha toda la colección de pólizas (útil para listados generales)
   Stream<List<PolicyModel>> getPoliciesStream() {
     return _collection
         .orderBy('startDate', descending: true)
@@ -17,6 +22,24 @@ class PoliciesRepository {
     });
   }
 
+  /// Escucha los cambios en TIEMPO REAL de una SOLA póliza por su ID
+  /// Retorna null si el documento no existe o fue eliminado.
+  Stream<PolicyModel?> getPolicyStream(String id) {
+    return _collection.doc(id).snapshots().map((snapshot) {
+      if (snapshot.exists && snapshot.data() != null) {
+        return PolicyModel.fromMap(
+          snapshot.data() as Map<String, dynamic>,
+          snapshot.id,
+        );
+      }
+      return null;
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // MUTACIONES
+  // ══════════════════════════════════════════════════════════════════════
+
   Future<void> savePolicy(PolicyModel policy) async {
     try {
       final data = policy.toMap();
@@ -24,7 +47,7 @@ class PoliciesRepository {
         // Crear nuevo dejando que Firestore genere el ID
         await _collection.add(data);
       } else {
-        // set con merge: crea si no existe, actualiza si existe
+        // set con merge: false sobrescribe el documento completo
         await _collection.doc(policy.id).set(data, SetOptions(merge: false));
       }
     } catch (e) {

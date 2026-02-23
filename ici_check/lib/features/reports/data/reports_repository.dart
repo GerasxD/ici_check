@@ -48,6 +48,22 @@ class ReportsRepository {
     }
   }
 
+  /// Evita llamar report.toMap() en el main thread.
+  Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
+    try {
+      final docRef = _db.collection('reports').doc(reportId);
+      if (_savedReportIds.contains(reportId)) {
+        await docRef.update(data);
+      } else {
+        await docRef.set(data);
+        _savedReportIds.add(reportId);
+      }
+    } catch (e) {
+      debugPrint('Error en saveReportRaw: $e');
+      rethrow;
+    }
+  }
+
   List<ReportEntry> generateEntriesForDate(
     PolicyModel policy,
     String dateStr,
