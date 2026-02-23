@@ -17,6 +17,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
@@ -179,27 +180,6 @@ class DeviceSectionHeader extends ConsumerWidget {
     this.isFirst = false,
   });
 
-  Map<String, dynamic> _calculateProgress() {
-    int totalActivities = 0;
-    int completedActivities = 0;
-    for (var entry in entries) {
-      for (var activityId in entry.results.keys) {
-        totalActivities++;
-        final value = entry.results[activityId];
-        if (value == 'OK' || value == 'NOK' || value == 'NA') {
-          completedActivities++;
-        }
-      }
-    }
-    final percentage = totalActivities > 0
-        ? (completedActivities / totalActivities) * 100
-        : 0.0;
-    return {
-      'total': totalActivities,
-      'completed': completedActivities,
-      'percentage': percentage,
-    };
-  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -211,7 +191,7 @@ class DeviceSectionHeader extends ConsumerWidget {
     }).toList();
 
     final isSmallScreen = MediaQuery.of(context).size.width < 600;
-    final progress = _calculateProgress();
+    final progress = ref.watch(sectionProgressProvider(defId));
 
     return Container(
       margin: EdgeInsets.fromLTRB(16, isFirst ? 0 : 0, 16, 0),
@@ -311,22 +291,24 @@ class _TableColumnHeader extends StatelessWidget {
         color: Colors.white,
         border: Border.all(color: const Color(0xFF1E293B), width: 2),
       ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: SizedBox(
-          width: 230.0 + (activities.length * 100.0) + 110.0,
-          child: Container(
-            color: const Color(0xFFF1F5F9),
-            child: IntrinsicHeight(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _HeaderCell(text: 'ID', width: 80),
-                  _HeaderCell(text: 'UBICACIÓN', width: 150),
-                  ...activities
-                      .map((act) => _HeaderCell(text: act.name, width: 100)),
-                  _HeaderCell(text: 'FOTO/OBS', width: 110),
-                ],
+      child: _DragScrollable(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: 230.0 + (activities.length * 100.0) + 110.0,
+            child: Container(
+              color: const Color(0xFFF1F5F9),
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _HeaderCell(text: 'ID', width: 80),
+                    _HeaderCell(text: 'UBICACIÓN', width: 150),
+                    ...activities
+                        .map((act) => _HeaderCell(text: act.name, width: 100)),
+                    _HeaderCell(text: 'FOTO/OBS', width: 110),
+                  ],
+                ),
               ),
             ),
           ),
@@ -374,98 +356,100 @@ class DeviceSectionTableRow extends ConsumerWidget {
           bottom: BorderSide(color: Colors.grey.shade200),
         ),
       ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: SizedBox(
-          width: totalWidth,
-          height: 52.0,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              // CustomId
-              SizedBox(
-                width: 80,
-                child: Center(
-                  child: SizedBox(
-                    width: 60,
-                    height: 32,
-                    child: _IsolatedTextField(
-                      key: ValueKey('id_${entry.instanceId}'),
-                      initialValue: entry.customId,
-                      enabled: canEdit,
-                      onChanged: (val) =>
-                          notifier.updateCustomId(globalIndex, val),
-                    ),
-                  ),
-                ),
-              ),
-              // Area
-              SizedBox(
-                width: 150,
-                child: Center(
-                  child: SizedBox(
-                    width: 130,
-                    height: 32,
-                    child: _IsolatedTextField(
-                      key: ValueKey('area_${entry.instanceId}'),
-                      initialValue: entry.area,
-                      hint: '...',
-                      enabled: canEdit,
-                      onChanged: (val) =>
-                          notifier.updateArea(globalIndex, val),
-                    ),
-                  ),
-                ),
-              ),
-              // Status toggles
-              ...activities.map((act) {
-                if (!entry.results.containsKey(act.id)) {
-                  return const SizedBox(width: 100);
-                }
-                return SizedBox(
-                  width: 100,
+      child: _DragScrollable(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: totalWidth,
+            height: 52.0,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // CustomId
+                SizedBox(
+                  width: 80,
                   child: Center(
-                    child: InkWell(
-                      onTap: canEdit
-                          ? () => notifier.toggleStatus(globalIndex, act.id)
-                          : null,
-                      borderRadius: BorderRadius.circular(12),
-                      child: _CompactStatusBadge(status: entry.results[act.id]),
+                    child: SizedBox(
+                      width: 60,
+                      height: 32,
+                      child: _IsolatedTextField(
+                        key: ValueKey('id_${entry.instanceId}'),
+                        initialValue: entry.customId,
+                        enabled: canEdit,
+                        onChanged: (val) =>
+                            notifier.updateCustomId(globalIndex, val),
+                      ),
                     ),
                   ),
-                );
-              }),
-              // Photo/Obs actions
-              SizedBox(
-                width: 110,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _CompactActionIcon(
-                      icon: entry.photoUrls.isNotEmpty
-                          ? Icons.camera_alt
-                          : Icons.camera_alt_outlined,
-                      isActive: entry.photoUrls.isNotEmpty,
-                      activeColor: const Color(0xFF3B82F6),
-                      onTap: canEdit
-                          ? () => onCameraClick(globalIndex)
-                          : null,
-                    ),
-                    const SizedBox(width: 8),
-                    _CompactActionIcon(
-                      icon: entry.observations.isNotEmpty
-                          ? Icons.comment
-                          : Icons.comment_outlined,
-                      isActive: entry.observations.isNotEmpty,
-                      activeColor: const Color(0xFFF59E0B),
-                      onTap: canEdit
-                          ? () => onObservationClick(globalIndex)
-                          : null,
-                    ),
-                  ],
                 ),
-              ),
-            ],
+                // Area
+                SizedBox(
+                  width: 150,
+                  child: Center(
+                    child: SizedBox(
+                      width: 130,
+                      height: 32,
+                      child: _IsolatedTextField(
+                        key: ValueKey('area_${entry.instanceId}'),
+                        initialValue: entry.area,
+                        hint: '...',
+                        enabled: canEdit,
+                        onChanged: (val) =>
+                            notifier.updateArea(globalIndex, val),
+                      ),
+                    ),
+                  ),
+                ),
+                // Status toggles
+                ...activities.map((act) {
+                  if (!entry.results.containsKey(act.id)) {
+                    return const SizedBox(width: 100);
+                  }
+                  return SizedBox(
+                    width: 100,
+                    child: Center(
+                      child: InkWell(
+                        onTap: canEdit
+                            ? () => notifier.toggleStatus(globalIndex, act.id)
+                            : null,
+                        borderRadius: BorderRadius.circular(12),
+                        child: _CompactStatusBadge(status: entry.results[act.id]),
+                      ),
+                    ),
+                  );
+                }),
+                // Photo/Obs actions
+                SizedBox(
+                  width: 110,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _CompactActionIcon(
+                        icon: entry.photoUrls.isNotEmpty
+                            ? Icons.camera_alt
+                            : Icons.camera_alt_outlined,
+                        isActive: entry.photoUrls.isNotEmpty,
+                        activeColor: const Color(0xFF3B82F6),
+                        onTap: canEdit
+                            ? () => onCameraClick(globalIndex)
+                            : null,
+                      ),
+                      const SizedBox(width: 8),
+                      _CompactActionIcon(
+                        icon: entry.observations.isNotEmpty
+                            ? Icons.comment
+                            : Icons.comment_outlined,
+                        isActive: entry.observations.isNotEmpty,
+                        activeColor: const Color(0xFFF59E0B),
+                        onTap: canEdit
+                            ? () => onObservationClick(globalIndex)
+                            : null,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -624,15 +608,15 @@ class DeviceSectionListCard extends ConsumerWidget {
 // PROGRESS BAR
 // ═══════════════════════════════════════════════════════════════════════
 class _ProgressBar extends StatelessWidget {
-  final Map<String, dynamic> progress;
 
+  final ({int total, int completed, double percentage}) progress;
   const _ProgressBar({required this.progress});
 
   @override
   Widget build(BuildContext context) {
-    final percentage = progress['percentage'] as double;
-    final completed = progress['completed'] as int;
-    final total = progress['total'] as int;
+    final percentage = progress.percentage;
+    final completed = progress.completed;
+    final total = progress.total;
 
     Color progressColor;
     if (percentage == 0) {
@@ -1127,6 +1111,32 @@ class _UserChip extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════
 // SHARED WIDGETS
 // ═══════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════
+// DRAG TO SCROLL — Habilita scroll horizontal con click+drag en web
+// ═══════════════════════════════════════════════════════════════════════
+class _DragScrollable extends StatefulWidget {
+  final Widget child;
+  const _DragScrollable({required this.child});
+
+  @override
+  State<_DragScrollable> createState() => _DragScrollableState();
+}
+
+class _DragScrollableState extends State<_DragScrollable> {
+  @override
+  Widget build(BuildContext context) {
+    return ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(
+        dragDevices: {
+          PointerDeviceKind.touch,
+          PointerDeviceKind.mouse,
+        },
+      ),
+      child: widget.child,
+    );
+  }
+}
 
 class _HeaderCell extends StatelessWidget {
   final String text;

@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/foundation.dart';
 
 class DeviceLocationService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
@@ -15,18 +16,20 @@ class DeviceLocationService {
   }) async {
     if (customId.isEmpty && area.isEmpty) return;
 
-    await _db.collection(_collection).doc(_docId(policyId, instanceId)).set({
-      'policyId': policyId,
-      'instanceId': instanceId,
-      'customId': customId,
-      'area': area,
-      'lastUpdated': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    try {
+      await _db.collection(_collection).doc(_docId(policyId, instanceId)).set({
+        'policyId': policyId,
+        'instanceId': instanceId,
+        'customId': customId,
+        'area': area,
+        'lastUpdated': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      debugPrint('✅ Ubicación guardada con éxito: $instanceId -> $area');
+    } catch (e) {
+      debugPrint('🚨 ERROR GUARDANDO UBICACIÓN: $e');
+    }
   }
 
-  /// ★ FIX: Batch queries en chunks de 30 (límite de whereIn)
-  /// ANTES: 600 instanceIds = 600 reads individuales → ANR
-  /// AHORA: 600 instanceIds = 20 queries batch → ~2 segundos
   Future<Map<String, Map<String, String>>> getLocationsForPolicy(
     String policyId,
     List<String> instanceIds,
@@ -35,7 +38,6 @@ class DeviceLocationService {
 
     if (instanceIds.isEmpty) return result;
 
-    // Firestore limita whereIn a 30 elementos por query
     final chunks = _chunkList(instanceIds, 30);
 
     for (final chunk in chunks) {
@@ -49,23 +51,25 @@ class DeviceLocationService {
 
         for (final doc in snapshots.docs) {
           final data = doc.data();
-          if (data.isNotEmpty) {
-            final instanceId = data['instanceId'] as String? ?? '';
-            if (instanceId.isNotEmpty) {
-              result[instanceId] = {
-                'customId': data['customId'] ?? '',
-                'area': data['area'] ?? '',
-              };
-            }
-          }
+          
+          // ★ FIX: Extraer el instanceId directamente del ID del documento
+          // doc.id es "policyId_instanceId". Le quitamos el policyId_.
+          final docId = doc.id; 
+          final instanceId = docId.replaceFirst('${policyId}_', '');
+
+          result[instanceId] = {
+            'customId': data['customId']?.toString() ?? '',
+            'area': data['area']?.toString() ?? '',
+          };
         }
       } catch (e) {
-        // Si falla un chunk, continuar con los demás
-        // (mejor parcial que nada)
+        // ★ FIX: ¡Que no muera en silencio!
+        debugPrint('🚨 ERROR LEYENDO UBICACIONES EN FIRESTORE (Chunk): $e');
         continue;
       }
     }
 
+    debugPrint('📍 Se cargaron ${result.length} ubicaciones guardadas.');
     return result;
   }
 

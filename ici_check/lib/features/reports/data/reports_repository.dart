@@ -8,6 +8,7 @@ import 'report_model.dart';
 
 class ReportsRepository {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  // ignore: unused_field
   final _uuid = const Uuid();
   final Set<String> _savedReportIds = {};
 
@@ -91,21 +92,13 @@ class ReportsRepository {
     }
 
     final Map<String, int> deviceCounters = {};
-    
-    // ✅ OPTIMIZACIÓN 1: Crear un HashMap de definiciones.
-    // En lugar de hacer un `firstWhere` por cada dispositivo de la póliza
-    // (lo cual es lento en listas grandes), creamos un mapa de acceso O(1).
     final Map<String, DeviceModel> definitionsMap = {
       for (final def in definitions) def.id: def
     };
-
-    // ✅ OPTIMIZACIÓN 2: Crear un "Dummy" genérico una sola vez
     final dummyDevice = DeviceModel(id: 'err', name: 'Unknown', description: '', activities: []);
 
     for (final devInstance in policy.devices) {
-      // ✅ Usar el mapa para búsqueda instantánea
       final def = definitionsMap[devInstance.definitionId] ?? dummyDevice;
-      
       if (def.id == 'err') continue;
 
       final namePrefix = def.name.substring(0, min(3, def.name.length)).toUpperCase();
@@ -114,6 +107,7 @@ class ReportsRepository {
         final String uid = unitInstanceId(devInstance.instanceId, i);
         final Map<String, String?> activityResults = {};
 
+        // (Lógica de frecuencias intacta)
         for (final act in def.activities) {
           bool isDue = false;
           const double epsilon = 0.05;
@@ -146,32 +140,32 @@ class ReportsRepository {
               }
             }
           }
-
           if (isDue) activityResults[act.id] = null;
         }
 
+        // Incrementamos el contador SIEMPRE, para mantener la numeración interna correcta
+        final int deviceIndex = (deviceCounters[devInstance.definitionId] ?? 0) + 1;
+        deviceCounters[devInstance.definitionId] = deviceIndex;
+
+        // ★ AQUÍ ESTÁ LA MAGIA DEL HISTORIAL ★
         final saved = savedLocations[uid];
         final savedCustomId = saved?['customId'] ?? '';
         final savedArea = saved?['area'] ?? '';
 
-        String autoCustomId;
-        if (savedCustomId.isNotEmpty) {
-          autoCustomId = savedCustomId;
-        } else {
-          // ✅ Optimizado: Asignación directa y lectura de una sola vez
-          final count = (deviceCounters[devInstance.definitionId] ?? 0) + 1;
-          deviceCounters[devInstance.definitionId] = count;
-          autoCustomId = '$namePrefix-$count';
-        }
-
-        final int deviceIndex = deviceCounters[devInstance.definitionId] ?? (entries.length + 1);
+        // Si tenemos un ID guardado en Firebase, lo usamos. Si no, generamos el automático (ej. "EXT-1")
+        final autoCustomId = savedCustomId.isNotEmpty 
+            ? savedCustomId 
+            : '$namePrefix-$deviceIndex';
 
         entries.add(ReportEntry(
           instanceId:  uid,
           deviceIndex: deviceIndex,
-          customId:    autoCustomId,
-          area:        savedArea,
+          customId:    autoCustomId,  // ¡ID pre-llenado!
+          area:        savedArea,     // ¡Ubicación pre-llenada!
           results:     activityResults,
+          observations: '',
+          photoUrls: const [],
+          activityData: const {},
         ));
       }
     }
@@ -216,6 +210,20 @@ class ReportsRepository {
     }).toList();
   }
 
+  Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
+    final snapshot = await _db
+        .collection('reports')
+        .where('policyId', isEqualTo: policyId)
+        .where('dateStr', isEqualTo: dateStr)
+        .limit(1)
+        .get();
+
+    if (snapshot.docs.isEmpty) return null;
+    final data = snapshot.docs.first.data();
+    data['id'] = snapshot.docs.first.id;
+    return ServiceReportModel.fromMap(data);
+  }
+
   ServiceReportModel initializeReport(
     PolicyModel policy,
     String dateStr,
@@ -229,8 +237,12 @@ class ReportsRepository {
       savedLocations: savedLocations,
     );
     debugPrint('✅ Reporte inicializado: ${entries.length} entradas para $dateStr');
+    
+    // ★ EL FIX: El ID del reporte DEBE ser predecible para que el servicio de locaciones coincida.
+    final reportId = '${policy.id}_$dateStr';
+
     return ServiceReportModel(
-      id:                    _uuid.v4(),
+      id:                    reportId,
       policyId:              policy.id,
       dateStr:               dateStr,
       serviceDate:           DateTime.now(),

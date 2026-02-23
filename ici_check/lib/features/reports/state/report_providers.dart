@@ -1,7 +1,6 @@
 // lib/features/reports/state/report_providers.dart
 //
 // ★ ESTE ES EL ÚNICO ARCHIVO DE PROVIDERS.
-// ★ ELIMINAR report_notifier.dart — ya no debe existir.
 // ★ TODOS los imports deben apuntar a ESTE archivo.
 
 import 'dart:async';
@@ -9,6 +8,7 @@ import 'package:flutter/foundation.dart'; // ★ CAMBIO 1: Nuevo import para com
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/reports/data/reports_repository.dart';
+import 'package:ici_check/features/reports/services/device_location_service.dart';
 import 'report_state.dart';
 
 // ★ CAMBIO 2: Función TOP-LEVEL para compute()
@@ -26,6 +26,7 @@ Map<String, dynamic> _serializeReportInIsolate(ServiceReportModel report) {
 // ─────────────────────────────────────────────────────────────────
 class ReportNotifier extends Notifier<ReportState?> {
   final ReportsRepository _repo = ReportsRepository();
+  final DeviceLocationService _locationService = DeviceLocationService();
   Timer? _saveDebounce;
   bool _hasPendingChanges = false;
   ServiceReportModel? _pendingReport;
@@ -141,18 +142,45 @@ class ReportNotifier extends Notifier<ReportState?> {
     if (state == null) return;
     final report = state!.report;
     final entries = List<ReportEntry>.from(report.entries);
+    
     entries[entryIndex] = _copyEntry(entries[entryIndex], customId: customId);
     final newReport = report.copyWith(entries: entries);
+    
+    // ★ EL FIX: ¡Actualizar el estado local para que Riverpod se entere!
+    state = state!.copyWithReportOnly(newReport);
+    
     _scheduleSaveQuiet(newReport);
+
+    final policyId = report.policyId;
+
+    _locationService.saveLocation(
+      policyId: policyId,
+      instanceId: entries[entryIndex].instanceId,
+      customId: customId,
+      area: entries[entryIndex].area, 
+    );
   }
 
   void updateArea(int entryIndex, String area) {
     if (state == null) return;
     final report = state!.report;
     final entries = List<ReportEntry>.from(report.entries);
+    
     entries[entryIndex] = _copyEntry(entries[entryIndex], area: area);
     final newReport = report.copyWith(entries: entries);
+    
+    // ★ EL FIX: Mantener el estado sincronizado
+    state = state!.copyWithReportOnly(newReport);
+    
     _scheduleSaveQuiet(newReport);
+
+    final policyId = report.policyId;
+    _locationService.saveLocation(
+      policyId: policyId,
+      instanceId: entries[entryIndex].instanceId,
+      customId: entries[entryIndex].customId, 
+      area: area,
+    );
   }
 
   // ═══════════════════════════════════════════════════════
@@ -174,6 +202,10 @@ class ReportNotifier extends Notifier<ReportState?> {
   void updateGeneralObservations(String text) {
     if (state == null) return;
     final newReport = state!.report.copyWith(generalObservations: text);
+    
+    // ★ EL FIX: Evita que se borren si finalizas el reporte muy rápido
+    state = state!.copyWithReportOnly(newReport);
+    
     _scheduleSaveQuiet(newReport);
   }
 
@@ -446,21 +478,32 @@ final singleEntryProvider = Provider.family<ReportEntry?, int>((ref, index) {
   }));
 });
 
-/// ★ NUEVO PROVIDER: Calcula el progreso de una sección específica
-/// Escucha SOLO los entries de esa sección usando sectionEntriesProvider
-/// → Recalcula automáticamente cuando un entry de la sección cambia
-/// → No afecta virtualization porque solo actualiza el header
+/// Lee directamente del árbol principal del estado usando los índices globales.
+/// Ya no depende de ningún otro provider intermedio que pueda quedarse cacheado.
 final sectionProgressProvider =
-    Provider.family<Map<String, dynamic>, String>((ref, defId) {
-  final entries = ref.watch(sectionEntriesProvider(defId));
+    Provider.family<({int total, int completed, double percentage}), String>((ref, defId) {
   
+  // Escuchamos el estado central. Si cambia un toggle, esto se re-ejecuta.
+  final state = ref.watch(reportNotifierProvider);
+  if (state == null) return (total: 0, completed: 0, percentage: 0.0);
+
   int totalActivities = 0;
   int completedActivities = 0;
+
+  // 1. Usamos el mapa agrupado SOLO para saber qué IDs (instanceId) pertenecen a esta sección
+  final groupedEntries = state.groupedEntriesMap[defId] ?? [];
   
-  for (var entry in entries) {
-    for (var activityId in entry.results.keys) {
+  for (final staleEntry in groupedEntries) {
+    // 2. Buscamos el índice global exacto de este equipo en tiempo real
+    final globalIndex = state.instanceIdToGlobalIndex[staleEntry.instanceId];
+    if (globalIndex == null) continue;
+    
+    // 3. Extraemos el equipo directamente de la lista maestra (¡Datos 100% frescos!)
+    final freshEntry = state.report.entries[globalIndex];
+    
+    // 4. Calculamos sobre los results actualizados
+    for (final value in freshEntry.results.values) {
       totalActivities++;
-      final value = entry.results[activityId];
       if (value == 'OK' || value == 'NOK' || value == 'NA') {
         completedActivities++;
       }
@@ -471,9 +514,10 @@ final sectionProgressProvider =
       ? (completedActivities / totalActivities) * 100
       : 0.0;
   
-  return {
-    'total': totalActivities,
-    'completed': completedActivities,
-    'percentage': percentage,
-  };
+  // Retornamos el Record
+  return (
+    total: totalActivities, 
+    completed: completedActivities, 
+    percentage: percentage
+  );
 });

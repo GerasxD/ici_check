@@ -168,8 +168,12 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
         );
       }
 
-      final instanceIds =
-          widget.policy.devices.map((d) => d.instanceId).toList();
+      final instanceIds = <String>[];
+        for (final dev in widget.policy.devices) {
+          for (int i = 1; i <= dev.quantity; i++) {
+            instanceIds.add(ReportsRepository.unitInstanceId(dev.instanceId, i));
+          }
+        }
 
       _savedLocations = await _locationService.getLocationsForPolicy(
         widget.policyId,
@@ -295,6 +299,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       _currentDevices,
       isWeekly,
       timeIndex,
+      savedLocations: _savedLocations, 
     );
 
     final mergedEntries = _mergeEntries(state.report.entries, idealEntries);
@@ -328,6 +333,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       _devicesEffective,
       isWeekly,
       timeIndex,
+      savedLocations: _savedLocations,
     );
 
     final mergedEntries = _mergeEntries(state.report.entries, idealEntries);
@@ -428,6 +434,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       _devicesEffective,
       isWeekly,
       timeIndex,
+      savedLocations: _savedLocations,  // ← AGREGAR
     );
 
     final mergedEntries = _mergeEntries(existingReport.entries, idealEntries);

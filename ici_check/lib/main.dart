@@ -92,7 +92,6 @@ class AuthWrapper extends StatelessWidget {
   }
 }
 
-
 class DashboardPlaceholder extends StatelessWidget {
   const DashboardPlaceholder({super.key});
 
