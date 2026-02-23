@@ -84,11 +84,14 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   StreamSubscription? _policySubscription;
   StreamSubscription? _reportSubscription;
   StreamSubscription? _devicesSubscription;
-  // ★ NUEVO: Timestamp del último save para ignorar ecos de Firebase
+  // ★ Timestamp del último save para ignorar ecos de Firebase
   DateTime? _lastSaveTime;
 
   // Ubicaciones guardadas
   Map<String, Map<String, String>> _savedLocations = {};
+
+  // ★ Scroll groups para sincronización horizontal por sección
+  final Map<String, LinkedScrollGroup> _scrollGroups = {};
 
   // Controladores de firma
   final SignatureController _providerSigController = SignatureController(
@@ -149,6 +152,11 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     _devicesSubscription?.cancel();
     _generalObsDebounce?.cancel();
     _generalObsController.dispose();
+    // ★ Dispose scroll groups
+    for (final group in _scrollGroups.values) {
+      group.dispose();
+    }
+    _scrollGroups.clear();
     super.dispose();
   }
 
@@ -207,7 +215,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
           if (previousPolicy != null &&
               _hasRelevantPolicyChanges(previousPolicy, updatedPolicy)) {
             _syncReportWithPolicy(updatedPolicy);
-          }
+          } 
         } catch (e) {
           debugPrint("Error actualizando póliza: $e");
         }
@@ -299,7 +307,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       _currentDevices,
       isWeekly,
       timeIndex,
-      savedLocations: _savedLocations, 
+      savedLocations: _savedLocations,
     );
 
     final mergedEntries = _mergeEntries(state.report.entries, idealEntries);
@@ -367,30 +375,25 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     return false;
   }
 
-   void _syncAndLoadReport(ServiceReportModel existingReport) {
+  void _syncAndLoadReport(ServiceReportModel existingReport) {
     // No pisar cambios locales pendientes
     if (_notifier.hasPendingChanges) return;
 
     // ★ FIX P2: Ignorar ecos de nuestros propios saves usando timestamp
-    // Después de guardar, Firebase nos devuelve el snapshot que acabamos
-    // de escribir. Sin este check, ejecutamos generateEntries + merge +
-    // buildGrouped + computeStats innecesariamente = CPU spike en móvil.
     if (_lastSaveTime != null &&
         DateTime.now().difference(_lastSaveTime!) < const Duration(seconds: 3)) {
-      return; // Es un eco de nuestro propio save reciente
+      return;
     }
 
     final currentState = ref.read(reportNotifierProvider);
     if (currentState != null && !_isLoading) {
       final current = currentState.report;
-      // Comparación rápida: si los campos clave no cambiaron, skip
       if (current.entries.length == existingReport.entries.length &&
           current.startTime == existingReport.startTime &&
           current.endTime == existingReport.endTime &&
           current.generalObservations == existingReport.generalObservations &&
           current.providerSignerName == existingReport.providerSignerName &&
           current.clientSignerName == existingReport.clientSignerName) {
-        // Verificar primera y última entry para más certeza
         bool likelySame = true;
         if (current.entries.isNotEmpty) {
           final lastIdx = current.entries.length - 1;
@@ -403,7 +406,6 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
                 likelySame = false;
                 break;
               }
-              // ★ NUEVO: Comparar también valores de results, no solo length
               if (likelySame) {
                 for (final key in a.results.keys) {
                   if (a.results[key] != b.results[key]) {
@@ -434,7 +436,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       _devicesEffective,
       isWeekly,
       timeIndex,
-      savedLocations: _savedLocations,  // ← AGREGAR
+      savedLocations: _savedLocations,
     );
 
     final mergedEntries = _mergeEntries(existingReport.entries, idealEntries);
@@ -459,7 +461,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     if (hasStructureChanges || hasLocationChanges) {
       final updatedReport = existingReport.copyWith(entries: mergedEntries);
       if (hasStructureChanges) {
-        _lastSaveTime = DateTime.now(); // ★ Marcar que estamos guardando
+        _lastSaveTime = DateTime.now();
         _repo.saveReport(updatedReport);
       }
       _initializeNotifier(updatedReport);
@@ -907,7 +909,6 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
         final entryIdx = _photoContextEntryIdx!;
         final activityId = _photoContextActivityId;
 
-        // Re-read state para tener la versión más reciente
         final currentState = ref.read(reportNotifierProvider)!;
         final entry = currentState.report.entries[entryIdx];
 
@@ -1007,171 +1008,161 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   // ══════════════════════════════════════════════════════════════════════
 
   @override
-Widget build(BuildContext context) {
-  // Escuchar el estado del reporte
-  final reportState = ref.watch(reportNotifierProvider);
+  Widget build(BuildContext context) {
+    final reportState = ref.watch(reportNotifierProvider);
 
-  if (_isLoading || reportState == null || _companySettings == null) {
-    return const Scaffold(
-      backgroundColor: _bgLight,
-      body: Center(child: CircularProgressIndicator(color: _primaryDark)),
-    );
-  }
+    if (_isLoading || reportState == null || _companySettings == null) {
+      return const Scaffold(
+        backgroundColor: _bgLight,
+        body: Center(child: CircularProgressIndicator(color: _primaryDark)),
+      );
+    }
 
-  // Datos derivados del caché (ya pre-computados, O(1))
-  final groupedEntriesList = reportState.groupedEntries;
-  final frequencies = reportState.frequencies;
+    final groupedEntriesList = reportState.groupedEntries;
+    final frequencies = reportState.frequencies;
 
-  // Usuarios asignados
-  final assignedUsers = widget.users
-      .where((user) =>
-          reportState.report.assignedTechnicianIds.contains(user.id))
-      .toList();
-
-  final isEditable = _isEditable(reportState);
-  final indexMap = reportState.instanceIdToGlobalIndex;
-  final notifier = ref.read(reportNotifierProvider.notifier);
-
-  String adminTooltip = 'Modo Admin';
-  if (_isUserCoordinator()) {
-    final role = _currentUser!.role;
-    final isHighRole =
-        role == UserRole.SUPER_USER || role == UserRole.ADMIN;
-    final label = isHighRole ? '$role' : 'Responsable de Póliza';
-    adminTooltip = _adminOverride
-        ? 'Modo Admin Activo ($label)'
-        : 'Activar Modo Admin ($label)';
-  }
-
-  // Construir la lista plana de widgets
-  final List<Widget> flatDeviceWidgets = [];
-
-  for (final entryGroup in groupedEntriesList) {
-    final defId = entryGroup.key;
-    final entries = entryGroup.value;
-
-    final deviceDef = _devicesEffective.firstWhere(
-      (d) => d.id == defId,
-      orElse: () => DeviceModel(
-        id: defId,
-        name: 'Desconocido',
-        description: '',
-        activities: [],
-      ),
-    );
-
-    // Filtrar actividades relevantes
-    final scheduledActivityIds = entries.expand((e) => e.results.keys).toSet();
-    final relevantActivities = deviceDef.activities
-        .where((a) => scheduledActivityIds.contains(a.id))
+    final assignedUsers = widget.users
+        .where((user) =>
+            reportState.report.assignedTechnicianIds.contains(user.id))
         .toList();
 
-    if (relevantActivities.isEmpty) continue;
+    final isEditable = _isEditable(reportState);
+    final indexMap = reportState.instanceIdToGlobalIndex;
+    final notifier = ref.read(reportNotifierProvider.notifier);
 
-    // Obtener assignments para esta sección
-    final assignments =
-        reportState.report.sectionAssignments[defId] ?? [];
+    String adminTooltip = 'Modo Admin';
+    if (_isUserCoordinator()) {
+      final role = _currentUser!.role;
+      final isHighRole =
+          role == UserRole.SUPER_USER || role == UserRole.ADMIN;
+      final label = isHighRole ? '$role' : 'Responsable de Póliza';
+      adminTooltip = _adminOverride
+          ? 'Modo Admin Activo ($label)'
+          : 'Activar Modo Admin ($label)';
+    }
 
-    final sectionData = FlatSectionData(
-      defId: defId,
-      deviceDef: deviceDef,
-      entries: entries,
-      assignments: assignments,
-      relevantActivities: relevantActivities,
-      users: assignedUsers,
-      isEditable: isEditable,
-      isUserCoordinator: _isUserCoordinator(),
-      adminOverride: _adminOverride,
-      currentUserId: _currentUserId,
-      indexMap: indexMap,
-      onCameraClick: (gi, {activityId}) =>
-          _handleCameraClick(gi, activityId: activityId),
-      onObservationClick: (gi, {activityId}) {
-        setState(() {
-          _activeObservationEntryIdx = gi;
-          _activeObservationActivityId = activityId;
-        });
-      },
-    );
+    // ★ Construir lista plana de widgets con scroll sincronizado
+    final List<Widget> sliverSectionGroups = [];
+    for (final entryGroup in groupedEntriesList) {
+      final defId = entryGroup.key;
+      final entries = entryGroup.value;
 
-    flatDeviceWidgets.addAll(
-      buildFlatWidgetsForSection(sectionData, notifier),
+      final deviceDef = _devicesEffective.firstWhere(
+        (d) => d.id == defId,
+        orElse: () => DeviceModel(
+          id: defId,
+          name: 'Desconocido',
+          description: '',
+          activities: [],
+        ),
+      );
+
+      final scheduledActivityIds = entries.expand((e) => e.results.keys).toSet();
+      final relevantActivities = deviceDef.activities
+          .where((a) => scheduledActivityIds.contains(a.id))
+          .toList();
+
+      if (relevantActivities.isEmpty) continue;
+
+      final assignments =
+          reportState.report.sectionAssignments[defId] ?? [];
+
+      // ★ Crear o reutilizar scroll group para esta sección
+      _scrollGroups[defId] ??= LinkedScrollGroup();
+
+      final sectionData = FlatSectionData(
+        defId: defId,
+        deviceDef: deviceDef,
+        entries: entries,
+        assignments: assignments,
+        relevantActivities: relevantActivities,
+        users: assignedUsers,
+        isEditable: isEditable,
+        isUserCoordinator: _isUserCoordinator(),
+        adminOverride: _adminOverride,
+        currentUserId: _currentUserId,
+        indexMap: indexMap,
+        onCameraClick: (gi, {activityId}) =>
+            _handleCameraClick(gi, activityId: activityId),
+        onObservationClick: (gi, {activityId}) {
+          setState(() {
+            _activeObservationEntryIdx = gi;
+            _activeObservationActivityId = activityId;
+          });
+        },
+        scrollGroup: _scrollGroups[defId]!,
+      );
+
+      sliverSectionGroups.add(buildSliverGroupForSection(sectionData, notifier));
+    }
+
+    return Scaffold(
+      backgroundColor: _bgLight,
+      appBar: _buildAppBar(adminTooltip, reportState),
+      body: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                ReportHeader(
+                  companySettings: _companySettings!,
+                  client: widget.client,
+                  serviceDate: reportState.report.serviceDate,
+                  dateStr: widget.dateStr,
+                  frequencies: frequencies,
+                ),
+                ReportControls(
+                  users: widget.users,
+                  adminOverride: _adminOverride,
+                  isUserDesignated: reportState.report
+                      .assignedTechnicianIds
+                      .contains(_currentUserId),
+                  currentUserId: _currentUserId,
+                  onStartService: _handleStartService,
+                  onEndService: _handleEndService,
+                  onResumeService: _handleResumeService,
+                ),
+              ],
+            ),
+          ),
+          ...sliverSectionGroups,
+          SliverToBoxAdapter(
+            child: Column(
+              children: [
+                _buildGeneralObservationsBox(reportState, isEditable),
+                const ReportSummary(),
+                ReportSignatures(
+                  providerController: _providerSigController,
+                  clientController: _clientSigController,
+                  providerName:
+                      reportState.report.providerSignerName,
+                  clientName:
+                      reportState.report.clientSignerName,
+                  providerSignatureData:
+                      reportState.report.providerSignature,
+                  clientSignatureData:
+                      reportState.report.clientSignature,
+                  isEditable: _canSignReport(),
+                  onProviderNameChanged: (val) {
+                    _notifier.updateSignatures(providerName: val);
+                  },
+                  onClientNameChanged: (val) {
+                    _notifier.updateSignatures(clientName: val);
+                  },
+                ),
+                const SizedBox(height: 20),
+              ],
+            ),
+          ),
+        ],
+      ),
+      bottomSheet: _activeObservationEntryIdx != null
+          ? _buildObservationModal(reportState)
+          : (_photoContextEntryIdx != null
+              ? _buildPhotoModal(reportState)
+              : null),
     );
   }
-
-  return Scaffold(
-    backgroundColor: _bgLight,
-    appBar: _buildAppBar(adminTooltip, reportState),
-    body: CustomScrollView(
-      slivers: [
-        SliverToBoxAdapter(
-          child: Column(
-            children: [
-              ReportHeader(
-                companySettings: _companySettings!,
-                client: widget.client,
-                serviceDate: reportState.report.serviceDate,
-                dateStr: widget.dateStr,
-                frequencies: frequencies,
-              ),
-              ReportControls(
-                users: widget.users,
-                adminOverride: _adminOverride,
-                isUserDesignated: reportState.report
-                    .assignedTechnicianIds
-                    .contains(_currentUserId),
-                currentUserId: _currentUserId,
-                onStartService: _handleStartService,
-                onEndService: _handleEndService,
-                onResumeService: _handleResumeService,
-              ),
-            ],
-          ),
-        ),
-        SliverList(
-          delegate: SliverChildBuilderDelegate(
-            (context, index) => flatDeviceWidgets[index],
-            childCount: flatDeviceWidgets.length,
-            addAutomaticKeepAlives: false,
-          ),
-        ),
-        SliverToBoxAdapter(
-          child: Column(
-            children: [
-              _buildGeneralObservationsBox(reportState, isEditable),
-              const ReportSummary(),
-              ReportSignatures(
-                providerController: _providerSigController,
-                clientController: _clientSigController,
-                providerName:
-                    reportState.report.providerSignerName,
-                clientName:
-                    reportState.report.clientSignerName,
-                providerSignatureData:
-                    reportState.report.providerSignature,
-                clientSignatureData:
-                    reportState.report.clientSignature,
-                isEditable: _canSignReport(),
-                onProviderNameChanged: (val) {
-                  _notifier.updateSignatures(providerName: val);
-                },
-                onClientNameChanged: (val) {
-                  _notifier.updateSignatures(clientName: val);
-                },
-              ),
-              const SizedBox(height: 20),
-            ],
-          ),
-        ),
-      ],
-    ),
-    bottomSheet: _activeObservationEntryIdx != null
-        ? _buildObservationModal(reportState)
-        : (_photoContextEntryIdx != null
-            ? _buildPhotoModal(reportState)
-            : null),
-  );
-}
 
   // ══════════════════════════════════════════════════════════════════════
   // APP BAR
@@ -1899,7 +1890,7 @@ Widget build(BuildContext context) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// OBSERVATION MODAL — Sin cambios, ya estaba bien aislado
+// OBSERVATION MODAL
 // ══════════════════════════════════════════════════════════════════════════
 
 class _ObservationModal extends StatefulWidget {

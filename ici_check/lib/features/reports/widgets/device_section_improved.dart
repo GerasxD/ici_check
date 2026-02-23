@@ -1,19 +1,12 @@
 // ═══════════════════════════════════════════════════════════════════════
 // DeviceSectionImproved — Refactorizado para VIRTUALIZACIÓN REAL
 //
-// ANTES: Widget monolítico que contenía un ListView/GridView interno
-//        con NeverScrollableScrollPhysics + SizedBox de altura fija.
-//        → Flutter construía TODAS las filas de golpe = lag en móvil.
-//
-// DESPUÉS: Expone widgets individuales (header + filas) que el
-//          CustomScrollView padre virtualiza directamente.
-//          Solo se construyen las ~10-15 filas visibles en pantalla.
-//
 // ARQUITECTURA:
-//   - DeviceSectionHeader: widget sticky del header de sección
-//   - DeviceSectionTableRow: ConsumerWidget para una fila de tabla
-//   - DeviceSectionListCard: ConsumerWidget para una card de lista
-//   - buildFlatSliverItems(): función que genera los slivers aplanados
+//   - LinkedScrollGroup: sincroniza scroll horizontal header ↔ filas
+//   - DeviceSectionHeader: header de sección con progreso
+//   - DeviceSectionTableRow: fila de tabla con scroll sincronizado
+//   - DeviceSectionListCard: card de lista
+//   - buildFlatWidgetsForSection(): genera widgets aplanados
 // ═══════════════════════════════════════════════════════════════════════
 
 import 'dart:async';
@@ -26,11 +19,43 @@ import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:ici_check/features/reports/state/report_providers.dart';
 
 // ═══════════════════════════════════════════════════════════════════════
-// FUNCIÓN PRINCIPAL: Genera los slivers aplanados para una sección
-//
-// Retorna una lista de widgets que se insertan directamente en el
-// SliverList del CustomScrollView padre. Esto permite virtualización
-// real: solo se construyen las filas visibles en pantalla.
+// LINKED SCROLL GROUP — Sincroniza scroll horizontal entre widgets
+// ═══════════════════════════════════════════════════════════════════════
+
+class LinkedScrollGroup {
+  final List<ScrollController> _controllers = [];
+  bool _isSyncing = false;
+
+  ScrollController createController() {
+    final controller = ScrollController();
+    _controllers.add(controller);
+    controller.addListener(() => _syncAll(controller));
+    return controller;
+  }
+
+  void _syncAll(ScrollController source) {
+    if (_isSyncing) return;
+    _isSyncing = true;
+    for (final c in _controllers) {
+      if (c != source && c.hasClients) {
+        if (c.offset != source.offset) {
+          c.jumpTo(source.offset);
+        }
+      }
+    }
+    _isSyncing = false;
+  }
+
+  void dispose() {
+    for (final c in _controllers) {
+      c.dispose();
+    }
+    _controllers.clear();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FLAT SECTION DATA
 // ═══════════════════════════════════════════════════════════════════════
 
 class FlatSectionData {
@@ -47,6 +72,7 @@ class FlatSectionData {
   final Map<String, int> indexMap;
   final Function(int globalIndex, {String? activityId}) onCameraClick;
   final Function(int globalIndex, {String? activityId}) onObservationClick;
+  final LinkedScrollGroup scrollGroup;
 
   FlatSectionData({
     required this.defId,
@@ -62,6 +88,7 @@ class FlatSectionData {
     required this.indexMap,
     required this.onCameraClick,
     required this.onObservationClick,
+    required this.scrollGroup,
   });
 
   bool get canEdit {
@@ -74,14 +101,16 @@ class FlatSectionData {
   }
 }
 
-/// Genera una lista plana de widgets para insertar en un SliverList.
-/// Cada widget es independiente y puede ser virtualizado por el CustomScrollView.
+// ═══════════════════════════════════════════════════════════════════════
+// FUNCIÓN PRINCIPAL: Genera widgets aplanados con scroll sincronizado
+// ═══════════════════════════════════════════════════════════════════════
+
 List<Widget> buildFlatWidgetsForSection(FlatSectionData data, ReportNotifier notifier) {
   if (data.entries.isEmpty || data.relevantActivities.isEmpty) return [];
 
   final List<Widget> widgets = [];
 
-  // 1. HEADER DE SECCIÓN (siempre visible cuando la sección está en pantalla)
+  // 1. HEADER DE SECCIÓN
   widgets.add(
     DeviceSectionHeader(
       key: ValueKey('header_${data.defId}'),
@@ -98,11 +127,12 @@ List<Widget> buildFlatWidgetsForSection(FlatSectionData data, ReportNotifier not
   final isTableView = data.deviceDef.viewMode == 'table';
 
   if (isTableView) {
-    // 2a. TABLE VIEW: Header de columnas + filas individuales
+    // 2a. TABLE VIEW con scroll sincronizado
     widgets.add(
       _TableColumnHeader(
         key: ValueKey('colheader_${data.defId}'),
         activities: data.relevantActivities,
+        scrollController: data.scrollGroup.createController(),
       ),
     );
 
@@ -121,14 +151,13 @@ List<Widget> buildFlatWidgetsForSection(FlatSectionData data, ReportNotifier not
             notifier: notifier,
             onCameraClick: data.onCameraClick,
             onObservationClick: data.onObservationClick,
+            scrollController: data.scrollGroup.createController(),
           ),
         ),
       );
     }
   } else {
-    // 2b. LIST VIEW: Cards individuales (en filas de 1-3 según ancho)
-    // Como no podemos hacer GridView virtualizado dentro de Slivers fácilmente,
-    // agrupamos las cards en filas manuales
+    // 2b. LIST VIEW: Cards (sin scroll sincronizado)
     for (int i = 0; i < data.entries.length; i++) {
       final entry = data.entries[i];
       final globalIndex = data.indexMap[entry.instanceId] ?? -1;
@@ -150,12 +179,11 @@ List<Widget> buildFlatWidgetsForSection(FlatSectionData data, ReportNotifier not
     }
   }
 
-  // 3. SPACER al final de la sección
+  // 3. SPACER
   widgets.add(const SizedBox(height: 16));
 
   return widgets;
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION HEADER
@@ -179,7 +207,6 @@ class DeviceSectionHeader extends ConsumerWidget {
     required this.notifier,
     this.isFirst = false,
   });
-
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -276,12 +303,17 @@ class DeviceSectionHeader extends ConsumerWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// TABLE COLUMN HEADER (cabecera de columnas para vista tabla)
+// TABLE COLUMN HEADER — con scroll sincronizado
 // ═══════════════════════════════════════════════════════════════════════
 class _TableColumnHeader extends StatelessWidget {
   final List<ActivityConfig> activities;
+  final ScrollController scrollController;
 
-  const _TableColumnHeader({super.key, required this.activities});
+  const _TableColumnHeader({
+    super.key,
+    required this.activities,
+    required this.scrollController,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -293,22 +325,22 @@ class _TableColumnHeader extends StatelessWidget {
       ),
       child: _DragScrollable(
         child: SingleChildScrollView(
+          controller: scrollController,
           scrollDirection: Axis.horizontal,
           child: SizedBox(
             width: 230.0 + (activities.length * 100.0) + 110.0,
             child: Container(
               color: const Color(0xFFF1F5F9),
-              child: IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _HeaderCell(text: 'ID', width: 80),
-                    _HeaderCell(text: 'UBICACIÓN', width: 150),
-                    ...activities
-                        .map((act) => _HeaderCell(text: act.name, width: 100)),
-                    _HeaderCell(text: 'FOTO/OBS', width: 110),
-                  ],
-                ),
+              // ELIMINAMOS IntrinsicHeight y forzamos altura constante para coincidir con el Delegate
+              height: 64.0, 
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _HeaderCell(text: 'ID', width: 80),
+                  _HeaderCell(text: 'UBICACIÓN', width: 150),
+                  ...activities.map((act) => _HeaderCell(text: act.name, width: 100)),
+                  _HeaderCell(text: 'FOTO/OBS', width: 110),
+                ],
               ),
             ),
           ),
@@ -319,7 +351,7 @@ class _TableColumnHeader extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// TABLE ENTRY ROW — ConsumerWidget que escucha SOLO SU entry
+// TABLE ENTRY ROW — con scroll sincronizado
 // ═══════════════════════════════════════════════════════════════════════
 class DeviceSectionTableRow extends ConsumerWidget {
   final int globalIndex;
@@ -328,6 +360,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
   final ReportNotifier notifier;
   final Function(int, {String? activityId}) onCameraClick;
   final Function(int, {String? activityId}) onObservationClick;
+  final ScrollController scrollController;
 
   const DeviceSectionTableRow({
     super.key,
@@ -337,6 +370,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
     required this.notifier,
     required this.onCameraClick,
     required this.onObservationClick,
+    required this.scrollController,
   });
 
   @override
@@ -358,6 +392,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
       ),
       child: _DragScrollable(
         child: SingleChildScrollView(
+          controller: scrollController,
           scrollDirection: Axis.horizontal,
           child: SizedBox(
             width: totalWidth,
@@ -365,7 +400,6 @@ class DeviceSectionTableRow extends ConsumerWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                // CustomId
                 SizedBox(
                   width: 80,
                   child: Center(
@@ -382,7 +416,6 @@ class DeviceSectionTableRow extends ConsumerWidget {
                     ),
                   ),
                 ),
-                // Area
                 SizedBox(
                   width: 150,
                   child: Center(
@@ -400,7 +433,6 @@ class DeviceSectionTableRow extends ConsumerWidget {
                     ),
                   ),
                 ),
-                // Status toggles
                 ...activities.map((act) {
                   if (!entry.results.containsKey(act.id)) {
                     return const SizedBox(width: 100);
@@ -418,7 +450,6 @@ class DeviceSectionTableRow extends ConsumerWidget {
                     ),
                   );
                 }),
-                // Photo/Obs actions
                 SizedBox(
                   width: 110,
                   child: Row(
@@ -458,7 +489,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// LIST ENTRY CARD — ConsumerWidget que escucha SOLO SU entry
+// LIST ENTRY CARD
 // ═══════════════════════════════════════════════════════════════════════
 class DeviceSectionListCard extends ConsumerWidget {
   final int globalIndex;
@@ -502,7 +533,6 @@ class DeviceSectionListCard extends ConsumerWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ID + Area row
           Row(
             children: [
               SizedBox(
@@ -533,14 +563,11 @@ class DeviceSectionListCard extends ConsumerWidget {
               ),
             ],
           ),
-
           if (entryActivities.isNotEmpty) ...[
             const SizedBox(height: 8),
             const Divider(height: 1, color: Color(0xFFF1F5F9)),
             const SizedBox(height: 8),
           ],
-
-          // Activity rows
           ...entryActivities.map((act) {
             final status = entry.results[act.id];
             final hasPhotos =
@@ -603,12 +630,10 @@ class DeviceSectionListCard extends ConsumerWidget {
   }
 }
 
-
 // ═══════════════════════════════════════════════════════════════════════
 // PROGRESS BAR
 // ═══════════════════════════════════════════════════════════════════════
 class _ProgressBar extends StatelessWidget {
-
   final ({int total, int completed, double percentage}) progress;
   const _ProgressBar({required this.progress});
 
@@ -831,11 +856,7 @@ class _ResponsiblesRow extends StatelessWidget {
                             borderRadius: BorderRadius.circular(20),
                             child: const Padding(
                               padding: EdgeInsets.all(4.0),
-                              child: Icon(
-                                Icons.close,
-                                size: 20,
-                                color: Color(0xFF94A3B8),
-                              ),
+                              child: Icon(Icons.close, size: 20, color: Color(0xFF94A3B8)),
                             ),
                           ),
                         ],
@@ -848,20 +869,11 @@ class _ResponsiblesRow extends StatelessWidget {
                               child: Column(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
-                                  Icon(
-                                    Icons.group_off_outlined,
-                                    size: 48,
-                                    color: Colors.grey.shade300,
-                                  ),
+                                  Icon(Icons.group_off_outlined, size: 48, color: Colors.grey.shade300),
                                   const SizedBox(height: 16),
-                                  Text(
-                                    "No hay personal disponible",
-                                    style: TextStyle(
-                                      color: Colors.grey.shade500,
-                                      fontSize: 14,
-                                    ),
-                                    textAlign: TextAlign.center,
-                                  ),
+                                  Text("No hay personal disponible",
+                                      style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+                                      textAlign: TextAlign.center),
                                 ],
                               ),
                             )
@@ -870,61 +882,31 @@ class _ResponsiblesRow extends StatelessWidget {
                               shrinkWrap: true,
                               itemCount: users.length,
                               separatorBuilder: (ctx, i) => const Divider(
-                                height: 1,
-                                indent: 60,
-                                endIndent: 20,
-                                color: Color(0xFFF1F5F9),
-                              ),
+                                  height: 1, indent: 60, endIndent: 20, color: Color(0xFFF1F5F9)),
                               itemBuilder: (ctx, i) {
                                 final user = users[i];
-                                final isAssigned =
-                                    localAssignments.contains(user.id);
+                                final isAssigned = localAssignments.contains(user.id);
                                 return Material(
                                   color: Colors.transparent,
                                   child: CheckboxListTile(
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 4,
-                                    ),
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                                     dense: true,
                                     activeColor: const Color(0xFF3B82F6),
-                                    checkboxShape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
+                                    checkboxShape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                                     secondary: CircleAvatar(
-                                      backgroundColor: isAssigned
-                                          ? const Color(0xFFEFF6FF)
-                                          : const Color(0xFFF1F5F9),
-                                      foregroundColor: isAssigned
-                                          ? const Color(0xFF3B82F6)
-                                          : const Color(0xFF64748B),
+                                      backgroundColor: isAssigned ? const Color(0xFFEFF6FF) : const Color(0xFFF1F5F9),
+                                      foregroundColor: isAssigned ? const Color(0xFF3B82F6) : const Color(0xFF64748B),
                                       child: Text(
-                                        user.name.isNotEmpty
-                                            ? user.name[0].toUpperCase()
-                                            : '?',
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14,
-                                        ),
+                                        user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                                       ),
                                     ),
-                                    title: Text(
-                                      user.name,
-                                      style: TextStyle(
-                                        fontWeight: isAssigned
-                                            ? FontWeight.w700
-                                            : FontWeight.w500,
-                                        fontSize: 14,
-                                        color: const Color(0xFF1E293B),
-                                      ),
-                                    ),
-                                    subtitle: Text(
-                                      user.email,
-                                      style: const TextStyle(
-                                        fontSize: 12,
-                                        color: Color(0xFF94A3B8),
-                                      ),
-                                    ),
+                                    title: Text(user.name,
+                                        style: TextStyle(
+                                            fontWeight: isAssigned ? FontWeight.w700 : FontWeight.w500,
+                                            fontSize: 14, color: const Color(0xFF1E293B))),
+                                    subtitle: Text(user.email,
+                                        style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8))),
                                     value: isAssigned,
                                     onChanged: (val) {
                                       setModalState(() {
@@ -943,27 +925,21 @@ class _ResponsiblesRow extends StatelessWidget {
                     Container(
                       padding: const EdgeInsets.all(16),
                       decoration: const BoxDecoration(
-                        border: Border(
-                          top: BorderSide(color: Color(0xFFF1F5F9)),
-                        ),
+                        border: Border(top: BorderSide(color: Color(0xFFF1F5F9))),
                       ),
                       child: SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
                           onPressed: () {
-                            final initialSet =
-                                Set<String>.from(assignments);
-                            final finalSet =
-                                Set<String>.from(localAssignments);
+                            final initialSet = Set<String>.from(assignments);
+                            final finalSet = Set<String>.from(localAssignments);
                             final removed = initialSet.difference(finalSet);
                             final added = finalSet.difference(initialSet);
                             for (var userId in removed) {
-                              notifier.toggleSectionAssignment(
-                                  defId, userId);
+                              notifier.toggleSectionAssignment(defId, userId);
                             }
                             for (var userId in added) {
-                              notifier.toggleSectionAssignment(
-                                  defId, userId);
+                              notifier.toggleSectionAssignment(defId, userId);
                             }
                             Navigator.pop(ctx);
                           },
@@ -971,15 +947,10 @@ class _ResponsiblesRow extends StatelessWidget {
                             backgroundColor: const Color(0xFF0F172A),
                             foregroundColor: Colors.white,
                             padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(10),
-                            ),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                             elevation: 0,
                           ),
-                          child: const Text(
-                            "LISTO",
-                            style: TextStyle(fontWeight: FontWeight.bold),
-                          ),
+                          child: const Text("LISTO", style: TextStyle(fontWeight: FontWeight.bold)),
                         ),
                       ),
                     ),
@@ -1001,14 +972,8 @@ class _ResponsiblesRow extends StatelessWidget {
         if (!isSmall)
           const Padding(
             padding: EdgeInsets.only(right: 8.0),
-            child: Text(
-              "RESPONSABLES:",
-              style: TextStyle(
-                color: Color(0xFF64748B),
-                fontSize: 10,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
+            child: Text("RESPONSABLES:",
+                style: TextStyle(color: Color(0xFF64748B), fontSize: 10, fontWeight: FontWeight.bold)),
           ),
         Flexible(
           fit: isSmall ? FlexFit.loose : FlexFit.tight,
@@ -1018,20 +983,12 @@ class _ResponsiblesRow extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ...assignedUsersList
-                    .take(3)
-                    .map((user) => _UserChip(user: user)),
+                ...assignedUsersList.take(3).map((user) => _UserChip(user: user)),
                 if (assignedUsersList.length > 3)
                   Padding(
                     padding: const EdgeInsets.only(right: 6),
-                    child: Text(
-                      "+${assignedUsersList.length - 3}",
-                      style: const TextStyle(
-                        color: Colors.white54,
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
+                    child: Text("+${assignedUsersList.length - 3}",
+                        style: const TextStyle(color: Colors.white54, fontSize: 11, fontWeight: FontWeight.bold)),
                   ),
               ],
             ),
@@ -1049,9 +1006,7 @@ class _ResponsiblesRow extends StatelessWidget {
               border: Border.all(color: Colors.white.withOpacity(0.2)),
             ),
             child: Icon(
-              assignedUsersList.isEmpty
-                  ? Icons.person_add_alt_1
-                  : Icons.edit,
+              assignedUsersList.isEmpty ? Icons.person_add_alt_1 : Icons.edit,
               color: Colors.white70,
               size: 14,
             ),
@@ -1084,37 +1039,147 @@ class _UserChip extends StatelessWidget {
           CircleAvatar(
             radius: 9,
             backgroundColor: Colors.white,
-            child: Text(
-              user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
-              style: const TextStyle(
-                fontSize: 9,
-                fontWeight: FontWeight.bold,
-                color: Color(0xFF2563EB),
-              ),
-            ),
+            child: Text(user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
+                style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Color(0xFF2563EB))),
           ),
           const SizedBox(width: 6),
-          Text(
-            user.name.split(' ').first,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
+          Text(user.name.split(' ').first,
+              style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
         ],
       ),
     );
   }
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════
+// STICKY HEADER DELEGATE — Mantiene el header visible sin perder FPS
+// ═══════════════════════════════════════════════════════════════════════
+class _StickyTableHeaderDelegate extends SliverPersistentHeaderDelegate {
+  final Widget child;
+  final double height;
+
+  _StickyTableHeaderDelegate({
+    required this.child,
+    // ignore: unused_element_parameter
+    this.height = 64.0, // Altura fija optimizada, evita IntrinsicHeight
+  });
+
+  @override
+  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
+    return SizedBox(
+      height: height,
+      child: child,
+    );
+  }
+
+  @override
+  double get maxExtent => height;
+
+  @override
+  double get minExtent => height;
+
+  @override
+  bool shouldRebuild(covariant _StickyTableHeaderDelegate oldDelegate) {
+    return oldDelegate.child != child || oldDelegate.height != height;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FUNCIÓN PRINCIPAL: Genera un Grupo de Slivers con Sticky Header nativo
+// ═══════════════════════════════════════════════════════════════════════
+
+Widget buildSliverGroupForSection(FlatSectionData data, ReportNotifier notifier) {
+  if (data.entries.isEmpty || data.relevantActivities.isEmpty) {
+    return const SliverToBoxAdapter(child: SizedBox.shrink());
+  }
+
+  final isTableView = data.deviceDef.viewMode == 'table';
+
+  // Filtramos los índices globales válidos de antemano para no renderizar nulos
+  final validEntries = data.entries.where((e) {
+    return (data.indexMap[e.instanceId] ?? -1) != -1;
+  }).toList();
+
+  return SliverMainAxisGroup(
+    slivers: [
+      // 1. HEADER DE SECCIÓN (Scroll normal)
+      SliverToBoxAdapter(
+        child: DeviceSectionHeader(
+          key: ValueKey('header_${data.defId}'),
+          defId: data.defId,
+          deviceDef: data.deviceDef,
+          entries: data.entries,
+          assignments: data.assignments,
+          users: data.users,
+          notifier: notifier,
+          isFirst: true,
+        ),
+      ),
+
+      // 2. STICKY HEADER PARA LA TABLA (¡Aquí está la magia!)
+      if (isTableView)
+        SliverPersistentHeader(
+          pinned: true, // Esto lo hace Sticky
+          delegate: _StickyTableHeaderDelegate(
+            child: Material( // Material evita que se vuelva transparente al hacer scroll
+              color: Colors.white,
+              elevation: 2, // Pequeña sombra al hacer scroll por encima de las filas
+              child: _TableColumnHeader(
+                key: ValueKey('colheader_${data.defId}'),
+                activities: data.relevantActivities,
+                scrollController: data.scrollGroup.createController(),
+              ),
+            ),
+          ),
+        ),
+
+      // 3. FILAS VIRTUALIZADAS (Table o List)
+      SliverList.builder(
+        itemCount: validEntries.length,
+        itemBuilder: (context, index) {
+          final entry = validEntries[index];
+          final globalIndex = data.indexMap[entry.instanceId]!;
+
+          if (isTableView) {
+            return RepaintBoundary(
+              child: DeviceSectionTableRow(
+                key: ValueKey('trow_${entry.instanceId}'),
+                globalIndex: globalIndex,
+                activities: data.relevantActivities,
+                canEdit: data.canEdit,
+                notifier: notifier,
+                onCameraClick: data.onCameraClick,
+                onObservationClick: data.onObservationClick,
+                scrollController: data.scrollGroup.createController(),
+              ),
+            );
+          } else {
+            return RepaintBoundary(
+              child: DeviceSectionListCard(
+                key: ValueKey('card_${entry.instanceId}'),
+                globalIndex: globalIndex,
+                activities: data.relevantActivities,
+                canEdit: data.canEdit,
+                notifier: notifier,
+                onCameraClick: data.onCameraClick,
+                onObservationClick: data.onObservationClick,
+              ),
+            );
+          }
+        },
+      ),
+
+      // 4. SPACER AL FINAL DE LA SECCIÓN
+      const SliverToBoxAdapter(child: SizedBox(height: 16)),
+    ],
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // SHARED WIDGETS
 // ═══════════════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════════════
-// DRAG TO SCROLL — Habilita scroll horizontal con click+drag en web
-// ═══════════════════════════════════════════════════════════════════════
 class _DragScrollable extends StatefulWidget {
   final Widget child;
   const _DragScrollable({required this.child});
@@ -1141,28 +1206,36 @@ class _DragScrollableState extends State<_DragScrollable> {
 class _HeaderCell extends StatelessWidget {
   final String text;
   final double width;
-  const _HeaderCell({required this.text, required this.width});
+  
+  // ignore: unused_element_parameter
+  const _HeaderCell({super.key, required this.text, required this.width});
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: width,
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+      // Reducimos el padding vertical para aprovechar mejor los 64px de altura
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
       decoration: const BoxDecoration(
         border: Border(right: BorderSide(color: Color(0xFFE2E8F0), width: 1)),
       ),
       child: Center(
-        child: Text(
-          text,
-          style: const TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w900,
-            color: Color(0xFF1E293B),
+        // Añadimos Tooltip: Si el usuario mantiene presionado, verá el texto completo
+        child: Tooltip(
+          message: text,
+          preferBelow: false,
+          child: Text(
+            text,
+            style: const TextStyle(
+              fontSize: 10, // Bajamos a 10 para que quepa más texto
+              fontWeight: FontWeight.w900, 
+              color: Color(0xFF1E293B),
+              height: 1.15, // Juntamos un poco el interlineado
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 4, // Límite estricto de 4 líneas
+            overflow: TextOverflow.ellipsis, // Si pasa de 4 líneas, pone "..."
           ),
-          textAlign: TextAlign.center,
-          softWrap: true,
-          overflow: TextOverflow.visible,
-          maxLines: null,
         ),
       ),
     );
@@ -1191,11 +1264,7 @@ class _CompactActionIcon extends StatelessWidget {
         width: 32,
         height: 32,
         alignment: Alignment.center,
-        child: Icon(
-          icon,
-          size: 18,
-          color: isActive ? activeColor : const Color(0xFF94A3B8),
-        ),
+        child: Icon(icon, size: 18, color: isActive ? activeColor : const Color(0xFF94A3B8)),
       ),
     );
   }
@@ -1216,12 +1285,8 @@ class _CompactStatusBadge extends StatelessWidget {
         bgColor = const Color(0xFF10B981);
         borderColor = const Color(0xFF059669);
         child = Container(
-          width: 8,
-          height: 8,
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            shape: BoxShape.circle,
-          ),
+          width: 8, height: 8,
+          decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
         );
         break;
       case 'NOK':
@@ -1232,31 +1297,18 @@ class _CompactStatusBadge extends StatelessWidget {
       case 'NA':
         bgColor = const Color(0xFFE2E8F0);
         borderColor = const Color(0xFFCBD5E1);
-        child = const Text(
-          'N/A',
-          style: TextStyle(
-            fontSize: 8,
-            fontWeight: FontWeight.w900,
-            color: Color(0xFF64748B),
-          ),
-        );
+        child = const Text('N/A',
+            style: TextStyle(fontSize: 8, fontWeight: FontWeight.w900, color: Color(0xFF64748B)));
         break;
       case 'NR':
         bgColor = const Color(0xFFFBBF24);
         borderColor = const Color(0xFFF59E0B);
-        child = const Text(
-          'N/R',
-          style: TextStyle(
-            fontSize: 8,
-            fontWeight: FontWeight.w900,
-            color: Colors.white,
-          ),
-        );
+        child = const Text('N/R',
+            style: TextStyle(fontSize: 8, fontWeight: FontWeight.w900, color: Colors.white));
         break;
       default:
         return Container(
-          width: 24,
-          height: 24,
+          width: 24, height: 24,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             border: Border.all(color: const Color(0xFFCBD5E1), width: 1.5),
@@ -1266,8 +1318,7 @@ class _CompactStatusBadge extends StatelessWidget {
     }
 
     return Container(
-      width: 24,
-      height: 24,
+      width: 24, height: 24,
       decoration: BoxDecoration(
         color: bgColor,
         shape: BoxShape.circle,
@@ -1334,11 +1385,7 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
       controller: _controller,
       enabled: widget.enabled,
       textAlign: TextAlign.center,
-      style: const TextStyle(
-        fontSize: 12,
-        fontWeight: FontWeight.w700,
-        color: Color(0xFF1E293B),
-      ),
+      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
       decoration: InputDecoration(
         isDense: true,
         contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 0),
@@ -1346,14 +1393,10 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
         hintStyle: const TextStyle(color: Color(0xFFCBD5E1)),
         filled: true,
         fillColor: const Color(0xFFF8FAFC),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(6),
-          borderSide: BorderSide.none,
-        ),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: BorderSide.none),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(6),
-          borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
-        ),
+            borderRadius: BorderRadius.circular(6),
+            borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5)),
       ),
       onChanged: (val) {
         _debounce?.cancel();
