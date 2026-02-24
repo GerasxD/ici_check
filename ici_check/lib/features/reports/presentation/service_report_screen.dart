@@ -376,99 +376,127 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   }
 
   void _syncAndLoadReport(ServiceReportModel existingReport) {
-    // No pisar cambios locales pendientes
-    if (_notifier.hasPendingChanges) return;
+  // No pisar cambios locales pendientes
+  if (_notifier.hasPendingChanges) return;
 
-    // ★ FIX P2: Ignorar ecos de nuestros propios saves usando timestamp
-    if (_lastSaveTime != null &&
-        DateTime.now().difference(_lastSaveTime!) < const Duration(seconds: 3)) {
-      return;
-    }
+  if (_lastSaveTime != null &&
+      DateTime.now().difference(_lastSaveTime!) < const Duration(seconds: 3)) {
+    return;
+  }
 
-    final currentState = ref.read(reportNotifierProvider);
-    if (currentState != null && !_isLoading) {
-      final current = currentState.report;
-      if (current.entries.length == existingReport.entries.length &&
-          current.startTime == existingReport.startTime &&
-          current.endTime == existingReport.endTime &&
-          current.generalObservations == existingReport.generalObservations &&
-          current.providerSignerName == existingReport.providerSignerName &&
-          current.clientSignerName == existingReport.clientSignerName) {
-        bool likelySame = true;
-        if (current.entries.isNotEmpty) {
-          final lastIdx = current.entries.length - 1;
-          for (final idx in [0, lastIdx]) {
-            if (idx < existingReport.entries.length) {
-              final a = current.entries[idx];
-              final b = existingReport.entries[idx];
-              if (a.instanceId != b.instanceId ||
-                  a.results.length != b.results.length) {
-                likelySame = false;
-                break;
-              }
-              if (likelySame) {
-                for (final key in a.results.keys) {
-                  if (a.results[key] != b.results[key]) {
-                    likelySame = false;
-                    break;
-                  }
+  final currentState = ref.read(reportNotifierProvider);
+  if (currentState != null && !_isLoading) {
+    final current = currentState.report;
+
+    // SOLUCIÓN 3: Validación de técnicos y secciones
+    if (current.entries.length == existingReport.entries.length &&
+        current.startTime == existingReport.startTime &&
+        current.endTime == existingReport.endTime &&
+        current.generalObservations == existingReport.generalObservations &&
+        current.providerSignerName == existingReport.providerSignerName &&
+        current.clientSignerName == existingReport.clientSignerName &&
+        jsonEncode(current.assignedTechnicianIds) ==
+            jsonEncode(existingReport.assignedTechnicianIds) &&
+        jsonEncode(current.sectionAssignments) ==
+            jsonEncode(existingReport.sectionAssignments)) {
+      bool likelySame = true;
+
+      if (current.entries.isNotEmpty) {
+        final lastIdx = current.entries.length - 1;
+
+        for (final idx in [0, lastIdx]) {
+          if (idx < existingReport.entries.length) {
+            final a = current.entries[idx];
+            final b = existingReport.entries[idx];
+
+            if (a.instanceId != b.instanceId ||
+                a.results.length != b.results.length) {
+              likelySame = false;
+              break;
+            }
+
+            if (likelySame) {
+              for (final key in a.results.keys) {
+                if (a.results[key] != b.results[key]) {
+                  likelySame = false;
+                  break;
                 }
               }
             }
           }
         }
-        if (likelySame) return;
       }
-    }
 
-    if (_devicesEffective.isEmpty) {
-      _initializeNotifier(existingReport);
-      return;
-    }
-
-    bool isWeekly = widget.dateStr.contains('W');
-    int timeIndex = _calculateTimeIndex(isWeekly);
-    final policyToUse = _currentPolicy ?? widget.policy;
-
-    final idealEntries = _repo.generateEntriesForDate(
-      policyToUse,
-      widget.dateStr,
-      _devicesEffective,
-      isWeekly,
-      timeIndex,
-      savedLocations: _savedLocations,
-    );
-
-    final mergedEntries = _mergeEntries(existingReport.entries, idealEntries);
-
-    bool hasStructureChanges =
-        _entriesStructureChanged(existingReport.entries, mergedEntries);
-
-    bool hasLocationChanges = false;
-    if (!hasStructureChanges && _savedLocations.isNotEmpty) {
-      for (int i = 0; i < mergedEntries.length; i++) {
-        if (i >= existingReport.entries.length) break;
-        final original = existingReport.entries[i];
-        final merged = mergedEntries[i];
-        if (original.customId != merged.customId ||
-            original.area != merged.area) {
-          hasLocationChanges = true;
-          break;
-        }
-      }
-    }
-
-    if (hasStructureChanges || hasLocationChanges) {
-      final updatedReport = existingReport.copyWith(entries: mergedEntries);
-      if (hasStructureChanges) {
-        _lastSaveTime = DateTime.now();
-        _repo.saveReport(updatedReport);
-      }
-      _initializeNotifier(updatedReport);
-    } else {
-      _initializeNotifier(existingReport);
+      if (likelySame) return;
     }
   }
+
+  if (_devicesEffective.isEmpty) {
+    _handleNotifierUpdate(existingReport);
+    return;
+  }
+
+  bool isWeekly = widget.dateStr.contains('W');
+  int timeIndex = _calculateTimeIndex(isWeekly);
+  final policyToUse = _currentPolicy ?? widget.policy;
+
+  final idealEntries = _repo.generateEntriesForDate(
+    policyToUse,
+    widget.dateStr,
+    _devicesEffective,
+    isWeekly,
+    timeIndex,
+    savedLocations: _savedLocations,
+  );
+
+  final mergedEntries =
+      _mergeEntries(existingReport.entries, idealEntries);
+
+  bool hasStructureChanges =
+      _entriesStructureChanged(existingReport.entries, mergedEntries);
+
+  bool hasLocationChanges = false;
+
+  if (!hasStructureChanges && _savedLocations.isNotEmpty) {
+    for (int i = 0; i < mergedEntries.length; i++) {
+      if (i >= existingReport.entries.length) break;
+
+      final original = existingReport.entries[i];
+      final merged = mergedEntries[i];
+
+      if (original.customId != merged.customId ||
+          original.area != merged.area) {
+        hasLocationChanges = true;
+        break;
+      }
+    }
+  }
+
+  if (hasStructureChanges || hasLocationChanges) {
+    final updatedReport =
+        existingReport.copyWith(entries: mergedEntries);
+
+    // SOLUCIÓN 1: Eliminamos _repo.saveReport(updatedReport);
+    // para evitar el bucle infinito
+
+    _handleNotifierUpdate(updatedReport);
+  } else {
+    _handleNotifierUpdate(existingReport);
+  }
+}
+
+// SOLUCIÓN 2: Función de apoyo para evitar reiniciar la UI si ya había cargado
+void _handleNotifierUpdate(ServiceReportModel report) {
+  if (_isLoading) {
+    _initializeNotifier(report);
+  } else {
+    _notifier.syncFromFirebase(
+      report,
+      groupedEntries: _buildGroupedEntries(report),
+      frequencies: _computeFrequencies(),
+    );
+  }
+}
 
   void _initializeNewReport() {
     bool isWeekly = widget.dateStr.contains('W');

@@ -37,12 +37,9 @@ class ReportsRepository {
     try {
       final data = report.toMap();
       final docRef = _db.collection('reports').doc(report.id);
-      if (_savedReportIds.contains(report.id)) {
-        await docRef.update(data);
-      } else {
-        await docRef.set(data);
-        _savedReportIds.add(report.id);
-      }
+      // Usamos merge: true para simplificar y evitar errores.
+      await docRef.set(data, SetOptions(merge: true));
+      _savedReportIds.add(report.id);
     } catch (e) {
       debugPrint('Error en saveReport: $e');
       rethrow;
@@ -53,12 +50,9 @@ class ReportsRepository {
   Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
     try {
       final docRef = _db.collection('reports').doc(reportId);
-      if (_savedReportIds.contains(reportId)) {
-        await docRef.update(data);
-      } else {
-        await docRef.set(data);
-        _savedReportIds.add(reportId);
-      }
+      // Usamos merge: true. Si el documento no existe, lo crea. Si existe, lo actualiza.
+      await docRef.set(data, SetOptions(merge: true));
+      _savedReportIds.add(reportId); // Mantenemos el registro por si acaso
     } catch (e) {
       debugPrint('Error en saveReportRaw: $e');
       rethrow;
