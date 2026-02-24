@@ -24,6 +24,15 @@ interface ReportEntry {
   activityData: Record<string, ActivityData>;
 }
 
+// ★ NUEVO: Sesión de trabajo (multi-día)
+interface ServiceSession {
+  id: string;
+  date: Timestamp;
+  startTime: string;
+  endTime?: string;
+  technicianId?: string;
+}
+
 interface ServiceReport {
   id: string;
   policyId: string;
@@ -31,6 +40,8 @@ interface ServiceReport {
   serviceDate: Timestamp;
   startTime?: string;
   endTime?: string;
+  // ★ NUEVO: Historial de sesiones
+  sessions?: ServiceSession[];
   assignedTechnicianIds: string[];
   entries: ReportEntry[];
   generalObservations: string;
@@ -68,24 +79,22 @@ interface ActivityConfig {
   type: string;
 }
 
-// ✅ ACTUALIZADO: Cliente con nuevos campos
 interface Client {
   id: string;
   name: string;
-  razonSocial: string; // ← NUEVO
-  nombreContacto: string; // ← NUEVO
+  razonSocial: string;
+  nombreContacto: string;
   contact: string;
   address: string;
   logoUrl: string;
 }
 
-// ✅ ACTUALIZADO: Empresa con email
 interface CompanySettings {
   name: string;
   legalName: string;
   address: string;
   phone: string;
-  email: string; // ← YA ESTABA, pero lo hacemos explícito
+  email: string;
   logoUrl: string;
 }
 
@@ -114,7 +123,7 @@ const PDF_COLORS = {
 };
 
 const MARGIN = 14.4;
-const PAGE_HEIGHT = 792; // Letter size en puntos
+const PAGE_HEIGHT = 792;
 const PAGE_WIDTH = 612;
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
@@ -136,7 +145,6 @@ async function downloadImage(url: string): Promise<Buffer | null> {
   }
 }
 
-// ─── HELPER: Verifica si un instanceId de entry corresponde a un PolicyDevice ───
 function instanceIdMatchesBase(entryInstanceId: string, baseInstanceId: string): boolean {
   if (entryInstanceId === baseInstanceId) return true;
   if (entryInstanceId.startsWith(`${baseInstanceId}_`)) {
@@ -152,7 +160,6 @@ function groupByDef(
 ): Map<string, ReportEntry[]> {
   const map = new Map<string, ReportEntry[]>();
   for (const entry of entries) {
-    // ✅ Buscar por coincidencia de base, no exacta
     const pd = policyDevices.find((p) => instanceIdMatchesBase(entry.instanceId, p.instanceId));
     if (!pd) {
       logger.warn(`Entry sin PolicyDevice: ${entry.instanceId}`);
@@ -183,7 +190,6 @@ function getInvolvedFrequencies(
   devices: DeviceDefinition[]
 ): string {
   const frequencies = new Set<string>();
-  
   for (const entry of report.entries) {
     const activityIds = Object.keys(entry.results);
     for (const def of devices) {
@@ -193,16 +199,11 @@ function getInvolvedFrequencies(
       }
     }
   }
-  
   return Array.from(frequencies).join(", ");
 }
 
 function calcStats(entries: ReportEntry[]) {
-  let ok = 0;
-  let nok = 0;
-  let na = 0;
-  let nr = 0;
-  
+  let ok = 0, nok = 0, na = 0, nr = 0;
   for (const e of entries) {
     for (const s of Object.values(e.results)) {
       if (s === "OK") ok++;
@@ -211,41 +212,31 @@ function calcStats(entries: ReportEntry[]) {
       else if (s === "NR") nr++;
     }
   }
-  
   return { ok, nok, na, nr };
 }
 
 function drawClippedImage(
   doc: PDFKit.PDFDocument,
   buffer: Buffer,
-  x: number,
-  y: number,
-  w: number,
-  h: number
+  x: number, y: number, w: number, h: number
 ) {
   doc.save();
   doc.roundedRect(x, y, w, h, 2).clip();
   try {
-    doc.image(buffer, x, y, {
-      fit: [w, h],
-      align: "center",
-      valign: "center",
-    });
-  } catch (e) {
-    // Si falla, no rompe el PDF
-  }
+    doc.image(buffer, x, y, { fit: [w, h], align: "center", valign: "center" });
+  } catch (e) { /* no rompe el PDF */ }
   doc.restore();
 }
 
 function addPageIfNeeded(
-  doc: PDFKit.PDFDocument, 
-  currentY: number, 
-  requiredSpace: number, 
+  doc: PDFKit.PDFDocument,
+  currentY: number,
+  requiredSpace: number,
   drawHeaderFn?: (d: PDFKit.PDFDocument) => number
 ): number {
   if (currentY + requiredSpace > PAGE_HEIGHT - MARGIN - 25) {
     doc.addPage();
-    return drawHeaderFn ? drawHeaderFn(doc) : MARGIN; 
+    return drawHeaderFn ? drawHeaderFn(doc) : MARGIN;
   }
   return currentY;
 }
@@ -254,10 +245,7 @@ function renderImage(
   doc: PDFKit.PDFDocument,
   imgCache: Map<string, Buffer | null>,
   url: string | undefined,
-  x: number,
-  y: number,
-  w: number,
-  h: number
+  x: number, y: number, w: number, h: number
 ): void {
   if (!url) return;
   const buf = imgCache.get(url);
@@ -275,6 +263,28 @@ function needsNewPage(
   requiredSpace: number
 ): boolean {
   return currentY + requiredSpace > PAGE_HEIGHT - MARGIN - 25;
+}
+
+// ─── HELPER: Calcula duración entre dos strings "HH:mm" ───────────────────
+function calcSessionDuration(startTime: string, endTime?: string): string {
+  if (!endTime) return "En curso";
+  try {
+    const [sh, sm] = startTime.split(":").map(Number);
+    const [eh, em] = endTime.split(":").map(Number);
+    const diffMin = (eh * 60 + em) - (sh * 60 + sm);
+    if (diffMin <= 0) return "";
+    const h = Math.floor(diffMin / 60);
+    const m = diffMin % 60;
+    return h > 0 ? `${h}h ${m.toString().padStart(2, "0")}m` : `${m}m`;
+  } catch {
+    return "";
+  }
+}
+
+// ─── HELPER: Formatea Timestamp de sesión como "DD/MM" ────────────────────
+function formatSessionDate(ts: Timestamp): string {
+  const d = ts.toDate();
+  return `${d.getDate().toString().padStart(2, "0")}/${(d.getMonth() + 1).toString().padStart(2, "0")}`;
 }
 
 // ─── CONSTRUCTOR DEL PDF ───────────────────────────────────────────────────
@@ -298,7 +308,7 @@ async function buildPdf(p: {
         bufferPages: true,
         info: { Title: `Reporte ${client.name}`, Author: company.name },
       });
-      
+
       doc.on("data", (c: Buffer) => chunks.push(c));
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
@@ -309,7 +319,7 @@ async function buildPdf(p: {
       if (client.logoUrl) allUrls.push(client.logoUrl);
       if (report.providerSignature) allUrls.push(report.providerSignature);
       if (report.clientSignature) allUrls.push(report.clientSignature);
-      
+
       for (const e of report.entries) {
         allUrls.push(...e.photoUrls);
         for (const ad of Object.values(e.activityData)) {
@@ -338,105 +348,103 @@ async function buildPdf(p: {
       const W = PAGE_WIDTH - MARGIN * 2;
 
       // ═══════════════════════════════════════════════════════════════════
-      // ✅ HEADER ACTUALIZADO CON TODOS LOS CAMPOS
+      // HEADER
       // ═══════════════════════════════════════════════════════════════════
       const drawHeader = (doc: PDFKit.PDFDocument): number => {
         const startY = MARGIN;
-        const HEADER_HEIGHT = 80; // ← Aumentado un poco para más info
-        
+        const HEADER_HEIGHT = 80;
+
         doc.rect(MARGIN, startY, W, HEADER_HEIGHT).stroke(PDF_COLORS.black);
 
-        // ── Columna 1: PROVEEDOR (con email agregado) ──
+        // ── Columna 1: PROVEEDOR ──
         const col1Width = W * 0.28;
         renderImage(doc, imgCache, company.logoUrl, MARGIN + 8, startY + 8, 35, 35);
-        
+
         const infoX = MARGIN + (company.logoUrl ? 49 : 8);
-        
-        // Nombre empresa
+
         doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(company.name, infoX, startY + 6, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
-        
-        // Razón social
+          .text(company.name, infoX, startY + 6, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+
         doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.grey700)
-            .text(company.legalName, infoX, startY + 15, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
-        
-        // Dirección
+          .text(company.legalName, infoX, startY + 15, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+
         doc.fontSize(5.5).fillColor(PDF_COLORS.grey700)
-            .text(company.address, infoX, startY + 24, { width: col1Width - (infoX - MARGIN) - 4, height: 14, ellipsis: true });
-        
-        // ✅ Email de la empresa
+          .text(company.address, infoX, startY + 24, { width: col1Width - (infoX - MARGIN) - 4, height: 14, ellipsis: true });
+
         doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-            .text(company.email || "", infoX, startY + 40, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
-        
-        // Teléfono
+          .text(company.email || "", infoX, startY + 40, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+
         doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(company.phone, infoX, startY + 48, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
+          .text(company.phone, infoX, startY + 48, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
 
         doc.moveTo(MARGIN + col1Width, startY).lineTo(MARGIN + col1Width, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
 
         // ── Columna 2: TÍTULO ──
         const col2Width = W * 0.44;
         const col2X = MARGIN + col1Width;
-        
-        const executionDate = new Intl.DateTimeFormat("es", { day: "2-digit", month: "short", year: "numeric" }).format(report.serviceDate.toDate()).toUpperCase();
+
+        const executionDate = new Intl.DateTimeFormat("es", {
+          day: "2-digit", month: "short", year: "numeric",
+        }).format(report.serviceDate.toDate()).toUpperCase();
         const periodLabelText = periodLabel(report.dateStr);
 
         doc.fontSize(10).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text("REPORTE DE SERVICIO", col2X, startY + 12, { width: col2Width, align: "center" });
+          .text("REPORTE DE SERVICIO", col2X, startY + 12, { width: col2Width, align: "center" });
         doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
-            .text("SISTEMA DE DETECCIÓN DE INCENDIOS", col2X, startY + 24, { width: col2Width, align: "center" });
+          .text("SISTEMA DE DETECCIÓN DE INCENDIOS", col2X, startY + 24, { width: col2Width, align: "center" });
 
         const boxW = 180;
         const boxX = col2X + (col2Width - boxW) / 2;
         doc.rect(boxX, startY + 38, boxW, 11).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
-        
+
         doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(`EJECUCIÓN: ${executionDate}  |  PERIODO: ${periodLabelText.toUpperCase()}`, boxX + 3, startY + 40.5, { width: boxW - 6, align: "center" });
+          .text(`EJECUCIÓN: ${executionDate}  |  PERIODO: ${periodLabelText.toUpperCase()}`, boxX + 3, startY + 40.5, { width: boxW - 6, align: "center" });
 
         const frequencies = getInvolvedFrequencies(report, devices);
         doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-            .text(`Frecuencias: ${frequencies}`, col2X, startY + 56, { width: col2Width, align: "center", ellipsis: true });
+          .text(`Frecuencias: ${frequencies}`, col2X, startY + 56, { width: col2Width, align: "center", ellipsis: true });
 
         doc.moveTo(col2X + col2Width, startY).lineTo(col2X + col2Width, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
 
-        // ── Columna 3: CLIENTE (con nuevos campos) ──
+        // ── Columna 3: CLIENTE ──
         const col3Width = W * 0.28;
         const col3X = col2X + col2Width;
 
-        // ✅ ACTUALIZADO: Mostrar nombre comercial
         doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(client.name, col3X + 8, startY + 6, { width: col3Width - 50, ellipsis: true });
-        
-        // ✅ NUEVO: Razón social del cliente
+          .text(client.name, col3X + 8, startY + 6, { width: col3Width - 50, ellipsis: true });
+
         if (client.razonSocial) {
           doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.grey700)
-              .text(client.razonSocial, col3X + 8, startY + 14, { width: col3Width - 50, ellipsis: true });
+            .text(client.razonSocial, col3X + 8, startY + 14, { width: col3Width - 50, ellipsis: true });
         }
-        
-        // ✅ NUEVO: Nombre de contacto
+
         if (client.nombreContacto) {
           doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-              .text(`Contacto: ${client.nombreContacto}`, col3X + 8, startY + 22, { width: col3Width - 50, ellipsis: true });
+            .text(`Contacto: ${client.nombreContacto}`, col3X + 8, startY + 22, { width: col3Width - 50, ellipsis: true });
         }
-        
-        // Teléfono
+
         doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.black)
-            .text(`Tel: ${client.contact}`, col3X + 8, startY + 30, { width: col3Width - 50, ellipsis: true });
-        
-        // Dirección
+          .text(`Tel: ${client.contact}`, col3X + 8, startY + 30, { width: col3Width - 50, ellipsis: true });
+
         doc.fontSize(5).fillColor(PDF_COLORS.grey700)
-            .text(client.address, col3X + 8, startY + 38, { width: col3Width - 50, height: 18, ellipsis: true });
+          .text(client.address, col3X + 8, startY + 38, { width: col3Width - 50, height: 18, ellipsis: true });
 
         renderImage(doc, imgCache, client.logoUrl, col3X + col3Width - 40, startY + 8, 35, 35);
 
         return MARGIN + HEADER_HEIGHT + 10;
       };
 
-      // EJECUTAMOS EL PRIMER HEADER
       let Y = drawHeader(doc);
-      
+
       // ═══════════════════════════════════════════════════════════════════
-      // INFO BAR
+      // ★ INFO BAR — SESIONES DE TRABAJO
+      //
+      // LÓGICA:
+      //   • Si report.sessions tiene 2+ sesiones → mostramos tabla de sesiones
+      //     con una fila por sesión: N° | Fecha | Inicio → Fin | Duración
+      //   • Si hay 0 o 1 sesión → mostramos el bar simple original con
+      //     Fecha | Horario | Personal (igual que antes)
+      //   • En ambos casos la segunda barra NFPA se mantiene igual
       // ═══════════════════════════════════════════════════════════════════
 
       const staffNames = report.assignedTechnicianIds
@@ -444,375 +452,548 @@ async function buildPdf(p: {
         .join(", ");
 
       const sd = report.serviceDate.toDate();
-      const dateStr = `${sd.getDate().toString().padStart(2, "0")}/${(sd.getMonth() + 1).toString().padStart(2, "0")}/${sd.getFullYear()}`;
+      const dateStrFormatted = `${sd.getDate().toString().padStart(2, "0")}/${(sd.getMonth() + 1).toString().padStart(2, "0")}/${sd.getFullYear()}`;
 
-      // ✅ Primera fila: Fecha, Horario y Personal
+      const sessions = (report.sessions ?? []).filter((s) => s.startTime);
+      const hasMultipleSessions = sessions.length >= 2;
+
       const INFO_BAR_HEIGHT = 12;
-      doc.rect(MARGIN, Y, W, INFO_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
-      
-      doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
-        .text("FECHA: ", MARGIN + 4, Y + 4);
-      doc.font("Helvetica").fillColor(PDF_COLORS.black)
-        .text(dateStr, MARGIN + 30, Y + 4);
 
-      doc.font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
-        .text("HORARIO: ", MARGIN + 90, Y + 4);
-      doc.font("Helvetica").fillColor(PDF_COLORS.black)
-        .text(`${report.startTime ?? "--:--"} - ${report.endTime ?? "--:--"}`, MARGIN + 125, Y + 4);
+      if (!hasMultipleSessions) {
+        // ── CASO A: Bar simple (original) ──
+        doc.rect(MARGIN, Y, W, INFO_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
 
-      doc.font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-        .text("PERSONAL DESIGNADO: ", MARGIN + 200, Y + 4);
-      doc.font("Helvetica").fillColor(PDF_COLORS.black)
-        .text(staffNames || "N/A", MARGIN + 285, Y + 4, { width: W - 289, ellipsis: true });
+        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
+          .text("FECHA: ", MARGIN + 4, Y + 4);
+        doc.font("Helvetica").fillColor(PDF_COLORS.black)
+          .text(dateStrFormatted, MARGIN + 30, Y + 4);
 
-      Y += INFO_BAR_HEIGHT;
+        doc.font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
+          .text("HORARIO: ", MARGIN + 90, Y + 4);
+        doc.font("Helvetica").fillColor(PDF_COLORS.black)
+          .text(`${report.startTime ?? "--:--"} - ${report.endTime ?? "--:--"}`, MARGIN + 125, Y + 4);
 
-      // ✅ Segunda fila: NFPA
+        doc.font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+          .text("PERSONAL DESIGNADO: ", MARGIN + 200, Y + 4);
+        doc.font("Helvetica").fillColor(PDF_COLORS.black)
+          .text(staffNames || "N/A", MARGIN + 285, Y + 4, { width: W - 289, ellipsis: true });
+
+        Y += INFO_BAR_HEIGHT;
+
+      } else {
+        // ── CASO B: Tabla de sesiones de trabajo ──────────────────────
+        //
+        // Estructura:
+        //   [ HISTORIAL DE SESIONES header bar        ]
+        //   [ N° | FECHA | INICIO | FIN | DURACIÓN   ]  ← sub-header
+        //   [ 1  | dd/mm | HH:mm | HH:mm | Xh Ym    ]  ← fila por sesión
+        //   [ 2  | dd/mm | HH:mm | HH:mm | Xh Ym    ]
+        //   ...
+        //   [ PERSONAL: nombre, nombre...             ]  ← pie
+
+        const SESSION_TITLE_H = 11;
+        const SESSION_ROW_H   = 10;
+        const SESSION_FOOT_H  = 10;
+
+        // ── Título de la sección ──
+        doc.rect(MARGIN, Y, W, SESSION_TITLE_H)
+          .fillAndStroke(PDF_COLORS.grey800, PDF_COLORS.black);
+
+        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.white)
+          .text("HISTORIAL DE SESIONES DE TRABAJO", MARGIN + 4, Y + 3, { width: W * 0.5 });
+
+        // Totales a la derecha
+        const closedSessions = sessions.filter((s) => s.endTime);
+        let totalMinutes = 0;
+        for (const s of closedSessions) {
+          if (s.endTime) {
+            try {
+              const [sh, sm] = s.startTime.split(":").map(Number);
+              const [eh, em] = s.endTime.split(":").map(Number);
+              const diff = (eh * 60 + em) - (sh * 60 + sm);
+              if (diff > 0) totalMinutes += diff;
+            } catch { /* ignore */ }
+          }
+        }
+        const totalH = Math.floor(totalMinutes / 60);
+        const totalM = totalMinutes % 60;
+        const totalStr = totalMinutes > 0
+          ? (totalH > 0 ? `${totalH}h ${totalM.toString().padStart(2, "0")}m` : `${totalM}m`)
+          : "--";
+
+        doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.grey400)
+          .text(
+            `${sessions.length} sesión${sessions.length !== 1 ? "es" : ""}  ·  Tiempo total: ${totalStr}`,
+            MARGIN + W * 0.5,
+            Y + 3.5,
+            { width: W * 0.49, align: "right" }
+          );
+
+        Y += SESSION_TITLE_H;
+
+        // ── Sub-header de columnas ──
+        const colN    = 20;
+        const colDate = 44;
+        const colFrom = 44;
+        const colTo   = 44;
+        const colDur  = W - colN - colDate - colFrom - colTo;
+
+        doc.rect(MARGIN, Y, W, SESSION_ROW_H)
+          .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
+
+        const drawColumnLabels = (rowY: number) => {
+          let cx = MARGIN;
+          const labelStyle = { fontSize: 5, font: "Helvetica-Bold", color: PDF_COLORS.grey700 };
+
+          doc.fontSize(labelStyle.fontSize).font(labelStyle.font).fillColor(labelStyle.color)
+            .text("N°", cx, rowY + 3, { width: colN, align: "center" });
+          cx += colN;
+          doc.moveTo(cx, rowY).lineTo(cx, rowY + SESSION_ROW_H).stroke(PDF_COLORS.grey400);
+
+          doc.text("FECHA", cx + 2, rowY + 3, { width: colDate - 4 });
+          cx += colDate;
+          doc.moveTo(cx, rowY).lineTo(cx, rowY + SESSION_ROW_H).stroke(PDF_COLORS.grey400);
+
+          doc.text("INICIO", cx + 2, rowY + 3, { width: colFrom - 4, align: "center" });
+          cx += colFrom;
+          doc.moveTo(cx, rowY).lineTo(cx, rowY + SESSION_ROW_H).stroke(PDF_COLORS.grey400);
+
+          doc.text("FIN", cx + 2, rowY + 3, { width: colTo - 4, align: "center" });
+          cx += colTo;
+          doc.moveTo(cx, rowY).lineTo(cx, rowY + SESSION_ROW_H).stroke(PDF_COLORS.grey400);
+
+          doc.text("DURACIÓN", cx + 2, rowY + 3, { width: colDur - 4, align: "center" });
+        };
+
+        drawColumnLabels(Y);
+        Y += SESSION_ROW_H;
+
+        // ── Filas de sesiones ──
+        sessions.forEach((session, idx) => {
+          const isEven = idx % 2 === 0;
+          const rowBg = isEven ? PDF_COLORS.white : PDF_COLORS.grey50;
+
+          doc.rect(MARGIN, Y, W, SESSION_ROW_H)
+            .fillAndStroke(rowBg, PDF_COLORS.grey300);
+
+          const sessionDateStr = formatSessionDate(session.date);
+          const dur = calcSessionDuration(session.startTime, session.endTime);
+          const isOpen = !session.endTime;
+
+          let cx = MARGIN;
+
+          // N°
+          doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
+            .text(`${idx + 1}`, cx, Y + 2.5, { width: colN, align: "center" });
+          cx += colN;
+          doc.moveTo(cx, Y).lineTo(cx, Y + SESSION_ROW_H).stroke(PDF_COLORS.grey300);
+
+          // Fecha
+          doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
+            .text(sessionDateStr, cx + 3, Y + 2.5, { width: colDate - 6 });
+          cx += colDate;
+          doc.moveTo(cx, Y).lineTo(cx, Y + SESSION_ROW_H).stroke(PDF_COLORS.grey300);
+
+          // Inicio
+          doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+            .text(session.startTime, cx + 2, Y + 2.5, { width: colFrom - 4, align: "center" });
+          cx += colFrom;
+          doc.moveTo(cx, Y).lineTo(cx, Y + SESSION_ROW_H).stroke(PDF_COLORS.grey300);
+
+          // Fin
+          doc.fontSize(6).font(isOpen ? "Helvetica" : "Helvetica-Bold")
+            .fillColor(isOpen ? PDF_COLORS.grey400 : PDF_COLORS.black)
+            .text(session.endTime ?? "--:--", cx + 2, Y + 2.5, { width: colTo - 4, align: "center" });
+          cx += colTo;
+          doc.moveTo(cx, Y).lineTo(cx, Y + SESSION_ROW_H).stroke(PDF_COLORS.grey300);
+
+          // Duración
+          doc.fontSize(6).font("Helvetica")
+            .fillColor(isOpen ? PDF_COLORS.orange : PDF_COLORS.grey700)
+            .text(dur, cx + 2, Y + 2.5, { width: colDur - 4, align: "center" });
+
+          Y += SESSION_ROW_H;
+        });
+
+        // ── Pie: Personal designado ──
+        doc.rect(MARGIN, Y, W, SESSION_FOOT_H)
+          .fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
+
+        doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
+          .text("PERSONAL DESIGNADO: ", MARGIN + 4, Y + 3);
+
+        // Calcular el ancho del label para posicionar el valor
+        const labelWidth = doc.widthOfString("PERSONAL DESIGNADO: ") + 4;
+        doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.black)
+          .text(staffNames || "N/A", MARGIN + labelWidth + 4, Y + 3, {
+            width: W - labelWidth - 12,
+            ellipsis: true,
+          });
+
+        Y += SESSION_FOOT_H;
+      }
+
+      // ── Barra NFPA (siempre presente) ──
       const NFPA_BAR_HEIGHT = 10;
       doc.rect(MARGIN, Y, W, NFPA_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
-      
+
       doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-        .text("Norma de Referencia: NFPA", MARGIN + 4, Y + 3, { 
-          width: W - 8, 
-          align: "center" 
+        .text("Norma de Referencia: NFPA", MARGIN + 4, Y + 3, {
+          width: W - 8,
+          align: "center",
         });
 
       Y += NFPA_BAR_HEIGHT + 8;
 
-    /// ═══════════════════════════════════════════════════════════════════
-    // DISPOSITIVOS
-    // ═══════════════════════════════════════════════════════════════════
+      // ═══════════════════════════════════════════════════════════════════
+      // DISPOSITIVOS
+      // ═══════════════════════════════════════════════════════════════════
 
-    const grouped = groupByDef(report.entries, policy.devices);
+      const grouped = groupByDef(report.entries, policy.devices);
 
-    for (const [defId, entries] of grouped) {
-    const def = devices.find((d) => d.id === defId);
-    if (!def) continue;
+      for (const [defId, entries] of grouped) {
+        const def = devices.find((d) => d.id === defId);
+        if (!def) continue;
 
-    const scheduledIds = new Set(entries.flatMap((e) => Object.keys(e.results)));
-    const relevantActivities = def.activities.filter((a) => scheduledIds.has(a.id));
-    
-    if (relevantActivities.length === 0) continue;
+        const scheduledIds = new Set(entries.flatMap((e) => Object.keys(e.results)));
+        const relevantActivities = def.activities.filter((a) => scheduledIds.has(a.id));
 
-    // HEADER SECCIÓN
-    const SECTION_HEADER_HEIGHT = 16;
-    Y = addPageIfNeeded(doc, Y, SECTION_HEADER_HEIGHT + 30, drawHeader);
+        if (relevantActivities.length === 0) continue;
 
-    const sectionTechIds = report.sectionAssignments[defId] ?? [];
-    const sectionTechNames = sectionTechIds.map((id) => technicians.find((u) => u.id === id)?.name ?? id).join(", ");
+        const SECTION_HEADER_HEIGHT = 16;
+        Y = addPageIfNeeded(doc, Y, SECTION_HEADER_HEIGHT + 30, drawHeader);
 
-    doc.rect(MARGIN, Y, W, SECTION_HEADER_HEIGHT).fillAndStroke(PDF_COLORS.grey800, PDF_COLORS.black);
-    
-    doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.white);
-    const deviceNameWidth = doc.widthOfString(def.name.toUpperCase());
-    
-    doc.text(`${def.name.toUpperCase()}`, MARGIN + 5, Y + 4, { continued: false });
-    
-    doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.grey400)
-        .text(`  (${entries.length} U.)`, MARGIN + 5 + deviceNameWidth + 2, Y + 4);
-    
-    doc.fontSize(5).fillColor(PDF_COLORS.white)
-        .text(`RESPONSABLES: ${sectionTechNames || "General"}`, MARGIN + W - 150, Y + 5, { width: 145, align: "right" });
+        const sectionTechIds = report.sectionAssignments[defId] ?? [];
+        const sectionTechNames = sectionTechIds
+          .map((id) => technicians.find((u) => u.id === id)?.name ?? id)
+          .join(", ");
 
-    Y += SECTION_HEADER_HEIGHT;
+        doc.rect(MARGIN, Y, W, SECTION_HEADER_HEIGHT).fillAndStroke(PDF_COLORS.grey800, PDF_COLORS.black);
 
-    const isListView = def.viewMode === "list";
+        doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.white);
+        const deviceNameWidth = doc.widthOfString(def.name.toUpperCase());
 
-    if (!isListView) {
-    // ══════ VISTA TABLA CON DIVISIÓN AUTOMÁTICA ══════
-    
-    const MAX_ACTIVITIES_PER_TABLE = 12;
-    const activityGroups: ActivityConfig[][] = [];
-    
-    for (let i = 0; i < relevantActivities.length; i += MAX_ACTIVITIES_PER_TABLE) {
-        activityGroups.push(relevantActivities.slice(i, i + MAX_ACTIVITIES_PER_TABLE));
-    }
+        doc.text(`${def.name.toUpperCase()}`, MARGIN + 5, Y + 4, { continued: false });
 
-    for (let groupIdx = 0; groupIdx < activityGroups.length; groupIdx++) {
-        const activityGroup = activityGroups[groupIdx];
-        const activityColWidth = activityGroup.length > 8 ? 25.0 : 38.0;
-        const idColWidth = 30;
-        const locationColWidth = W - idColWidth - (activityGroup.length * activityColWidth);
-        const TABLE_HEADER_HEIGHT = 20;
+        doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.grey400)
+          .text(`  (${entries.length} U.)`, MARGIN + 5 + deviceNameWidth + 2, Y + 4);
 
-        if (activityGroups.length > 1) {
-        Y = addPageIfNeeded(doc, Y, 12);
-        doc.rect(MARGIN, Y, W, 10).fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
-        doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
-            .text(`Actividades ${groupIdx * MAX_ACTIVITIES_PER_TABLE + 1} - ${Math.min((groupIdx + 1) * MAX_ACTIVITIES_PER_TABLE, relevantActivities.length)}`, 
-                MARGIN + 4, Y + 3);
-        Y += 12;
-        }
+        doc.fontSize(5).fillColor(PDF_COLORS.white)
+          .text(`RESPONSABLES: ${sectionTechNames || "General"}`, MARGIN + W - 150, Y + 5, { width: 145, align: "right" });
 
-        const drawTableHeader = (currentY: number) => {
-        doc.rect(MARGIN, currentY, W, TABLE_HEADER_HEIGHT).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.black);
-        let cx = MARGIN;
-        
-        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text("ID", cx, currentY + 8, { width: idColWidth, align: "center" });
-        doc.moveTo(cx + idColWidth, currentY).lineTo(cx + idColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
-        cx += idColWidth;
+        Y += SECTION_HEADER_HEIGHT;
 
-        doc.text("UBICACIÓN", cx + 2, currentY + 8, { width: locationColWidth - 4 });
-        doc.moveTo(cx + locationColWidth, currentY).lineTo(cx + locationColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
-        cx += locationColWidth;
+        const isListView = def.viewMode === "list";
 
-        for (const act of activityGroup) {
-            doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(act.name, cx + 2, currentY + 2, { width: activityColWidth - 4, height: 12, align: "center", ellipsis: true });
-            
-            doc.rect(cx + 2, currentY + 14, activityColWidth - 4, 5).stroke(PDF_COLORS.grey400);
-            
-            doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.black)
-            .text(act.frequency.split(".").pop()!.substring(0, 1), cx + 2, currentY + 15, { width: activityColWidth - 4, align: "center" });
-            
-            doc.moveTo(cx + activityColWidth, currentY).lineTo(cx + activityColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
-            cx += activityColWidth;
-        }
-        };
+        if (!isListView) {
+          // ══════ VISTA TABLA ══════
+          const MAX_ACTIVITIES_PER_TABLE = 12;
+          const activityGroups: ActivityConfig[][] = [];
 
-        if (needsNewPage(doc, Y, TABLE_HEADER_HEIGHT + 45)) {
-        doc.addPage();
-        Y = drawHeader(doc);
-        }
+          for (let i = 0; i < relevantActivities.length; i += MAX_ACTIVITIES_PER_TABLE) {
+            activityGroups.push(relevantActivities.slice(i, i + MAX_ACTIVITIES_PER_TABLE));
+          }
 
-        drawTableHeader(Y);
-        Y += TABLE_HEADER_HEIGHT;
+          for (let groupIdx = 0; groupIdx < activityGroups.length; groupIdx++) {
+            const activityGroup = activityGroups[groupIdx];
+            const activityColWidth = activityGroup.length > 8 ? 25.0 : 38.0;
+            const idColWidth = 30;
+            const locationColWidth = W - idColWidth - (activityGroup.length * activityColWidth);
+            const TABLE_HEADER_HEIGHT = 20;
 
-        for (const entry of entries) {
-        const photoCount = (groupIdx === 0) ? entry.photoUrls.length : 0;
-        const BASE_ROW_HEIGHT = 25;
-        const PHOTO_SIZE = 70;
-        
-        let ROW_HEIGHT = BASE_ROW_HEIGHT;
-        if (photoCount > 0) ROW_HEIGHT = 85;
-        
-        if (needsNewPage(doc, Y, ROW_HEIGHT)) {
-            doc.addPage();
-            Y = drawHeader(doc);
+            if (activityGroups.length > 1) {
+              Y = addPageIfNeeded(doc, Y, 12);
+              doc.rect(MARGIN, Y, W, 10).fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
+              doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
+                .text(`Actividades ${groupIdx * MAX_ACTIVITIES_PER_TABLE + 1} - ${Math.min((groupIdx + 1) * MAX_ACTIVITIES_PER_TABLE, relevantActivities.length)}`,
+                  MARGIN + 4, Y + 3);
+              Y += 12;
+            }
+
+            const drawTableHeader = (currentY: number) => {
+              doc.rect(MARGIN, currentY, W, TABLE_HEADER_HEIGHT).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.black);
+              let cx = MARGIN;
+
+              doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+                .text("ID", cx, currentY + 8, { width: idColWidth, align: "center" });
+              doc.moveTo(cx + idColWidth, currentY).lineTo(cx + idColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
+              cx += idColWidth;
+
+              doc.text("UBICACIÓN", cx + 2, currentY + 8, { width: locationColWidth - 4 });
+              doc.moveTo(cx + locationColWidth, currentY).lineTo(cx + locationColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
+              cx += locationColWidth;
+
+              for (const act of activityGroup) {
+                doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+                  .text(act.name, cx + 2, currentY + 2, { width: activityColWidth - 4, height: 12, align: "center", ellipsis: true });
+
+                doc.rect(cx + 2, currentY + 14, activityColWidth - 4, 5).stroke(PDF_COLORS.grey400);
+
+                doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.black)
+                  .text(act.frequency.split(".").pop()!.substring(0, 1), cx + 2, currentY + 15, { width: activityColWidth - 4, align: "center" });
+
+                doc.moveTo(cx + activityColWidth, currentY).lineTo(cx + activityColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
+                cx += activityColWidth;
+              }
+            };
+
+            if (needsNewPage(doc, Y, TABLE_HEADER_HEIGHT + 45)) {
+              doc.addPage();
+              Y = drawHeader(doc);
+            }
+
             drawTableHeader(Y);
             Y += TABLE_HEADER_HEIGHT;
-        }
 
-        doc.rect(MARGIN, Y, W, ROW_HEIGHT).stroke(PDF_COLORS.black);
-        let cx = MARGIN;
+            for (const entry of entries) {
+              const photoCount = (groupIdx === 0) ? entry.photoUrls.length : 0;
+              const BASE_ROW_HEIGHT = 25;
+              const PHOTO_SIZE = 70;
 
-        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(entry.customId, cx, Y + ROW_HEIGHT / 2 - 3, { width: idColWidth, align: "center" });
-        doc.moveTo(cx + idColWidth, Y).lineTo(cx + idColWidth, Y + ROW_HEIGHT).stroke(PDF_COLORS.black);
-        cx += idColWidth;
+              let ROW_HEIGHT = BASE_ROW_HEIGHT;
+              if (photoCount > 0) ROW_HEIGHT = 85;
 
-        doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
-            .text(entry.area, cx + 3, Y + 3, { width: locationColWidth - 6, height: 14, ellipsis: true });
+              if (needsNewPage(doc, Y, ROW_HEIGHT)) {
+                doc.addPage();
+                Y = drawHeader(doc);
+                drawTableHeader(Y);
+                Y += TABLE_HEADER_HEIGHT;
+              }
 
-        if (photoCount > 0) {
-            let px = cx + 3;
-            const photoY = Y + 10;
-            for (let i = 0; i < photoCount; i++) {
-            const buf = imgCache.get(entry.photoUrls[i]);
-            if (buf && px + PHOTO_SIZE < cx + locationColWidth) {
-                drawClippedImage(doc, buf, px, photoY, PHOTO_SIZE, 65);
-                px += PHOTO_SIZE + 3;
-            }
-            }
-        }
+              doc.rect(MARGIN, Y, W, ROW_HEIGHT).stroke(PDF_COLORS.black);
+              let cx = MARGIN;
 
-        doc.moveTo(cx + locationColWidth, Y).lineTo(cx + locationColWidth, Y + ROW_HEIGHT).stroke(PDF_COLORS.black);
-        cx += locationColWidth;
+              doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+                .text(entry.customId, cx, Y + ROW_HEIGHT / 2 - 3, { width: idColWidth, align: "center" });
+              doc.moveTo(cx + idColWidth, Y).lineTo(cx + idColWidth, Y + ROW_HEIGHT).stroke(PDF_COLORS.black);
+              cx += idColWidth;
 
-        for (const act of activityGroup) {
-            const status = entry.results[act.id];
-            const cellCx = cx + activityColWidth / 2;
-            const cellCy = Y + ROW_HEIGHT / 2;
+              doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
+                .text(entry.area, cx + 3, Y + 3, { width: locationColWidth - 6, height: 14, ellipsis: true });
 
-            if (status === "OK") {
-                doc.circle(cellCx, cellCy, 2.5).fill(PDF_COLORS.green);
-            } else if (status === "NOK") {
-                doc.fontSize(12).font("Helvetica-Bold").fillColor(PDF_COLORS.red)
+              if (photoCount > 0) {
+                let px = cx + 3;
+                const photoY = Y + 10;
+                for (let i = 0; i < photoCount; i++) {
+                  const buf = imgCache.get(entry.photoUrls[i]);
+                  if (buf && px + PHOTO_SIZE < cx + locationColWidth) {
+                    drawClippedImage(doc, buf, px, photoY, PHOTO_SIZE, 65);
+                    px += PHOTO_SIZE + 3;
+                  }
+                }
+              }
+
+              doc.moveTo(cx + locationColWidth, Y).lineTo(cx + locationColWidth, Y + ROW_HEIGHT).stroke(PDF_COLORS.black);
+              cx += locationColWidth;
+
+              for (const act of activityGroup) {
+                const status = entry.results[act.id];
+                const cellCx = cx + activityColWidth / 2;
+                const cellCy = Y + ROW_HEIGHT / 2;
+
+                if (status === "OK") {
+                  doc.circle(cellCx, cellCy, 2.5).fill(PDF_COLORS.green);
+                } else if (status === "NOK") {
+                  doc.fontSize(12).font("Helvetica-Bold").fillColor(PDF_COLORS.red)
                     .text("X", cx, cellCy - 6, { width: activityColWidth, align: "center" });
-            } else if (status === "NA" || status === "NR") {
-                doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
+                } else if (status === "NA" || status === "NR") {
+                  doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
                     .text(status || "-", cx, cellCy - 3, { width: activityColWidth, align: "center" });
+                }
+
+                doc.moveTo(cx + activityColWidth, Y).lineTo(cx + activityColWidth, Y + ROW_HEIGHT).stroke(PDF_COLORS.black);
+                cx += activityColWidth;
+              }
+
+              Y += ROW_HEIGHT;
             }
 
-            doc.moveTo(cx + activityColWidth, Y).lineTo(cx + activityColWidth, Y + ROW_HEIGHT).stroke(PDF_COLORS.black);
-            cx += activityColWidth;
-            }
-
-            Y += ROW_HEIGHT;
-        }
-        
-        Y += 6;
-    }
-    } else {
-        // ══════ VISTA LISTA ══════
-        const ENTRY_AREA_WIDTH = W - 8;
-        const ENTRY_HEADER_HEIGHT = 14;
-        const ACTIVITY_ROW_HEIGHT = 18;
-        const PHOTO_SIZE = 64;
-
-        interface ActivityRow {
-        entry: ReportEntry;
-        entryIndex: number;
-        activity: ActivityConfig;
-        actData: ActivityData | undefined;
-        isFirstActivityOfEntry: boolean;
-        }
-
-        const allActivityRows: ActivityRow[] = [];
-        entries.forEach((entry, entryIdx) => {
-        const entryActivities = relevantActivities.filter((a) => Object.prototype.hasOwnProperty.call(entry.results, a.id));
-        entryActivities.forEach((activity, actIdx) => {
-            allActivityRows.push({
-            entry,
-            entryIndex: entryIdx,
-            activity,
-            actData: entry.activityData[activity.id],
-            isFirstActivityOfEntry: actIdx === 0,
-            });
-        });
-        });
-
-        for (let rowIdx = 0; rowIdx < allActivityRows.length; rowIdx++) {
-        const row = allActivityRows[rowIdx];
-        const hasPhotos = row.actData?.photoUrls && row.actData.photoUrls.length > 0;
-        
-        let dynamicHeight = ACTIVITY_ROW_HEIGHT;
-
-        if (hasPhotos) {
-            const photos = row.actData!.photoUrls.length;
-            const maxPhotosPerRow = Math.floor((ENTRY_AREA_WIDTH - 8) / (PHOTO_SIZE + 4));
-            const photoRows = Math.ceil(photos / maxPhotosPerRow);
-            dynamicHeight += photoRows * (PHOTO_SIZE + 6);
-        }
-
-        if (row.actData?.observations?.trim()) {
-            const obsWidth = Math.min(300, ENTRY_AREA_WIDTH - 8);
-            const obsHeight = doc.heightOfString(row.actData.observations, {
-                width: obsWidth,
-            });
-            dynamicHeight += obsHeight + 4;
-        }
-
-        const rowHeight = dynamicHeight;
-
-        if (row.isFirstActivityOfEntry) {
-            if (needsNewPage(doc, Y, rowHeight + 4)) {
-            doc.addPage();
-            Y = drawHeader(doc);
-            }
-
-            const headerX = MARGIN + 4;
-            doc.rect(MARGIN, Y, ENTRY_AREA_WIDTH, ENTRY_HEADER_HEIGHT)
-            .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey300);
-
-            doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(row.entry.customId, headerX, Y + 3, { width: 60 });
-            doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-            .text(row.entry.area, headerX + 65, Y + 3, { width: ENTRY_AREA_WIDTH - 73, align: "right", ellipsis: true });
-
-            Y += ENTRY_HEADER_HEIGHT;
+            Y += 6;
+          }
         } else {
-            if (needsNewPage(doc, Y, rowHeight + 2)) {
-            doc.addPage();
-            Y = drawHeader(doc);
+          // ══════ VISTA LISTA ══════
+          const ENTRY_AREA_WIDTH = W - 8;
+          const ENTRY_HEADER_HEIGHT = 14;
+          const ACTIVITY_ROW_HEIGHT = 18;
+          const PHOTO_SIZE = 64;
 
-            const headerX = MARGIN + 4;
-            doc.rect(MARGIN, Y, ENTRY_AREA_WIDTH, ENTRY_HEADER_HEIGHT)
+          interface ActivityRow {
+            entry: ReportEntry;
+            entryIndex: number;
+            activity: ActivityConfig;
+            actData: ActivityData | undefined;
+            isFirstActivityOfEntry: boolean;
+          }
+
+          const allActivityRows: ActivityRow[] = [];
+          entries.forEach((entry, entryIdx) => {
+            const entryActivities = relevantActivities.filter((a) =>
+              Object.prototype.hasOwnProperty.call(entry.results, a.id)
+            );
+            entryActivities.forEach((activity, actIdx) => {
+              allActivityRows.push({
+                entry,
+                entryIndex: entryIdx,
+                activity,
+                actData: entry.activityData[activity.id],
+                isFirstActivityOfEntry: actIdx === 0,
+              });
+            });
+          });
+
+          for (let rowIdx = 0; rowIdx < allActivityRows.length; rowIdx++) {
+            const row = allActivityRows[rowIdx];
+            const hasPhotos = row.actData?.photoUrls && row.actData.photoUrls.length > 0;
+
+            let dynamicHeight = ACTIVITY_ROW_HEIGHT;
+
+            if (hasPhotos) {
+              const photos = row.actData!.photoUrls.length;
+              const maxPhotosPerRow = Math.floor((ENTRY_AREA_WIDTH - 8) / (PHOTO_SIZE + 4));
+              const photoRows = Math.ceil(photos / maxPhotosPerRow);
+              dynamicHeight += photoRows * (PHOTO_SIZE + 6);
+            }
+
+            if (row.actData?.observations?.trim()) {
+              const obsWidth = Math.min(300, ENTRY_AREA_WIDTH - 8);
+              const obsHeight = doc.heightOfString(row.actData.observations, { width: obsWidth });
+              dynamicHeight += obsHeight + 4;
+            }
+
+            const rowHeight = dynamicHeight;
+
+            if (row.isFirstActivityOfEntry) {
+              if (needsNewPage(doc, Y, rowHeight + 4)) {
+                doc.addPage();
+                Y = drawHeader(doc);
+              }
+
+              const headerX = MARGIN + 4;
+              doc.rect(MARGIN, Y, ENTRY_AREA_WIDTH, ENTRY_HEADER_HEIGHT)
                 .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey300);
 
-            doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+              doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
                 .text(row.entry.customId, headerX, Y + 3, { width: 60 });
-            doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-                .text(row.entry.area, headerX + 65, Y + 3, { width: ENTRY_AREA_WIDTH - 73, align: "right", ellipsis: true });
+              doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
+                .text(row.entry.area, headerX + 65, Y + 3, {
+                  width: ENTRY_AREA_WIDTH - 73,
+                  align: "right",
+                  ellipsis: true,
+                });
 
-            Y += ENTRY_HEADER_HEIGHT;
+              Y += ENTRY_HEADER_HEIGHT;
+            } else {
+              if (needsNewPage(doc, Y, rowHeight + 2)) {
+                doc.addPage();
+                Y = drawHeader(doc);
+
+                const headerX = MARGIN + 4;
+                doc.rect(MARGIN, Y, ENTRY_AREA_WIDTH, ENTRY_HEADER_HEIGHT)
+                  .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey300);
+
+                doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+                  .text(row.entry.customId, headerX, Y + 3, { width: 60 });
+                doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
+                  .text(row.entry.area, headerX + 65, Y + 3, {
+                    width: ENTRY_AREA_WIDTH - 73,
+                    align: "right",
+                    ellipsis: true,
+                  });
+
+                Y += ENTRY_HEADER_HEIGHT;
+              }
             }
-        }
 
-        const rowX = MARGIN + 4;
-        const rowY = Y;
+            const rowX = MARGIN + 4;
+            const rowY = Y;
 
-        if (rowIdx % 2 === 0) {
-            doc.rect(MARGIN, rowY, ENTRY_AREA_WIDTH, rowHeight).fill(PDF_COLORS.grey50);
-        }
-
-        doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(row.activity.name, rowX, rowY + 2, { width: 100, ellipsis: true });
-
-        const freqText = row.activity.frequency.split(".").pop() || "";
-        const freqBadgeX = rowX + 110;
-        doc.rect(freqBadgeX, rowY + 2, 20, 8).stroke(PDF_COLORS.grey400);
-        doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
-            .text(freqText, freqBadgeX, rowY + 3, { width: 20, align: "center" });
-
-        const status = row.entry.results[row.activity.id];
-        let statusText = "";
-        let statusColor = PDF_COLORS.grey600;
-        const statusBgColor = status === "OK" ? PDF_COLORS.green : status === "NOK" ? PDF_COLORS.red : PDF_COLORS.grey300;
-
-        doc.circle(freqBadgeX + 35, rowY + 6, 4).fill(statusBgColor);
-
-        if (status === "OK") {
-        statusColor = PDF_COLORS.green;
-        statusText = "";
-        } else if (status === "NOK") {
-        statusColor = PDF_COLORS.red;
-        statusText = "X";
-        } else if (status === "NA") {
-        statusColor = PDF_COLORS.grey600;
-        statusText = "N/A";
-        } else if (status === "NR") {
-        statusColor = PDF_COLORS.grey600;
-        statusText = "NR";
-        } else {
-        statusColor = PDF_COLORS.grey600;
-        statusText = "-";
-        }
-
-        if (statusText) {
-        const statusFontSize = status === "NOK" ? 10 : 5;
-        doc.fontSize(statusFontSize).font("Helvetica-Bold").fillColor(statusColor)
-            .text(statusText, freqBadgeX + 50, rowY + 2, { width: ENTRY_AREA_WIDTH - 160, align: "left" });
-        }
-
-        if (hasPhotos) {
-            let photoY = rowY + 12;
-            let photoX = rowX;
-            const maxPhotosPerRow = Math.floor((ENTRY_AREA_WIDTH - 8) / (PHOTO_SIZE + 4));
-            let photosDrawn = 0;
-
-            for (const url of row.actData!.photoUrls) {
-            if (photosDrawn >= maxPhotosPerRow) break;
-            const buf = imgCache.get(url);
-            if (buf) {
-                drawClippedImage(doc, buf, photoX, photoY, PHOTO_SIZE, PHOTO_SIZE);
-                photoX += PHOTO_SIZE + 4;
-                photosDrawn++;
+            if (rowIdx % 2 === 0) {
+              doc.rect(MARGIN, rowY, ENTRY_AREA_WIDTH, rowHeight).fill(PDF_COLORS.grey50);
             }
-            }
-        }
 
-        if (row.actData?.observations && row.actData.observations.trim()) {
-            const obsY = hasPhotos ? rowY + 12 + PHOTO_SIZE + 2 : rowY + 12;
-            const obsWidth = Math.min(300, ENTRY_AREA_WIDTH - 8);
+            doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+              .text(row.activity.name, rowX, rowY + 2, { width: 100, ellipsis: true });
+
+            const freqText = row.activity.frequency.split(".").pop() || "";
+            const freqBadgeX = rowX + 110;
+            doc.rect(freqBadgeX, rowY + 2, 20, 8).stroke(PDF_COLORS.grey400);
             doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
-            .text(row.actData.observations, rowX, obsY, {
-                width: obsWidth,
-                height: 6,
-                ellipsis: true,
-            });
+              .text(freqText, freqBadgeX, rowY + 3, { width: 20, align: "center" });
+
+            const status = row.entry.results[row.activity.id];
+            let statusText = "";
+            let statusColor = PDF_COLORS.grey600;
+            const statusBgColor =
+              status === "OK" ? PDF_COLORS.green
+              : status === "NOK" ? PDF_COLORS.red
+              : PDF_COLORS.grey300;
+
+            doc.circle(freqBadgeX + 35, rowY + 6, 4).fill(statusBgColor);
+
+            if (status === "OK") {
+              statusColor = PDF_COLORS.green;
+              statusText = "";
+            } else if (status === "NOK") {
+              statusColor = PDF_COLORS.red;
+              statusText = "X";
+            } else if (status === "NA") {
+              statusColor = PDF_COLORS.grey600;
+              statusText = "N/A";
+            } else if (status === "NR") {
+              statusColor = PDF_COLORS.grey600;
+              statusText = "NR";
+            } else {
+              statusColor = PDF_COLORS.grey600;
+              statusText = "-";
+            }
+
+            if (statusText) {
+              const statusFontSize = status === "NOK" ? 10 : 5;
+              doc.fontSize(statusFontSize).font("Helvetica-Bold").fillColor(statusColor)
+                .text(statusText, freqBadgeX + 50, rowY + 2, {
+                  width: ENTRY_AREA_WIDTH - 160,
+                  align: "left",
+                });
+            }
+
+            if (hasPhotos) {
+              let photoY = rowY + 12;
+              let photoX = rowX;
+              const maxPhotosPerRow = Math.floor((ENTRY_AREA_WIDTH - 8) / (PHOTO_SIZE + 4));
+              let photosDrawn = 0;
+
+              for (const url of row.actData!.photoUrls) {
+                if (photosDrawn >= maxPhotosPerRow) break;
+                const buf = imgCache.get(url);
+                if (buf) {
+                  drawClippedImage(doc, buf, photoX, photoY, PHOTO_SIZE, PHOTO_SIZE);
+                  photoX += PHOTO_SIZE + 4;
+                  photosDrawn++;
+                }
+              }
+            }
+
+            if (row.actData?.observations && row.actData.observations.trim()) {
+              const obsY = hasPhotos ? rowY + 12 + PHOTO_SIZE + 2 : rowY + 12;
+              const obsWidth = Math.min(300, ENTRY_AREA_WIDTH - 8);
+              doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
+                .text(row.actData.observations, rowX, obsY, {
+                  width: obsWidth,
+                  height: 6,
+                  ellipsis: true,
+                });
+            }
+
+            doc.rect(MARGIN, rowY, ENTRY_AREA_WIDTH, rowHeight).stroke(PDF_COLORS.grey300);
+
+            Y = rowY + rowHeight;
+          }
+
+          Y += 6;
         }
 
-        doc.rect(MARGIN, rowY, ENTRY_AREA_WIDTH, rowHeight).stroke(PDF_COLORS.grey300);
-
-        Y = rowY + rowHeight;
-        }
-
-        Y += 6;
-    }
-    Y += 8;
-    }
+        Y += 8;
+      }
 
       // ═══════════════════════════════════════════════════════════════════
       // HALLAZGOS GENERALES
@@ -864,8 +1045,7 @@ async function buildPdf(p: {
       doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
         .text(
           report.generalObservations || "Sin observaciones generales.",
-          MARGIN + 4,
-          Y + 15,
+          MARGIN + 4, Y + 15,
           { width: obsWidth - 8, height: SUMMARY_HEIGHT - 19 }
         );
 
@@ -876,9 +1056,9 @@ async function buildPdf(p: {
 
       const statW = sumWidth / 3;
       const statItems = [
-        { label: "OK", value: stats.ok, color: PDF_COLORS.green },
+        { label: "OK",    value: stats.ok,  color: PDF_COLORS.green },
         { label: "FALLA", value: stats.nok, color: PDF_COLORS.red },
-        { label: "N/A", value: stats.na, color: PDF_COLORS.grey600 },
+        { label: "N/A",   value: stats.na,  color: PDF_COLORS.grey600 },
       ];
 
       for (let i = 0; i < statItems.length; i++) {
@@ -1018,13 +1198,13 @@ export const generateServiceReportPdf = onCall(
     const company = (settingsSnap.exists
       ? settingsSnap.data()
       : {
-        name: "Mi Empresa",
-        legalName: "",
-        address: "",
-        phone: "",
-        email: "",
-        logoUrl: "",
-      }) as CompanySettings;
+          name: "Mi Empresa",
+          legalName: "",
+          address: "",
+          phone: "",
+          email: "",
+          logoUrl: "",
+        }) as CompanySettings;
 
     // 5. Dispositivos
     const devsSnap = await db.collection("devices").get();
@@ -1064,9 +1244,7 @@ export const generateServiceReportPdf = onCall(
     const file = bucket.file(path);
 
     await file.save(pdfBuffer, {
-      metadata: {
-        contentType: "application/pdf",
-      },
+      metadata: { contentType: "application/pdf" },
       public: true,
     });
 
