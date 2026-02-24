@@ -440,6 +440,18 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   int timeIndex = _calculateTimeIndex(isWeekly);
   final policyToUse = _currentPolicy ?? widget.policy;
 
+  // ★ FIX: Actualizar _savedLocations con los datos locales ANTES de hacer merge
+  // Esto evita que el merge sobreescriba los customId/area que el usuario acaba de editar
+  final localState = ref.read(reportNotifierProvider);
+  if (localState != null) {
+    for (final entry in localState.report.entries) {
+      _savedLocations[entry.instanceId] = {
+        'customId': entry.customId,
+        'area': entry.area,
+      };
+    }
+  }
+
   final idealEntries = _repo.generateEntriesForDate(
     policyToUse,
     widget.dateStr,
