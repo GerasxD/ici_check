@@ -136,6 +136,59 @@ class ReportNotifier extends Notifier<ReportState?> {
   }
 
   // ═══════════════════════════════════════════════════════
+  // FILL ALL OK — Solo para Admin/SuperUser
+  // ═══════════════════════════════════════════════════════
+  void fillAllOk() {
+    if (state == null) return;
+    final report = state!.report;
+
+    int ok = 0, nok = 0, na = 0, nr = 0, pending = 0;
+    final entries = List<ReportEntry>.from(report.entries);
+
+    for (int i = 0; i < entries.length; i++) {
+      final entry = entries[i];
+      final newResults = Map<String, String?>.from(entry.results);
+
+      for (final actId in newResults.keys) {
+        if (newResults[actId] == null || newResults[actId] == 'NR') {
+          newResults[actId] = 'OK';
+        }
+      }
+
+      entries[i] = _copyEntry(entry, results: newResults);
+
+      for (final status in newResults.values) {
+        switch (status) {
+          case 'OK': ok++; break;
+          case 'NOK': nok++; break;
+          case 'NA': na++; break;
+          case 'NR': nr++; break;
+          default: pending++; break;
+        }
+      }
+    }
+
+    final newStats = ReportStats(
+      ok: ok, nok: nok, na: na, nr: nr,
+      total: ok + nok + na + nr + pending,
+      pending: pending,
+    );
+
+    final newReport = report.copyWith(entries: entries);
+
+    state = ReportState(
+      report: newReport,
+      stats: newStats,
+      isFullyComplete: pending == 0,
+      instanceIdToGlobalIndex: state!.instanceIdToGlobalIndex,
+      groupedEntriesMap: state!.groupedEntriesMap,
+      frequencies: state!.frequencies,
+    );
+
+    _scheduleSave(newReport);
+  }
+
+  // ═══════════════════════════════════════════════════════
   // CUSTOM ID / AREA — NO recalcula, NO notifica
   // ═══════════════════════════════════════════════════════
   void updateCustomId(int entryIndex, String customId) {

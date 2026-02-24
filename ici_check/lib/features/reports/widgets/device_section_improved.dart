@@ -328,7 +328,7 @@ class _TableColumnHeader extends StatelessWidget {
           controller: scrollController,
           scrollDirection: Axis.horizontal,
           child: SizedBox(
-            width: 230.0 + (activities.length * 100.0) + 110.0,
+            width: 250.0 + (activities.length * 100.0) + 110.0,
             child: Container(
               color: const Color(0xFFF1F5F9),
               // ELIMINAMOS IntrinsicHeight y forzamos altura constante para coincidir con el Delegate
@@ -336,7 +336,7 @@ class _TableColumnHeader extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _HeaderCell(text: 'ID', width: 80),
+                  _HeaderCell(text: 'ID', width: 100),
                   _HeaderCell(text: 'UBICACIÓN', width: 150),
                   ...activities.map((act) => _HeaderCell(text: act.name, width: 100)),
                   _HeaderCell(text: 'FOTO/OBS', width: 110),
@@ -378,7 +378,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
     final entry = ref.watch(singleEntryProvider(globalIndex));
     if (entry == null) return const SizedBox(height: 52);
 
-    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0;
+    final double totalWidth = 250.0 + (activities.length * 100.0) + 110.0;
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -401,10 +401,10 @@ class DeviceSectionTableRow extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 SizedBox(
-                  width: 80,
+                  width: 100,
                   child: Center(
                     child: SizedBox(
-                      width: 60,
+                      width: 85,
                       height: 32,
                       child: _IsolatedTextField(
                         key: ValueKey('id_${entry.instanceId}'),

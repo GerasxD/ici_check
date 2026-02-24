@@ -754,6 +754,62 @@ void _handleNotifierUpdate(ServiceReportModel report) {
   }
 
   // ══════════════════════════════════════════════════════════════════════
+  // LLENAR TODO OK (Admin)
+  // ══════════════════════════════════════════════════════════════════════
+
+  void _confirmFillAllOk() {
+    final state = ref.read(reportNotifierProvider);
+    if (state == null) return;
+
+    final pendingCount = state.stats.pending + state.stats.nr;
+    if (pendingCount == 0) {
+      _showSnackBar('No hay actividades pendientes por llenar', Colors.blue);
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.done_all_rounded, color: Color(0xFF10B981), size: 24),
+            SizedBox(width: 12),
+            Text('Llenar Todo con OK', style: TextStyle(fontSize: 16)),
+          ],
+        ),
+        content: Text(
+          'Se marcarán $pendingCount actividades pendientes como OK.\n\nLas actividades ya marcadas como NOK o N/A no se modificarán.\n\n¿Deseas continuar?',
+          style: const TextStyle(fontSize: 14, color: Color(0xFF64748B)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar', style: TextStyle(color: Color(0xFF64748B))),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _notifier.fillAllOk();
+              _showSnackBar(
+                '$pendingCount actividades marcadas como OK',
+                const Color(0xFF10B981),
+              );
+            },
+            icon: const Icon(Icons.done_all, size: 18),
+            label: const Text('Confirmar'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF10B981),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
   // FIRMAS
   // ══════════════════════════════════════════════════════════════════════
 
@@ -1243,7 +1299,18 @@ void _handleNotifierUpdate(ServiceReportModel report) {
           ),
         ],
       ),
-      actions: [
+        actions: [
+        // ★ NUEVO: Botón "Llenar Todo OK" solo para coordinadores con admin override
+        if (_isUserCoordinator() && _adminOverride && _isEditable(reportState))
+          IconButton(
+            icon: const Icon(
+              Icons.done_all_rounded,
+              color: Color(0xFF10B981),
+              size: 22,
+            ),
+            onPressed: () => _confirmFillAllOk(),
+            tooltip: 'Llenar todo con OK',
+          ),
         if (_isUserCoordinator())
           IconButton(
             icon: Icon(
