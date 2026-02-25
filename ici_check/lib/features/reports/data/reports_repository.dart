@@ -91,6 +91,8 @@ class ReportsRepository {
     };
     final dummyDevice = DeviceModel(id: 'err', name: 'Unknown', description: '', activities: []);
 
+    final Set<String> usedUids = {};
+
     for (final devInstance in policy.devices) {
       final def = definitionsMap[devInstance.definitionId] ?? dummyDevice;
       if (def.id == 'err') continue;
@@ -98,7 +100,16 @@ class ReportsRepository {
       final namePrefix = def.name.substring(0, min(3, def.name.length)).toUpperCase();
 
       for (int i = 1; i <= devInstance.quantity; i++) {
-        final String uid = unitInstanceId(devInstance.instanceId, i);
+        String uid = unitInstanceId(devInstance.instanceId, i);
+
+        int collisionCounter = 1;
+        String baseUid = uid;
+        while (usedUids.contains(uid)) {
+          uid = '${baseUid}_dup$collisionCounter';
+          collisionCounter++;
+        }
+        usedUids.add(uid);
+
         final Map<String, String?> activityResults = {};
 
         // (Lógica de frecuencias intacta)
@@ -172,9 +183,12 @@ class ReportsRepository {
     List<ReportEntry> ideal,
     Map<String, Map<String, String>> savedLocations,
   ) {
-    final Map<String, ReportEntry> existingMap = {
-      for (final e in existing) e.instanceId: e,
-    };
+    final Map<String, ReportEntry> existingMap = {};
+    for (final e in existing) {
+      if (!existingMap.containsKey(e.instanceId)) {
+        existingMap[e.instanceId] = e;
+      }
+    }
 
     final List<ReportEntry> result = [];
     final Set<String> processedIds = {};

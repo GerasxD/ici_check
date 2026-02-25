@@ -117,6 +117,10 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   // Location save debounce
   Timer? _locationSaveDebounce;
 
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+  Timer? _searchDebounce;
+
   // Colores
   static const Color _bgLight = Color(0xFFF8FAFC);
   static const Color _primaryDark = Color(0xFF0F172A);
@@ -143,6 +147,8 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
     _locationSaveDebounce?.cancel();
     _signatureDebounce?.cancel();
     _providerSigController.dispose();
@@ -1161,6 +1167,17 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       final defId = entryGroup.key;
       final entries = entryGroup.value;
 
+      List<ReportEntry> filteredEntries = entries;
+      if (_searchQuery.isNotEmpty) {
+        filteredEntries = entries.where((e) {
+          final customIdMatch = e.customId.toLowerCase().contains(_searchQuery);
+          final areaMatch = e.area.toLowerCase().contains(_searchQuery);
+          return customIdMatch || areaMatch;
+        }).toList();
+      }
+
+      if (filteredEntries.isEmpty) continue;
+
       final deviceDef = _devicesEffective.firstWhere(
         (d) => d.id == defId,
         orElse: () => DeviceModel(
@@ -1187,7 +1204,7 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       final sectionData = FlatSectionData(
         defId: defId,
         deviceDef: deviceDef,
-        entries: entries,
+        entries: filteredEntries, // ★ PASAMOS LOS EQUIPOS FILTRADOS
         assignments: assignments,
         relevantActivities: relevantActivities,
         users: assignedUsers,
@@ -1236,9 +1253,31 @@ void _handleNotifierUpdate(ServiceReportModel report) {
                   onEndService: _handleEndService,
                   onResumeService: _handleResumeService,
                 ),
+                const SizedBox(height: 16),
+                _buildSearchBar(),
               ],
             ),
           ),
+          if (sliverSectionGroups.isEmpty && _searchQuery.isNotEmpty)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Center(
+                  child: Column(
+                    children: [
+                      Icon(Icons.search_off_rounded, size: 64, color: Colors.grey.shade300),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No se encontraron equipos\ncon "$_searchQuery"',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey.shade500, fontSize: 16),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          else
           ...sliverSectionGroups,
           SliverToBoxAdapter(
             child: Column(
@@ -1360,6 +1399,54 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       ],
     );
   }
+
+  Widget _buildSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: TextField(
+        controller: _searchController,
+        style: const TextStyle(fontSize: 14, color: Color(0xFF334155)),
+        decoration: InputDecoration(
+          hintText: 'Buscar equipo por ID o Ubicación...',
+          hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+          prefixIcon: const Icon(Icons.search, color: Color(0xFF94A3B8)),
+          suffixIcon: _searchQuery.isNotEmpty
+              ? IconButton(
+                  icon: const Icon(Icons.clear, color: Color(0xFF94A3B8), size: 20),
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() => _searchQuery = '');
+                  },
+                )
+              : null,
+          filled: true,
+          fillColor: Colors.white,
+          contentPadding: const EdgeInsets.symmetric(vertical: 0),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.grey.shade200),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.grey.shade200),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+          ),
+        ),
+        onChanged: (val) {
+          // ★ Debounce para no saturar el hilo principal al escribir rápido
+          if (_searchDebounce?.isActive ?? false) _searchDebounce!.cancel();
+          _searchDebounce = Timer(const Duration(milliseconds: 250), () {
+            setState(() {
+              _searchQuery = val.trim().toLowerCase();
+            });
+          });
+        },
+      ),
+    );
+  } 
 
   Widget _buildStatusChip(ReportState state) {
     final isRunning = state.report.endTime == null;

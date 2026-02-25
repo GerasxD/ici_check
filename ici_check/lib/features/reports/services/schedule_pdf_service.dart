@@ -315,6 +315,7 @@ class SchedulePdfService {
       children: [
         // HEADER ROW
         pw.TableRow(
+          repeat: true,
           decoration: const pw.BoxDecoration(color: colorSlate50),
           children: [
             pw.Container(

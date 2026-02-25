@@ -12,6 +12,7 @@
 import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
@@ -410,6 +411,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
                         key: ValueKey('id_${entry.instanceId}'),
                         initialValue: entry.customId,
                         enabled: canEdit,
+                        forceUppercase: true, 
                         onChanged: (val) =>
                             notifier.updateCustomId(globalIndex, val),
                       ),
@@ -427,6 +429,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
                         initialValue: entry.area,
                         hint: '...',
                         enabled: canEdit,
+                        forceUppercase: true, 
                         onChanged: (val) =>
                             notifier.updateArea(globalIndex, val),
                       ),
@@ -543,6 +546,7 @@ class DeviceSectionListCard extends ConsumerWidget {
                   initialValue: entry.customId,
                   hint: 'ID',
                   enabled: canEdit,
+                  forceUppercase: true,
                   onChanged: (val) =>
                       notifier.updateCustomId(globalIndex, val),
                 ),
@@ -556,6 +560,7 @@ class DeviceSectionListCard extends ConsumerWidget {
                     initialValue: entry.area,
                     hint: 'Ubicación...',
                     enabled: canEdit,
+                    forceUppercase: true,
                     onChanged: (val) =>
                         notifier.updateArea(globalIndex, val),
                   ),
@@ -1195,7 +1200,6 @@ class _DragScrollableState extends State<_DragScrollable> {
       behavior: ScrollConfiguration.of(context).copyWith(
         dragDevices: {
           PointerDeviceKind.touch,
-          PointerDeviceKind.mouse,
         },
       ),
       child: widget.child,
@@ -1336,6 +1340,7 @@ class _IsolatedTextField extends StatefulWidget {
   final String initialValue;
   final String hint;
   final bool enabled;
+  final bool forceUppercase; 
   final Function(String) onChanged;
 
   const _IsolatedTextField({
@@ -1343,6 +1348,7 @@ class _IsolatedTextField extends StatefulWidget {
     required this.initialValue,
     this.hint = '',
     required this.enabled,
+    this.forceUppercase = false, // ★ POR DEFECTO APAGADO
     required this.onChanged,
   });
 
@@ -1385,6 +1391,8 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
       controller: _controller,
       enabled: widget.enabled,
       textAlign: TextAlign.center,
+      textCapitalization: widget.forceUppercase ? TextCapitalization.characters : TextCapitalization.none,
+      inputFormatters: widget.forceUppercase ? [UpperCaseTextFormatter()] : [],
       style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
       decoration: InputDecoration(
         isDense: true,
@@ -1404,6 +1412,16 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
           widget.onChanged(val);
         });
       },
+    );
+  }
+}
+
+class UpperCaseTextFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) {
+    return TextEditingValue(
+      text: newValue.text.toUpperCase(),
+      selection: newValue.selection,
     );
   }
 }

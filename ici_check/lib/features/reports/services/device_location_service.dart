@@ -24,7 +24,6 @@ class DeviceLocationService {
         'area': area,
         'lastUpdated': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
-      debugPrint('✅ Ubicación guardada con éxito: $instanceId -> $area');
     } catch (e) {
       debugPrint('🚨 ERROR GUARDANDO UBICACIÓN: $e');
     }
@@ -39,6 +38,7 @@ class DeviceLocationService {
     if (instanceIds.isEmpty) return result;
 
     final chunks = _chunkList(instanceIds, 30);
+    final String docPrefix = '${policyId}_';
 
     for (final chunk in chunks) {
       final docIds = chunk.map((id) => _docId(policyId, id)).toList();
@@ -51,11 +51,12 @@ class DeviceLocationService {
 
         for (final doc in snapshots.docs) {
           final data = doc.data();
-          
-          // ★ FIX: Extraer el instanceId directamente del ID del documento
-          // doc.id es "policyId_instanceId". Le quitamos el policyId_.
           final docId = doc.id; 
-          final instanceId = docId.replaceFirst('${policyId}_', '');
+          
+          // ★ FIX Y OPTIMIZACIÓN: Extraer el substring exacto ignorando cualquier colisión regex
+          final instanceId = docId.startsWith(docPrefix) 
+              ? docId.substring(docPrefix.length) 
+              : docId;
 
           result[instanceId] = {
             'customId': data['customId']?.toString() ?? '',
@@ -63,13 +64,11 @@ class DeviceLocationService {
           };
         }
       } catch (e) {
-        // ★ FIX: ¡Que no muera en silencio!
         debugPrint('🚨 ERROR LEYENDO UBICACIONES EN FIRESTORE (Chunk): $e');
         continue;
       }
     }
 
-    debugPrint('📍 Se cargaron ${result.length} ubicaciones guardadas.');
     return result;
   }
 
