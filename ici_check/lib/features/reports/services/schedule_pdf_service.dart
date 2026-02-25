@@ -605,14 +605,17 @@ class SchedulePdfService {
 
       if (viewMode == 'monthly') {
         date = DateTime(policy.startDate.year, policy.startDate.month + i, 1);
-        labelMain = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
-        labelSub = DateFormat('yy', 'es').format(date);
-        dateKey = DateFormat('yyyy-MM').format(date);
+          labelMain = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
+          labelSub = DateFormat('yy', 'es').format(date);
+          dateKey = DateFormat('yyyy-MM').format(date);
+          // ✅ Mostrar año en vista mensual para tener contexto en todas las hojas
+          topLabel = DateFormat('yyyy').format(date);
       } else {
         date = policy.startDate.add(Duration(days: i * 7));
         DateTime endDate = date.add(const Duration(days: 6));
         dateKey = "${date.year}-W${i + 1}"; 
-        topLabel = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
+          // ✅ Siempre mostrar MES + AÑO para que cada hoja tenga contexto
+        topLabel = DateFormat('MMM yy', 'es').format(date).toUpperCase().replaceAll('.', '');
         labelMain = "S${i + 1}";
         if (date.month == endDate.month) {
            labelSub = "${date.day}-${endDate.day}";

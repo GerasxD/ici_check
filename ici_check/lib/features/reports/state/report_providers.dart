@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/reports/data/reports_repository.dart';
 import 'package:ici_check/features/reports/services/device_location_service.dart';
+import 'package:uuid/uuid.dart';
 import 'report_state.dart';
 
 // ★ CAMBIO 2: Función TOP-LEVEL para compute()
@@ -27,6 +28,7 @@ Map<String, dynamic> _serializeReportInIsolate(ServiceReportModel report) {
 class ReportNotifier extends Notifier<ReportState?> {
   final ReportsRepository _repo = ReportsRepository();
   final DeviceLocationService _locationService = DeviceLocationService();
+  final _uuid = const Uuid();
   Timer? _saveDebounce;
   bool _hasPendingChanges = false;
   ServiceReportModel? _pendingReport;
@@ -267,23 +269,85 @@ class ReportNotifier extends Notifier<ReportState?> {
   // ═══════════════════════════════════════════════════════
   void startService(String timeStr, DateTime date) {
     if (state == null) return;
-    final newReport = state!.report.copyWith(startTime: timeStr, serviceDate: date);
+    final report = state!.report;
+
+    final newSession = ServiceSession(
+      id: _uuid.v4(),
+      date: date,
+      startTime: timeStr,
+      endTime: null,
+    );
+
+    final updatedSessions = [...report.sessions, newSession];
+
+    // Compatibilidad con campos legacy startTime / endTime
+    // startTime = primera sesión, endTime = null (hay sesión abierta)
+    final isFirstSession = report.sessions.isEmpty;
+    final newReport = report.copyWith(
+      sessions: updatedSessions,
+      startTime: isFirstSession ? timeStr : report.startTime,
+      serviceDate: isFirstSession ? date : report.serviceDate,
+      endTime: null,
+      forceNullEndTime: true,
+    );
+
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediateAsync(newReport); // ★ era _saveImmediate
+    _saveImmediateAsync(newReport);
   }
 
   void endService(String timeStr) {
     if (state == null) return;
-    final newReport = state!.report.copyWith(endTime: timeStr);
+    final report = state!.report;
+
+    final sessions = List<ServiceSession>.from(report.sessions);
+    final openIdx = sessions.lastIndexWhere((s) => s.isOpen);
+
+    if (openIdx == -1) {
+      // Fallback: no hay sesión abierta, usamos legacy
+      final newReport = report.copyWith(endTime: timeStr);
+      state = state!.copyWithReportOnly(newReport);
+      _saveImmediateAsync(newReport);
+      return;
+    }
+
+    sessions[openIdx] = sessions[openIdx].copyWith(endTime: timeStr);
+
+    // Actualizar endTime legacy = última sesión cerrada
+    final newReport = report.copyWith(
+      sessions: sessions,
+      endTime: timeStr,
+    );
+
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediateAsync(newReport); // ★ era _saveImmediate
+    _saveImmediateAsync(newReport);
   }
 
   void resumeService() {
     if (state == null) return;
-    final newReport = state!.report.copyWith(endTime: null, forceNullEndTime: true);
+    final report = state!.report;
+
+    // Abrimos una nueva sesión (continuación)
+    final now = DateTime.now();
+    final timeStr =
+        '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+
+    final newSession = ServiceSession(
+      id: _uuid.v4(),
+      date: now,
+      startTime: timeStr,
+      endTime: null,
+    );
+
+    final updatedSessions = [...report.sessions, newSession];
+
+    final newReport = report.copyWith(
+      sessions: updatedSessions,
+      endTime: null,
+      forceNullEndTime: true,
+    );
+
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediateAsync(newReport); // ★ era _saveImmediate
+    _saveImmediateAsync(newReport);
   }
 
   void updateServiceDate(DateTime date) {
@@ -305,6 +369,33 @@ class ReportNotifier extends Notifier<ReportState?> {
     final newReport = state!.report.copyWith(endTime: time);
     state = state!.copyWithReportOnly(newReport);
     _saveImmediateAsync(newReport); // ★ era _saveImmediate
+  }
+
+  void updateSession(String sessionId, {String? startTime, String? endTime}) {
+    if (state == null) return;
+    final report = state!.report;
+    final sessions = List<ServiceSession>.from(report.sessions);
+    final idx = sessions.indexWhere((s) => s.id == sessionId);
+    if (idx == -1) return;
+
+    sessions[idx] = sessions[idx].copyWith(
+      startTime: startTime,
+      endTime: endTime,
+    );
+
+    final newReport = report.copyWith(sessions: sessions);
+    state = state!.copyWithReportOnly(newReport);
+    _saveImmediateAsync(newReport);
+  }
+
+  /// Elimina una sesión del historial (Admin Override).
+  void deleteSession(String sessionId) {
+    if (state == null) return;
+    final report = state!.report;
+    final sessions = report.sessions.where((s) => s.id != sessionId).toList();
+    final newReport = report.copyWith(sessions: sessions);
+    state = state!.copyWithReportOnly(newReport);
+    _saveImmediateAsync(newReport);
   }
 
   // ═══════════════════════════════════════════════════════
@@ -374,18 +465,6 @@ class ReportNotifier extends Notifier<ReportState?> {
       frequencies: frequencies,
     );
   }
-
-  // ═══════════════════════════════════════════════════════════════
-  // ★ CAMBIO 4: SAVE STRATEGIES — CON ISOLATE
-  //
-  // ANTES:
-  //   _saveImmediate(report) → _repo.saveReport(report)
-  //   internamente: report.toMap() en main thread → 100-300ms jank
-  //
-  // DESPUÉS:
-  //   _saveImmediateAsync(report) → compute(toMap, report) en isolate
-  //   → _repo.saveReportRaw(id, data) → 0ms jank en main thread
-  // ═══════════════════════════════════════════════════════════════
 
   void _scheduleSave(ServiceReportModel report) {
     _hasPendingChanges = true;
@@ -507,6 +586,12 @@ final reportStatsProvider = Provider<ReportStats?>((ref) {
 
 final reportMetaProvider = Provider<ReportMeta?>((ref) {
   return ref.watch(reportNotifierProvider.select((s) => s?.meta));
+});
+
+final reportSessionsProvider = Provider<List<ServiceSession>>((ref) {
+    return ref.watch(
+    reportNotifierProvider.select((s) => s?.report.sessions ?? []),
+  );
 });
 
 /// ★ FIX: O(1) lookup con Map en vez de .where() lineal

@@ -484,14 +484,32 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     }
   }
 
-  if (hasStructureChanges || hasLocationChanges) {
-    final updatedReport =
-        existingReport.copyWith(entries: mergedEntries);
+    if (hasStructureChanges || hasLocationChanges) {
+    // PROTECCIÓN: Contar respuestas reales antes y después del merge
+    // Esto NO afecta rendimiento porque solo cuenta valores en listas que ya están en memoria
+    final existingAnswerCount = existingReport.entries
+        .expand((e) => e.results.values)
+        .where((v) => v == 'OK' || v == 'NOK' || v == 'NA')
+        .length;
 
-    // SOLUCIÓN 1: Eliminamos _repo.saveReport(updatedReport);
-    // para evitar el bucle infinito
+    final mergedAnswerCount = mergedEntries
+        .expand((e) => e.results.values)
+        .where((v) => v == 'OK' || v == 'NOK' || v == 'NA')
+        .length;
 
-    _handleNotifierUpdate(updatedReport);
+    if (mergedAnswerCount < existingAnswerCount) {
+      // El merge PERDERÍA respuestas → usar el reporte original intacto
+      debugPrint(
+        'PROTECCIÓN ACTIVADA: El merge perdería '
+        '${existingAnswerCount - mergedAnswerCount} respuestas. '
+        'Usando reporte original de Firebase.'
+      );
+
+      _handleNotifierUpdate(existingReport);
+    } else {
+      final updatedReport = existingReport.copyWith(entries: mergedEntries);
+      _handleNotifierUpdate(updatedReport);
+    }
   } else {
     _handleNotifierUpdate(existingReport);
   }

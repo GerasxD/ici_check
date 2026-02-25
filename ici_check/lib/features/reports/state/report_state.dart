@@ -165,14 +165,13 @@ class ReportState {
     );
   }
 
-  /// Copia BARATA: solo cambia el report, NO recalcula stats.
   ReportState copyWithReportOnly(ServiceReportModel newReport) {
     return ReportState(
       report: newReport,
-      stats: stats,
-      isFullyComplete: isFullyComplete,
-      instanceIdToGlobalIndex: instanceIdToGlobalIndex,
-      groupedEntriesMap: groupedEntriesMap,
+      stats: stats, // sin cambio de estructura → no recalcular
+      isFullyComplete: _computeIsComplete(newReport.entries), // SIEMPRE recalcular
+      instanceIdToGlobalIndex: instanceIdToGlobalIndex, // estructura igual → reutilizar
+      groupedEntriesMap: groupedEntriesMap, // estructura igual → reutilizar
       frequencies: frequencies,
     );
   }

@@ -172,22 +172,33 @@ class ReportsRepository {
     List<ReportEntry> ideal,
     Map<String, Map<String, String>> savedLocations,
   ) {
-    // Ya estaba usando un Map, lo cual es excelente.
     final Map<String, ReportEntry> existingMap = {
       for (final e in existing) e.instanceId: e,
     };
 
-    return ideal.map((idealEntry) {
+    final List<ReportEntry> result = [];
+    final Set<String> processedIds = {};
+
+    // ─── Paso 1: Recorrer ideales y hacer merge con existentes ───
+    for (final idealEntry in ideal) {
+      processedIds.add(idealEntry.instanceId);
       final existingEntry = existingMap[idealEntry.instanceId];
 
       if (existingEntry == null) {
+        // No existe en el reporte guardado → entrada nueva
         final saved = savedLocations[idealEntry.instanceId];
-        return idealEntry.copyWith(
-          customId: (saved?['customId'] ?? '').isNotEmpty ? saved!['customId']! : idealEntry.customId,
-          area:     (saved?['area']     ?? '').isNotEmpty ? saved!['area']!     : idealEntry.area,
-        );
+        result.add(idealEntry.copyWith(
+          customId: (saved?['customId'] ?? '').isNotEmpty 
+              ? saved!['customId']! 
+              : idealEntry.customId,
+          area: (saved?['area'] ?? '').isNotEmpty 
+              ? saved!['area']! 
+              : idealEntry.area,
+        ));
+        continue;
       }
 
+      // Existe → combinar resultados
       final Map<String, String?> mergedResults = {};
       for (final actId in idealEntry.results.keys) {
         mergedResults[actId] = existingEntry.results.containsKey(actId)
@@ -196,12 +207,35 @@ class ReportsRepository {
       }
 
       final saved = savedLocations[existingEntry.instanceId];
-      return existingEntry.copyWith(
-        results:  mergedResults,
-        customId: (saved?['customId'] ?? '').isNotEmpty ? saved!['customId']! : existingEntry.customId,
-        area:     (saved?['area']     ?? '').isNotEmpty ? saved!['area']!     : existingEntry.area,
+      result.add(existingEntry.copyWith(
+        results: mergedResults,
+        customId: (saved?['customId'] ?? '').isNotEmpty 
+            ? saved!['customId']! 
+            : existingEntry.customId,
+        area: (saved?['area'] ?? '').isNotEmpty 
+            ? saved!['area']! 
+            : existingEntry.area,
+      ));
+    }
+
+    for (final existingEntry in existing) {
+      if (processedIds.contains(existingEntry.instanceId)) continue;
+
+      // ¿Tiene al menos una respuesta real? (OK, NOK, NA)
+      final hasRealAnswers = existingEntry.results.values.any(
+        (v) => v == 'OK' || v == 'NOK' || v == 'NA',
       );
-    }).toList();
+
+      if (hasRealAnswers) {
+        debugPrint(
+          '⚠️ Conservando entrada huérfana con respuestas: '
+          '${existingEntry.instanceId} (${existingEntry.customId})'
+        );
+        result.add(existingEntry);
+      }
+    }
+
+    return result;
   }
 
   Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
