@@ -490,32 +490,20 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     }
   }
 
-    if (hasStructureChanges || hasLocationChanges) {
-    // PROTECCIÓN: Contar respuestas reales antes y después del merge
-    // Esto NO afecta rendimiento porque solo cuenta valores en listas que ya están en memoria
-    final existingAnswerCount = existingReport.entries
-        .expand((e) => e.results.values)
-        .where((v) => v == 'OK' || v == 'NOK' || v == 'NA')
-        .length;
-
-    final mergedAnswerCount = mergedEntries
-        .expand((e) => e.results.values)
-        .where((v) => v == 'OK' || v == 'NOK' || v == 'NA')
-        .length;
-
-    if (mergedAnswerCount < existingAnswerCount) {
-      // El merge PERDERÍA respuestas → usar el reporte original intacto
-      debugPrint(
-        'PROTECCIÓN ACTIVADA: El merge perdería '
-        '${existingAnswerCount - mergedAnswerCount} respuestas. '
-        'Usando reporte original de Firebase.'
-      );
-
-      _handleNotifierUpdate(existingReport);
-    } else {
-      final updatedReport = existingReport.copyWith(entries: mergedEntries);
-      _handleNotifierUpdate(updatedReport);
-    }
+  if (hasStructureChanges || hasLocationChanges) {
+    // Al haber eliminado equipos en la póliza, es completamente normal y esperado
+    // que el número de respuestas disminuya. 
+    // Por lo tanto, confiamos ciegamente en el resultado de mergedEntries.
+    final updatedReport = existingReport.copyWith(entries: mergedEntries);
+    
+    // 1. Actualizamos la pantalla (lo que ya hacía)
+    _handleNotifierUpdate(updatedReport);
+    
+    // 🔥 2. EL SECRETO ESTÁ AQUÍ 🔥
+    // Obligamos a Firebase a guardar el reporte limpio inmediatamente.
+    // Así matamos a los "equipos fantasma" y sus respuestas viejas para siempre.
+    _repo.saveReport(updatedReport);
+    
   } else {
     _handleNotifierUpdate(existingReport);
   }

@@ -212,7 +212,7 @@ class ReportsRepository {
         continue;
       }
 
-      // Existe → combinar resultados
+      // Existe → combinar resultados para no perder lo que ya se respondió
       final Map<String, String?> mergedResults = {};
       for (final actId in idealEntry.results.keys) {
         mergedResults[actId] = existingEntry.results.containsKey(actId)
@@ -232,22 +232,10 @@ class ReportsRepository {
       ));
     }
 
-    for (final existingEntry in existing) {
-      if (processedIds.contains(existingEntry.instanceId)) continue;
-
-      // ¿Tiene al menos una respuesta real? (OK, NOK, NA)
-      final hasRealAnswers = existingEntry.results.values.any(
-        (v) => v == 'OK' || v == 'NOK' || v == 'NA',
-      );
-
-      if (hasRealAnswers) {
-        debugPrint(
-          '⚠️ Conservando entrada huérfana con respuestas: '
-          '${existingEntry.instanceId} (${existingEntry.customId})'
-        );
-        result.add(existingEntry);
-      }
-    }
+    // ─── ELIMINADO EL PASO 2 (ENTRADAS HUÉRFANAS) ───
+    // Al quitar el código que forzaba a mantener las entradas con respuestas, 
+    // ahora los dispositivos que elimines de la póliza se borrarán correctamente 
+    // del reporte.
 
     return result;
   }
