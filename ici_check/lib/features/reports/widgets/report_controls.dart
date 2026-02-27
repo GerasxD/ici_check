@@ -739,8 +739,44 @@ class _ReportControlsState extends ConsumerState<ReportControls>
                     );
                   }),
 
+                  // Botón agregar sesión (solo admin)
+                  if (widget.adminOverride)
+                    InkWell(
+                      onTap: () => _showAddSessionDialog(context, notifier),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: const BoxDecoration(
+                          border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF3B82F6).withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: const Icon(Icons.add_rounded, size: 14, color: Color(0xFF3B82F6)),
+                            ),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'AGREGAR SESIÓN',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFF3B82F6),
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
                   // Pie: tiempo total
                   _TotalTimeSummary(sessions: sessions),
+
                 ],
               ),
             ),
@@ -748,6 +784,262 @@ class _ReportControlsState extends ConsumerState<ReportControls>
         ],
       ),
     );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // DIÁLOGO PARA AGREGAR SESIÓN MANUAL (Admin)
+  // ═══════════════════════════════════════════════════════════════════
+  void _showAddSessionDialog(BuildContext context, ReportNotifier notifier) {
+    DateTime selectedDate = DateTime.now();
+    String? startTime;
+    String? endTime;
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return AlertDialog(
+              backgroundColor: Colors.white,
+              surfaceTintColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Row(
+                children: [
+                  Icon(Icons.add_circle_outline, color: Color(0xFF3B82F6), size: 22),
+                  SizedBox(width: 10),
+                  Text('Agregar Sesión', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // FECHA
+                  const Text(
+                    'FECHA',
+                    style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Color(0xFF94A3B8), letterSpacing: 0.5),
+                  ),
+                  const SizedBox(height: 6),
+                  InkWell(
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: selectedDate,
+                        firstDate: DateTime(2020),
+                        lastDate: DateTime(2030),
+                      );
+                      if (picked != null) {
+                        setModalState(() => selectedDate = picked);
+                      }
+                    },
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFCBD5E1)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.calendar_month, size: 16, color: Color(0xFF334155)),
+                          const SizedBox(width: 8),
+                          Text(
+                            DateFormat('dd MMM yyyy', 'es').format(selectedDate).toUpperCase(),
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(0xFF334155)),
+                          ),
+                          const Spacer(),
+                          const Icon(Icons.edit, size: 12, color: Color(0xFF94A3B8)),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  // HORARIOS
+                  Row(
+                    children: [
+                      // HORA INICIO
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'INICIO',
+                              style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Color(0xFF94A3B8), letterSpacing: 0.5),
+                            ),
+                            const SizedBox(height: 6),
+                            InkWell(
+                              onTap: () => _pickTime(context, startTime, (t) {
+                                setModalState(() => startTime = t);
+                              }),
+                              borderRadius: BorderRadius.circular(10),
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF8FAFC),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: startTime != null ? const Color(0xFF10B981) : const Color(0xFFCBD5E1),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.play_circle_outline,
+                                      size: 16,
+                                      color: startTime != null ? const Color(0xFF10B981) : const Color(0xFF94A3B8),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      startTime ?? '--:--',
+                                      style: TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                        color: startTime != null ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 8),
+                        child: Padding(
+                          padding: EdgeInsets.only(top: 20),
+                          child: Icon(Icons.arrow_right_alt_rounded, size: 18, color: Color(0xFFCBD5E1)),
+                        ),
+                      ),
+
+                      // HORA FIN
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'FIN',
+                              style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Color(0xFF94A3B8), letterSpacing: 0.5),
+                            ),
+                            const SizedBox(height: 6),
+                            InkWell(
+                              onTap: () => _pickTime(context, endTime, (t) {
+                                setModalState(() => endTime = t);
+                              }),
+                              borderRadius: BorderRadius.circular(10),
+                              child: Container(
+                                width: double.infinity,
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF8FAFC),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: endTime != null ? const Color(0xFFEF4444) : const Color(0xFFCBD5E1),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.stop_circle_outlined,
+                                      size: 16,
+                                      color: endTime != null ? const Color(0xFFEF4444) : const Color(0xFF94A3B8),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      endTime ?? '--:--',
+                                      style: TextStyle(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w700,
+                                        color: endTime != null ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // Duración calculada
+                  if (startTime != null && endTime != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1E293B),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            'Duración: ${_calcDurationFromTimes(startTime!, endTime!)}',
+                            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancelar', style: TextStyle(color: Color(0xFF64748B))),
+                ),
+                ElevatedButton.icon(
+                  onPressed: (startTime != null && endTime != null)
+                      ? () {
+                          Navigator.pop(ctx);
+                          notifier.addManualSession(
+                            date: selectedDate,
+                            startTime: startTime!,
+                            endTime: endTime!,
+                          );
+                        }
+                      : null,
+                  icon: const Icon(Icons.check_circle_outline, size: 16),
+                  label: const Text('Agregar', style: TextStyle(fontWeight: FontWeight.w700)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF3B82F6),
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: const Color(0xFFE2E8F0),
+                    disabledForegroundColor: const Color(0xFF94A3B8),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    elevation: 0,
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  String _calcDurationFromTimes(String start, String end) {
+    try {
+      final sp = start.split(':');
+      final ep = end.split(':');
+      final s = int.parse(sp[0]) * 60 + int.parse(sp[1]);
+      final e = int.parse(ep[0]) * 60 + int.parse(ep[1]);
+      final diff = e - s;
+      if (diff <= 0) return 'Inválido';
+      final h = diff ~/ 60;
+      final m = diff % 60;
+      return h > 0 ? '${h}h ${m.toString().padLeft(2, '0')}m' : '${m}m';
+    } catch (_) {
+      return 'Error';
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════

@@ -398,6 +398,40 @@ class ReportNotifier extends Notifier<ReportState?> {
     _saveImmediateAsync(newReport);
   }
 
+  /// Agrega una sesión manual (Admin Override).
+  void addManualSession({
+    required DateTime date,
+    required String startTime,
+    required String endTime,
+  }) {
+    if (state == null) return;
+    final report = state!.report;
+
+    final newSession = ServiceSession(
+      id: _uuid.v4(),
+      date: date,
+      startTime: startTime,
+      endTime: endTime,
+    );
+
+    final updatedSessions = [...report.sessions, newSession];
+
+    // ★ Ordenar por fecha y luego por hora de inicio
+    updatedSessions.sort((a, b) {
+      final dateCompare = a.date.compareTo(b.date);
+      if (dateCompare != 0) return dateCompare;
+      return a.startTime.compareTo(b.startTime);
+    });
+
+    final newReport = report.copyWith(
+      sessions: updatedSessions,
+      startTime: report.startTime ?? startTime,
+    );
+
+    state = state!.copyWithReportOnly(newReport);
+    _saveImmediateAsync(newReport);
+  }
+
   // ═══════════════════════════════════════════════════════
   // SIGNATURES
   // ═══════════════════════════════════════════════════════
