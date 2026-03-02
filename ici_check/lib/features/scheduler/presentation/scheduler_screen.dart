@@ -1303,6 +1303,27 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     );
   }
 
+  Future<bool> _showExitConfirmationDialog() async {
+    return await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cambios sin guardar'),
+        content: const Text('Tienes cambios pendientes en el cronograma. ¿Estás seguro de que quieres salir sin guardar?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false), // No sale
+            child: const Text('QUEDARSE', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true), // Sí sale
+            child: const Text('SALIR SIN GUARDAR', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    ) ?? false;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -1312,13 +1333,24 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       );
     }
 
-    return Scaffold(
-      backgroundColor: _bgLight,
-      appBar: _buildAppBar(),
-      body: SingleChildScrollView(
-        // ✅ SCROLL VERTICAL PRINCIPAL - Todo se mueve junto
-        child: Column(
-          children: [_buildHeaderInfo(), _buildGrid(), _buildLegend()],
+    return PopScope(
+      canPop: !_hasChanges, // Si no hay cambios, permite salir normalmente
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return; // Si ya salió, no hacemos nada
+
+        // Si intentó salir pero había cambios (canPop era false)
+        final shouldPop = await _showExitConfirmationDialog();
+        if (shouldPop && context.mounted) {
+          Navigator.pop(context); // Salir manualmente si el usuario confirmó
+        }
+      },
+      child: Scaffold(
+        backgroundColor: _bgLight,
+        appBar: _buildAppBar(),
+        body: SingleChildScrollView(
+          child: Column(
+            children: [_buildHeaderInfo(), _buildGrid(), _buildLegend()],
+          ),
         ),
       ),
     );
@@ -1330,7 +1362,16 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       elevation: 0,
       leading: IconButton(
         icon: Icon(Icons.arrow_back_ios_new, color: _textPrimary, size: 20),
-        onPressed: () => Navigator.pop(context),
+        onPressed: () async {
+          if (_hasChanges) {
+            final shouldPop = await _showExitConfirmationDialog();
+            if (shouldPop && mounted) {
+              Navigator.pop(context);
+            }
+          } else {
+            Navigator.pop(context);
+          }
+        },
       ),
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

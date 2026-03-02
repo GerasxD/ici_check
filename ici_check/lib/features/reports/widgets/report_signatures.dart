@@ -7,13 +7,19 @@ class ReportSignatures extends StatelessWidget {
   final SignatureController clientController;
   final String? providerName;
   final String? clientName;
-  
+
   final String? providerSignatureData;
   final String? clientSignatureData;
-  
+
+  // ★ CAMBIO: isEditable ahora solo controla si se puede firmar
+  // Siempre será true para firmas (todos pueden firmar)
   final bool isEditable;
   final Function(String) onProviderNameChanged;
   final Function(String) onClientNameChanged;
+
+  // ★ NUEVO: Callbacks para borrar firmas explícitamente
+  final VoidCallback? onClearProviderSignature;
+  final VoidCallback? onClearClientSignature;
 
   const ReportSignatures({
     super.key,
@@ -26,6 +32,8 @@ class ReportSignatures extends StatelessWidget {
     required this.isEditable,
     required this.onProviderNameChanged,
     required this.onClientNameChanged,
+    this.onClearProviderSignature,
+    this.onClearClientSignature,
   });
 
   @override
@@ -49,28 +57,37 @@ class ReportSignatures extends StatelessWidget {
           // CABECERA
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            padding:
+                const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
             decoration: const BoxDecoration(
               color: Color(0xFFF8FAFC),
-              borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-              border: Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
+              borderRadius:
+                  BorderRadius.vertical(top: Radius.circular(16)),
+              border:
+                  Border(bottom: BorderSide(color: Color(0xFFF1F5F9))),
             ),
             child: Row(
               children: [
-                Icon(Icons.draw_outlined, size: 18, color: Colors.grey.shade600),
+                Icon(Icons.draw_outlined,
+                    size: 18, color: Colors.grey.shade600),
                 const SizedBox(width: 8),
                 Text(
                   "CONFORMIDAD DEL SERVICIO",
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Colors.grey.shade600, letterSpacing: 0.5),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.grey.shade600,
+                    letterSpacing: 0.5,
+                  ),
                 ),
               ],
             ),
           ),
-          
+
           // CUERPO DE FIRMAS (Horizontal)
           Padding(
             padding: const EdgeInsets.all(20),
-            child: IntrinsicHeight( // Asegura que ambas cajas tengan la misma altura si una crece
+            child: IntrinsicHeight(
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -83,6 +100,7 @@ class ReportSignatures extends StatelessWidget {
                       savedSignature: providerSignatureData,
                       isEditable: isEditable,
                       onNameChanged: onProviderNameChanged,
+                      onClearSignature: onClearProviderSignature,
                       icon: Icons.engineering,
                       color: const Color(0xFF3B82F6),
                     ),
@@ -90,7 +108,7 @@ class ReportSignatures extends StatelessWidget {
 
                   // Separador Vertical
                   const SizedBox(width: 20),
-                  
+
                   // FIRMA 2: CLIENTE
                   Expanded(
                     child: _SignatureCanvas(
@@ -100,6 +118,7 @@ class ReportSignatures extends StatelessWidget {
                       savedSignature: clientSignatureData,
                       isEditable: isEditable,
                       onNameChanged: onClientNameChanged,
+                      onClearSignature: onClearClientSignature,
                       icon: Icons.business,
                       color: const Color(0xFF10B981),
                     ),
@@ -114,7 +133,7 @@ class ReportSignatures extends StatelessWidget {
   }
 }
 
-// === EL WIDGET INTELIGENTE SE MANTIENE IGUAL ===
+// === WIDGET DE FIRMA CORREGIDO ===
 class _SignatureCanvas extends StatefulWidget {
   final String title;
   final SignatureController controller;
@@ -122,6 +141,7 @@ class _SignatureCanvas extends StatefulWidget {
   final String? savedSignature;
   final bool isEditable;
   final Function(String) onNameChanged;
+  final VoidCallback? onClearSignature;
   final IconData icon;
   final Color color;
 
@@ -132,6 +152,7 @@ class _SignatureCanvas extends StatefulWidget {
     this.savedSignature,
     required this.isEditable,
     required this.onNameChanged,
+    this.onClearSignature,
     required this.icon,
     required this.color,
   });
@@ -146,16 +167,39 @@ class _SignatureCanvasState extends State<_SignatureCanvas> {
   @override
   void initState() {
     super.initState();
-    if (widget.savedSignature != null && widget.savedSignature!.isNotEmpty) {
-      _showSavedImage = true;
+    _showSavedImage = _hasSavedSignature;
+  }
+
+  bool get _hasSavedSignature =>
+      widget.savedSignature != null && widget.savedSignature!.isNotEmpty;
+
+  // ★ IMPORTANTE: Detectar cuando el savedSignature cambia desde fuera
+  // (por ejemplo, cuando se guarda una nueva firma y Firebase emite el update)
+  @override
+  void didUpdateWidget(covariant _SignatureCanvas oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Si antes no había firma guardada y ahora sí → mostrar imagen
+    if (!_hadSavedSignature(oldWidget) && _hasSavedSignature) {
+      setState(() => _showSavedImage = true);
+    }
+    // Si antes había firma y ahora no (se borró en Firebase) → mostrar canvas
+    if (_hadSavedSignature(oldWidget) && !_hasSavedSignature) {
+      setState(() => _showSavedImage = false);
     }
   }
 
-  void _resetSignature() {
+  bool _hadSavedSignature(covariant _SignatureCanvas oldWidget) =>
+      oldWidget.savedSignature != null &&
+      oldWidget.savedSignature!.isNotEmpty;
+
+  /// ★ CORREGIDO: Al borrar, notifica al padre para que guarde null en Firebase
+  void _clearSignature() {
     setState(() {
       _showSavedImage = false;
     });
     widget.controller.clear();
+    // ★ Esto es lo que faltaba: decirle al screen que borre la firma en Firebase
+    widget.onClearSignature?.call();
   }
 
   @override
@@ -163,19 +207,26 @@ class _SignatureCanvasState extends State<_SignatureCanvas> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Título (Ajustado para ser más compacto si es necesario)
+        // Título
         Row(
           children: [
             Container(
               padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(color: widget.color.withOpacity(0.1), borderRadius: BorderRadius.circular(6)),
+              decoration: BoxDecoration(
+                color: widget.color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6),
+              ),
               child: Icon(widget.icon, size: 14, color: widget.color),
             ),
             const SizedBox(width: 10),
-            Expanded( // Expanded aquí por si el texto es muy largo en pantallas pequeñas
+            Expanded(
               child: Text(
-                widget.title, 
-                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
+                widget.title,
+                style: const TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF1E293B),
+                ),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -186,32 +237,42 @@ class _SignatureCanvasState extends State<_SignatureCanvas> {
 
         // ÁREA DE FIRMA
         Container(
-          height: 120, // Reduje un poco la altura para que se vea más panorámico como en la imagen
+          height: 120,
           decoration: BoxDecoration(
-            color: widget.isEditable ? const Color(0xFFF8FAFC) : Colors.grey.shade50,
+            color: widget.isEditable
+                ? const Color(0xFFF8FAFC)
+                : Colors.grey.shade50,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: widget.isEditable ? const Color(0xFFE2E8F0) : Colors.transparent, 
-              width: 1.5
+              color: widget.isEditable
+                  ? const Color(0xFFE2E8F0)
+                  : Colors.transparent,
+              width: 1.5,
             ),
           ),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(12),
             child: Stack(
               children: [
-                if (_showSavedImage && widget.savedSignature != null)
+                // Firma guardada (imagen)
+                if (_showSavedImage && _hasSavedSignature)
                   Positioned.fill(
                     child: Container(
                       color: Colors.white,
                       child: Image.memory(
                         base64Decode(widget.savedSignature!),
                         fit: BoxFit.contain,
-                        errorBuilder: (context, error, stackTrace) => 
-                            const Center(child: Text("Error", style: TextStyle(fontSize: 10, color: Colors.red))),
+                        errorBuilder: (context, error, stackTrace) =>
+                            const Center(
+                          child: Text("Error",
+                              style: TextStyle(
+                                  fontSize: 10, color: Colors.red)),
+                        ),
                       ),
                     ),
                   ),
 
+                // Canvas de firma (cuando no hay imagen guardada)
                 if (!_showSavedImage)
                   Signature(
                     controller: widget.controller,
@@ -220,58 +281,110 @@ class _SignatureCanvasState extends State<_SignatureCanvas> {
                     height: 120,
                   ),
 
-                if (!_showSavedImage && widget.isEditable && widget.controller.isEmpty)
+                // Hint "Firme aquí"
+                if (!_showSavedImage &&
+                    widget.isEditable &&
+                    widget.controller.isEmpty)
                   Positioned(
-                    bottom: 8, left: 0, right: 0,
-                    child: Center(child: Text("Firme aquí", style: TextStyle(color: Colors.grey.shade300, fontSize: 10, fontWeight: FontWeight.bold))),
+                    bottom: 8,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: Text(
+                        "Firme aquí",
+                        style: TextStyle(
+                          color: Colors.grey.shade300,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
                   ),
 
+                // Botón de acción (editar/borrar)
                 if (widget.isEditable)
                   Positioned(
-                    top: 4, right: 4,
-                    child: _showSavedImage 
-                      ? InkWell(
-                          onTap: _resetSignature,
-                          child: Container(
-                            padding: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle, boxShadow: [BoxShadow(blurRadius: 2, color: Colors.black12)]),
-                            child: Icon(Icons.edit, size: 14, color: widget.color),
+                    top: 4,
+                    right: 4,
+                    child: _showSavedImage
+                        ? InkWell(
+                            onTap: _clearSignature,
+                            child: Container(
+                              padding: const EdgeInsets.all(4),
+                              decoration: const BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                      blurRadius: 2,
+                                      color: Colors.black12),
+                                ],
+                              ),
+                              child: Icon(Icons.edit,
+                                  size: 14, color: widget.color),
+                            ),
+                          )
+                        : InkWell(
+                            onTap: () => widget.controller.clear(),
+                            child: Container(
+                              padding: EdgeInsets.all(4),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                      blurRadius: 2,
+                                      color: Colors.black12),
+                                ],
+                              ),
+                              child: Icon(Icons.delete_outline,
+                                  size: 14, color: Color(0xFFEF4444)),
+                            ),
                           ),
-                        )
-                      : InkWell(
-                          onTap: () => widget.controller.clear(),
-                          child: Container(
-                            padding: const EdgeInsets.all(4),
-                            decoration: BoxDecoration(color: Colors.white, shape: BoxShape.circle, boxShadow: [BoxShadow(blurRadius: 2, color: Colors.black12)]),
-                            child: const Icon(Icons.delete_outline, size: 14, color: Color(0xFFEF4444)),
-                          ),
-                        ),
                   ),
               ],
             ),
           ),
         ),
-        
+
         const SizedBox(height: 8),
 
         // INPUT NOMBRE
         SizedBox(
-          height: 40, // Altura fija para alinear ambos inputs
+          height: 40,
           child: TextFormField(
             key: ValueKey("input_${widget.title}"),
             initialValue: widget.name,
             enabled: widget.isEditable,
-            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFF334155)),
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF334155),
+            ),
             decoration: InputDecoration(
               hintText: 'Nombre del Firmante',
-              hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 10),
-              prefixIcon: Icon(Icons.person_outline, size: 14, color: Colors.grey.shade400),
+              hintStyle:
+                  TextStyle(color: Colors.grey.shade400, fontSize: 10),
+              prefixIcon: Icon(Icons.person_outline,
+                  size: 14, color: Colors.grey.shade400),
               filled: true,
-              fillColor: widget.isEditable ? Colors.white : Colors.grey.shade50,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-              enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: Colors.grey.shade300)),
-              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: widget.color, width: 1.5)),
-              disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: Colors.grey.shade200)),
+              fillColor:
+                  widget.isEditable ? Colors.white : Colors.grey.shade50,
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 8),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: Colors.grey.shade300),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide:
+                    BorderSide(color: widget.color, width: 1.5),
+              ),
+              disabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: Colors.grey.shade200),
+              ),
             ),
             onChanged: widget.onNameChanged,
           ),

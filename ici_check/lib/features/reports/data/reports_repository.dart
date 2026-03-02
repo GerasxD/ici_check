@@ -179,9 +179,9 @@ class ReportsRepository {
   }
 
   List<ReportEntry> mergeEntries(
-    List<ReportEntry> existing,
-    List<ReportEntry> ideal,
-    Map<String, Map<String, String>> savedLocations,
+  List<ReportEntry> existing,
+  List<ReportEntry> ideal,
+  Map<String, Map<String, String>> savedLocations,
   ) {
     final Map<String, ReportEntry> existingMap = {};
     for (final e in existing) {
@@ -190,29 +190,30 @@ class ReportsRepository {
       }
     }
 
+    // ★ Set de IDs ideales para saber cuáles actividades deben existir
+    // ignore: unused_local_variable
+    final Set<String> idealIds = ideal.map((e) => e.instanceId).toSet();
+    
+    // ★ Map de ideales para acceso rápido a los results esperados
+    final Map<String, ReportEntry> idealMap = {};
+    for (final e in ideal) {
+      idealMap[e.instanceId] = e;
+    }
+
     final List<ReportEntry> result = [];
     final Set<String> processedIds = {};
 
-    // ─── Paso 1: Recorrer ideales y hacer merge con existentes ───
-    for (final idealEntry in ideal) {
-      processedIds.add(idealEntry.instanceId);
-      final existingEntry = existingMap[idealEntry.instanceId];
+    // ─── Paso 1: Recorrer EXISTENTES (preserva el orden guardado en Firebase) ───
+    for (final existingEntry in existing) {
+      if (processedIds.contains(existingEntry.instanceId)) continue;
+      processedIds.add(existingEntry.instanceId);
 
-      if (existingEntry == null) {
-        // No existe en el reporte guardado → entrada nueva
-        final saved = savedLocations[idealEntry.instanceId];
-        result.add(idealEntry.copyWith(
-          customId: (saved?['customId'] ?? '').isNotEmpty 
-              ? saved!['customId']! 
-              : idealEntry.customId,
-          area: (saved?['area'] ?? '').isNotEmpty 
-              ? saved!['area']! 
-              : idealEntry.area,
-        ));
-        continue;
-      }
+      final idealEntry = idealMap[existingEntry.instanceId];
+      
+      // Si ya no está en el ideal (dispositivo eliminado de póliza), lo saltamos
+      if (idealEntry == null) continue;
 
-      // Existe → combinar resultados para no perder lo que ya se respondió
+      // Combinar resultados para no perder lo que ya se respondió
       final Map<String, String?> mergedResults = {};
       for (final actId in idealEntry.results.keys) {
         mergedResults[actId] = existingEntry.results.containsKey(actId)
@@ -223,19 +224,30 @@ class ReportsRepository {
       final saved = savedLocations[existingEntry.instanceId];
       result.add(existingEntry.copyWith(
         results: mergedResults,
-        customId: (saved?['customId'] ?? '').isNotEmpty 
-            ? saved!['customId']! 
+        customId: (saved?['customId'] ?? '').isNotEmpty
+            ? saved!['customId']!
             : existingEntry.customId,
-        area: (saved?['area'] ?? '').isNotEmpty 
-            ? saved!['area']! 
+        area: (saved?['area'] ?? '').isNotEmpty
+            ? saved!['area']!
             : existingEntry.area,
       ));
     }
 
-    // ─── ELIMINADO EL PASO 2 (ENTRADAS HUÉRFANAS) ───
-    // Al quitar el código que forzaba a mantener las entradas con respuestas, 
-    // ahora los dispositivos que elimines de la póliza se borrarán correctamente 
-    // del reporte.
+    // ─── Paso 2: Agregar entradas nuevas del ideal que no existían ───
+    for (final idealEntry in ideal) {
+      if (processedIds.contains(idealEntry.instanceId)) continue;
+      processedIds.add(idealEntry.instanceId);
+
+      final saved = savedLocations[idealEntry.instanceId];
+      result.add(idealEntry.copyWith(
+        customId: (saved?['customId'] ?? '').isNotEmpty
+            ? saved!['customId']!
+            : idealEntry.customId,
+        area: (saved?['area'] ?? '').isNotEmpty
+            ? saved!['area']!
+            : idealEntry.area,
+      ));
+    }
 
     return result;
   }

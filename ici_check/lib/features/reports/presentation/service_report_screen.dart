@@ -13,6 +13,7 @@ import 'package:ici_check/features/devices/data/devices_repository.dart';
 import 'package:ici_check/features/reports/services/device_location_service.dart';
 import 'package:ici_check/features/reports/services/photo_storage_service.dart';
 import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
+import 'package:ici_check/features/reports/widgets/renumber_dialog.dart';
 import 'package:ici_check/features/reports/widgets/report_controls.dart';
 import 'package:ici_check/features/reports/widgets/report_header.dart';
 import 'package:ici_check/features/reports/widgets/report_signatures.dart';
@@ -695,9 +696,6 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     return state.report.startTime != null && state.report.endTime == null;
   }
 
-  bool _canSignReport() =>
-      ref.read(reportNotifierProvider) != null;
-
   bool _isUserCoordinator() {
     if (_currentUser == null) return false;
     if (_currentUser!.role == UserRole.SUPER_USER ||
@@ -833,6 +831,48 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     );
   }
 
+  Future<void> _handleRenumberFromHere(
+    int globalIndex,
+    String defId,
+    List<ReportEntry> sectionEntries,
+    Map<String, int> indexMap,
+  ) async {
+    final state = ref.read(reportNotifierProvider);
+    if (state == null) return;
+
+    final entry = state.report.entries[globalIndex];
+
+    // Calcular cuántos entries quedan desde este punto en la sección
+    final sectionGlobalIndices = sectionEntries
+        .map((e) => indexMap[e.instanceId] ?? -1)
+        .where((i) => i >= globalIndex)
+        .toList()
+      ..sort();
+
+    if (sectionGlobalIndices.isEmpty) return;
+
+    final config = await showRenumberDialog(
+      context: context,
+      currentId: entry.customId,
+      remainingCount: sectionGlobalIndices.length,
+    );
+
+    if (config == null) return; // Usuario canceló
+
+    // Aplicar la renumeración a cada entry de la sección desde este punto
+    int offset = 0;
+    for (final gi in sectionGlobalIndices) {
+      final newId = config.generateId(offset);
+      _notifier.updateCustomId(gi, newId);
+      offset++;
+    }
+
+    _showSnackBar(
+      '${sectionGlobalIndices.length} IDs renumerados: ${config.generateId(0)} → ${config.generateId(sectionGlobalIndices.length - 1)}',
+      const Color(0xFF3B82F6),
+    );
+  }
+
   // ══════════════════════════════════════════════════════════════════════
   // FIRMAS
   // ══════════════════════════════════════════════════════════════════════
@@ -845,42 +885,42 @@ void _handleNotifierUpdate(ServiceReportModel report) {
   }
 
   Future<void> _processAndSaveSignatures() async {
-    final state = ref.read(reportNotifierProvider);
-    if (state == null) return;
+  final state = ref.read(reportNotifierProvider);
+  if (state == null) return;
 
-    String? providerSigBase64 = state.report.providerSignature;
-    String? clientSigBase64 = state.report.clientSignature;
-    bool hasChanges = false;
+  String? providerSigBase64 = state.report.providerSignature;
+  String? clientSigBase64 = state.report.clientSignature;
+  bool hasChanges = false;
 
-    if (_providerSigController.isNotEmpty) {
-      final bytes = await _providerSigController.toPngBytes();
-      if (bytes != null) {
-        final newSig = base64Encode(bytes);
-        if (newSig != providerSigBase64) {
-          providerSigBase64 = newSig;
-          hasChanges = true;
-        }
+  if (_providerSigController.isNotEmpty) {
+    final bytes = await _providerSigController.toPngBytes();
+    if (bytes != null) {
+      final newSig = base64Encode(bytes);
+      if (newSig != providerSigBase64) {
+        providerSigBase64 = newSig;
+        hasChanges = true;
       }
-    }
-
-    if (_clientSigController.isNotEmpty) {
-      final bytes = await _clientSigController.toPngBytes();
-      if (bytes != null) {
-        final newSig = base64Encode(bytes);
-        if (newSig != clientSigBase64) {
-          clientSigBase64 = newSig;
-          hasChanges = true;
-        }
-      }
-    }
-
-    if (hasChanges && mounted) {
-      _notifier.updateSignatures(
-        providerSignature: providerSigBase64,
-        clientSignature: clientSigBase64,
-      );
     }
   }
+
+  if (_clientSigController.isNotEmpty) {
+    final bytes = await _clientSigController.toPngBytes();
+    if (bytes != null) {
+      final newSig = base64Encode(bytes);
+      if (newSig != clientSigBase64) {
+        clientSigBase64 = newSig;
+        hasChanges = true;
+      }
+    }
+  }
+
+  if (hasChanges && mounted) {
+    _notifier.updateSignatures(
+      providerSignature: providerSigBase64,
+      clientSignature: clientSigBase64,
+    );
+  }
+}
 
   // ══════════════════════════════════════════════════════════════════════
   // FOTOS
@@ -1210,6 +1250,12 @@ void _handleNotifierUpdate(ServiceReportModel report) {
           });
         },
         scrollGroup: _scrollGroups[defId]!,
+        onRenumberFromHere: (globalIndex) => _handleRenumberFromHere(
+          globalIndex,
+          defId,
+          filteredEntries,
+          indexMap,
+        ),
       );
 
       sliverSectionGroups.add(buildSliverGroupForSection(sectionData, notifier));
@@ -1275,20 +1321,28 @@ void _handleNotifierUpdate(ServiceReportModel report) {
                 ReportSignatures(
                   providerController: _providerSigController,
                   clientController: _clientSigController,
-                  providerName:
-                      reportState.report.providerSignerName,
-                  clientName:
-                      reportState.report.clientSignerName,
-                  providerSignatureData:
-                      reportState.report.providerSignature,
-                  clientSignatureData:
-                      reportState.report.clientSignature,
-                  isEditable: _canSignReport(),
+                  providerName: reportState.report.providerSignerName,
+                  clientName: reportState.report.clientSignerName,
+                  providerSignatureData: reportState.report.providerSignature,
+                  clientSignatureData: reportState.report.clientSignature,
+                  isEditable: true,
                   onProviderNameChanged: (val) {
                     _notifier.updateSignatures(providerName: val);
                   },
                   onClientNameChanged: (val) {
                     _notifier.updateSignatures(clientName: val);
+                  },
+                  onClearProviderSignature: () {
+                    _providerSigController.clear();
+                    _notifier.updateSignatures(
+                      providerSignature: '',
+                    );
+                  },
+                  onClearClientSignature: () {
+                    _clientSigController.clear();
+                    _notifier.updateSignatures(
+                      clientSignature: '',
+                    );
                   },
                 ),
                 const SizedBox(height: 20),

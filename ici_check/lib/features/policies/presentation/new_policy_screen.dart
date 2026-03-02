@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:ici_check/features/policies/presentation/import_locations_widget.dart';
+import 'package:ici_check/features/reports/services/location_import_service.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -53,6 +55,10 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
 
   // State de Personal (Paso 3)
   String? _selectedUserId;
+
+  // State de Importación de Ubicaciones
+  final LocationImportService _importService = LocationImportService();
+  Map<String, Map<int, LocationData>>? _importedLocations;
 
   // Colores mejorados
   final Color _primaryDark = const Color(0xFF0F172A);
@@ -209,8 +215,10 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
     int? newQty = int.tryParse(value);
     
     if (newQty != null && newQty > 0) {
-      final item = _selectedDevices[defId]!;
-      _selectedDevices[defId] = _SelectedDeviceItem(def: item.def, qty: newQty);
+      setState(() {
+        final item = _selectedDevices[defId]!;
+        _selectedDevices[defId] = _SelectedDeviceItem(def: item.def, qty: newQty);
+      });
     }
   }
 
@@ -225,7 +233,7 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
       final devicesList = _selectedDevices.values.map((item) {
         Map<String, int> initialOffsets = {};
         for (var activity in item.def.activities) {
-          initialOffsets[activity.id] = 0; 
+          initialOffsets[activity.id] = 0;
         }
 
         return PolicyDevice(
@@ -248,14 +256,28 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
 
       await _policiesRepo.savePolicy(newPolicy);
 
+      // ★ NUEVO: Aplicar ubicaciones importadas si hay
+      int importedCount = 0;
+      if (_importedLocations != null) {
+        importedCount = await _importService.applyLocationsToNewPolicy(
+          importedLocations: _importedLocations!,
+          newPolicyId: newPolicy.id,
+          newDevices: devicesList,
+        );
+      }
+
       if (mounted) {
+        final message = importedCount > 0
+            ? 'Póliza creada con $importedCount ubicaciones importadas'
+            : 'Póliza creada exitosamente';
+            
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Row(
+            content: Row(
               children: [
-                Icon(Icons.check_circle, color: Colors.white),
-                SizedBox(width: 12),
-                Text('Póliza creada exitosamente'),
+                const Icon(Icons.check_circle, color: Colors.white),
+                const SizedBox(width: 12),
+                Expanded(child: Text(message)),
               ],
             ),
             backgroundColor: Colors.green.shade600,
@@ -951,6 +973,27 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
         builder: (context, constraints) {
           bool isWide = constraints.maxWidth > 700;
           bool isMobile = constraints.maxWidth < 600;
+
+          // ── WIDGET DE IMPORTACIÓN DE UBICACIONES ──
+          Widget importWidget = ImportLocationsWidget(
+            key: ValueKey('import_${_selectedClientId}'), // ← solo cambia con el cliente
+            selectedClientId: _selectedClientId,
+            selectedDevices: _selectedDevices.values.map((item) {
+              return PolicyDevice(
+                instanceId: 'preview_${item.def.id}',
+                definitionId: item.def.id,
+                quantity: item.qty,
+              );
+            }).toList(),
+            definitionNames: {
+              for (final dev in _devices) dev.id: dev.name,
+            },
+            onImportChanged: (locations) {
+              setState(() {
+                _importedLocations = locations;
+              });
+            },
+          );
           
           // ── BARRA DE BÚSQUEDA Y FILTROS ──
           Widget searchAndFilters = Container(
@@ -1474,6 +1517,7 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
           // ── LAYOUT COMPLETO DEL PASO 2 ──
           return Column(
             children: [
+              importWidget,
               // Barra de búsqueda y filtros arriba
               searchAndFilters,
 

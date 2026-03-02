@@ -38,7 +38,7 @@ class MainApp extends StatelessWidget {
         ),
         scaffoldBackgroundColor: const Color(0xFFF8FAFC),
         appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.white,
+          backgroundColor: Colors.white,  
           elevation: 0,
           iconTheme: IconThemeData(color: Color(0xFF1E293B)), // slate-800
           titleTextStyle: TextStyle(

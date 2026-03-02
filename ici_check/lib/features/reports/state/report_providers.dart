@@ -191,6 +191,129 @@ class ReportNotifier extends Notifier<ReportState?> {
   }
 
   // ═══════════════════════════════════════════════════════
+  // SORT SECTION BY CUSTOM ID
+  // ═══════════════════════════════════════════════════════
+  void sortSectionByCustomId(String defId) {
+    if (state == null) return;
+    final report = state!.report;
+
+    // 1. Obtener los instanceIds que pertenecen a esta sección
+    final sectionInstanceIds = <String>{};
+    final sectionEntries = state!.groupedEntriesMap[defId];
+    if (sectionEntries == null || sectionEntries.length < 2) return;
+
+    for (final e in sectionEntries) {
+      sectionInstanceIds.add(e.instanceId);
+    }
+
+    // 2. Separar entries de esta sección vs el resto (mantener posición relativa)
+    final List<ReportEntry> otherEntries = [];
+    final List<ReportEntry> thisSectionEntries = [];
+    final List<int> sectionPositions = []; // posiciones originales en la lista global
+
+    for (int i = 0; i < report.entries.length; i++) {
+      if (sectionInstanceIds.contains(report.entries[i].instanceId)) {
+        thisSectionEntries.add(report.entries[i]);
+        sectionPositions.add(i);
+      } else {
+        otherEntries.add(report.entries[i]);
+      }
+    }
+
+    // 3. Ordenar la sección por customId numérico/alfanumérico
+    thisSectionEntries.sort((a, b) => _compareCustomIds(a.customId, b.customId));
+
+    // 4. Reinsertar los entries ordenados en sus posiciones originales
+    final newEntries = List<ReportEntry>.from(report.entries);
+    for (int i = 0; i < sectionPositions.length; i++) {
+      newEntries[sectionPositions[i]] = thisSectionEntries[i];
+    }
+
+    // 5. Reconstruir el groupedEntriesMap para esta sección
+    final newGroupedMap = Map<String, List<ReportEntry>>.from(state!.groupedEntriesMap);
+    newGroupedMap[defId] = thisSectionEntries;
+
+    // 6. Actualizar estado con recompute completo (recalcula índices)
+    final newReport = report.copyWith(entries: newEntries);
+    state = state!.copyWithFullRecompute(
+      newReport,
+      newGroupedMap: newGroupedMap,
+    );
+
+    _scheduleSave(newReport);
+  }
+
+  /// Comparador inteligente: extrae la parte numérica del final del ID
+  /// para ordenar numéricamente (no alfabéticamente).
+  /// "EXT-002" < "EXT-010" < "EXT-100"
+  /// "3" < "4" < "12" (no "12" < "3" como sería alfabético)
+  int _compareCustomIds(String a, String b) {
+    if (a.isEmpty && b.isEmpty) return 0;
+    if (a.isEmpty) return 1;  // vacíos al final
+    if (b.isEmpty) return -1;
+
+    // Extraer prefijo y número
+    final aParsed = _extractPrefixAndNumber(a);
+    final bParsed = _extractPrefixAndNumber(b);
+
+    // Primero comparar por prefijo
+    final prefixCompare = aParsed.prefix.compareTo(bParsed.prefix);
+    if (prefixCompare != 0) return prefixCompare;
+
+    // Luego por número
+    if (aParsed.number != null && bParsed.number != null) {
+      return aParsed.number!.compareTo(bParsed.number!);
+    }
+
+    // Fallback: comparar como string
+    return a.compareTo(b);
+  }
+
+  ({String prefix, int? number}) _extractPrefixAndNumber(String id) {
+    int numStart = id.length;
+    while (numStart > 0 &&
+        id.codeUnitAt(numStart - 1) >= 48 &&
+        id.codeUnitAt(numStart - 1) <= 57) {
+      numStart--;
+    }
+
+    if (numStart == id.length) {
+      // No hay número al final
+      return (prefix: id, number: null);
+    }
+
+    final prefix = id.substring(0, numStart);
+    final number = int.tryParse(id.substring(numStart));
+    return (prefix: prefix, number: number);
+  }
+
+  void renumberFromIndex({
+    required int startGlobalIndex,
+    required int endGlobalIndex,
+    required String prefix,
+    required int startNumber,
+    required int padding,
+  }) {
+    final current = state;
+    if (current == null) return;
+
+    final entries = List<ReportEntry>.from(current.report.entries);
+    int counter = startNumber;
+
+    for (int i = startGlobalIndex; i <= endGlobalIndex && i < entries.length; i++) {
+      final numberStr = counter.toString().padLeft(padding, '0');
+      final newId = prefix.isEmpty ? numberStr : '$prefix$numberStr';
+      entries[i] = entries[i].copyWith(customId: newId);
+      counter++;
+    }
+
+    final updatedReport = current.report.copyWith(entries: entries);
+    state = current.copyWithReportOnly(updatedReport);
+    _scheduleSave(updatedReport);
+  }
+
+
+  // ═══════════════════════════════════════════════════════
   // CUSTOM ID / AREA — NO recalcula, NO notifica
   // ═══════════════════════════════════════════════════════
   void updateCustomId(int entryIndex, String customId) {
@@ -531,6 +654,7 @@ class ReportNotifier extends Notifier<ReportState?> {
       _saveInIsolate(report);
     }
   }
+
 
   /// ★ CORE: Serializa en Isolate, escribe en Firestore
   Future<void> _saveInIsolate(ServiceReportModel report) async {
