@@ -75,8 +75,8 @@ class SchedulePdfService {
         ? policy.durationMonths 
         : policy.durationMonths * 4;
 
-    List<_TimeColumnData> allColumns = _calculateColumnsData(policy, totalColumns, viewMode);
-
+    List<_TimeColumnData> allColumns = _calculateColumnsData(policy, totalColumns, viewMode, reports);
+      
     // 3. Paginación Horizontal
     final int columnsPerSlice = viewMode == 'weekly' ? 12 : 18;
     final int totalSlices = (allColumns.length / columnsPerSlice).ceil();
@@ -594,7 +594,10 @@ class SchedulePdfService {
     }
   }
 
-  static List<_TimeColumnData> _calculateColumnsData(PolicyModel policy, int count, String viewMode) {
+  static List<_TimeColumnData> _calculateColumnsData(
+    PolicyModel policy, int count, String viewMode,
+    [List<Map<String, dynamic>> reports = const []]
+  ) {
     List<_TimeColumnData> data = [];
     for (int i = 0; i < count; i++) {
       DateTime date;
@@ -605,25 +608,64 @@ class SchedulePdfService {
       bool hasScheduledDay = false;
 
       if (viewMode == 'monthly') {
-        date = DateTime(policy.startDate.year, policy.startDate.month + i, 1);
-          labelMain = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
-          labelSub = DateFormat('yy', 'es').format(date);
-          dateKey = DateFormat('yyyy-MM').format(date);
-          // ✅ Mostrar año en vista mensual para tener contexto en todas las hojas
-          topLabel = DateFormat('yyyy').format(date);
+        // ✅ Match the UI: use startDate's year/month + offset
+        date = DateTime(
+          policy.startDate.year,
+          policy.startDate.month + i,
+          policy.startDate.day,
+        );
+
+        // ✅ Same format as _buildTimeHeader in scheduler_screen.dart
+        labelMain = DateFormat('MMM yyyy', 'es')
+            .format(date)
+            .toUpperCase()
+            .replaceAll('.', '');
+        labelSub = "Día ${DateFormat('d').format(date)}";
+        topLabel = ''; // No need — year is already in labelMain
+
+        // dateKey must use day 1 for Firebase lookup (same as UI)
+        DateTime keyDate = DateTime(date.year, date.month, 1);
+        dateKey = DateFormat('yyyy-MM').format(keyDate);
+
+        // Check if there's a real service date in reports
+        try {
+          final report = reports.firstWhere((r) => r['dateStr'] == dateKey);
+          final startTime = report['startTime'] as String?;
+          if (startTime != null && startTime.isNotEmpty && report['serviceDate'] != null) {
+            hasScheduledDay = true;
+            final serviceDate = (report['serviceDate'] as dynamic).toDate();
+            labelSub = "Día ${DateFormat('d').format(serviceDate)}";
+          }
+        } catch (_) {}
+
       } else {
+        // ✅ Weekly: same as UI — add 7 days per index
         date = policy.startDate.add(Duration(days: i * 7));
         DateTime endDate = date.add(const Duration(days: 6));
-        dateKey = "${date.year}-W${i + 1}"; 
-          // ✅ Siempre mostrar MES + AÑO para que cada hoja tenga contexto
-        topLabel = DateFormat('MMM yy', 'es').format(date).toUpperCase().replaceAll('.', '');
-        labelMain = "S${i + 1}";
-        if (date.month == endDate.month) {
-           labelSub = "${date.day}-${endDate.day}";
-        } else {
-           labelSub = "${date.day}-${endDate.day}/${endDate.month}";
-        }
+
+        topLabel = DateFormat('MMMM', 'es').format(date).toUpperCase();
+
+        String startDay = DateFormat('d').format(date);
+        String endDay = DateFormat('d').format(endDate);
+        int weekNumber = i + 1;
+
+        labelMain = "S$weekNumber";
+        labelSub = "($startDay-$endDay)";
+
+        dateKey = "${date.year}-W$weekNumber";
+
+        // Check for real service date
+        try {
+          final report = reports.firstWhere((r) => r['dateStr'] == dateKey);
+          final startTime = report['startTime'] as String?;
+          if (startTime != null && startTime.isNotEmpty && report['serviceDate'] != null) {
+            hasScheduledDay = true;
+            final serviceDate = (report['serviceDate'] as dynamic).toDate();
+            labelSub = "($startDay-$endDay)\nReal: ${DateFormat('d MMM', 'es').format(serviceDate)}";
+          }
+        } catch (_) {}
       }
+
       data.add(_TimeColumnData(labelMain, labelSub, topLabel, dateKey, hasScheduledDay));
     }
     return data;

@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:ici_check/features/policies/presentation/new_policy_screen.dart';
+import 'package:ici_check/features/policies/presentation/policy_files_screen.dart';
 import 'package:ici_check/features/scheduler/presentation/scheduler_screen.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:intl/intl.dart';
@@ -361,36 +362,67 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                               ),
                               const SizedBox(height: 16),
                               const Divider(),
-                              SizedBox(
-                                width: double.infinity,
-                                child: TextButton.icon(
-                                  onPressed: () {
-                                    Navigator.push(
-                                      context, 
-                                      MaterialPageRoute(
-                                        builder: (context) => SchedulerScreen(policyId: policy.id)
-                                      )
-                                    );
-                                  },
-                                  icon: const Icon(
-                                  Icons.calendar_month_outlined,
-                                  size: 18,
-                                  ),
-                                  label: const Text(
-                                    'Ver Cronograma de Servicios',
-                                  ),
-                                  style: TextButton.styleFrom(
-                                    foregroundColor: _primaryDark,
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 16,
+                              Row(
+                                children: [
+                                  // Botón Cronograma
+                                  Expanded(
+                                    child: TextButton.icon(
+                                      onPressed: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (context) =>
+                                                SchedulerScreen(policyId: policy.id),
+                                          ),
+                                        );
+                                      },
+                                      icon: const Icon(
+                                        Icons.calendar_month_outlined,
+                                        size: 18,
+                                      ),
+                                      label: const Text('Cronograma'),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: _primaryDark,
+                                        padding: const EdgeInsets.symmetric(vertical: 16),
+                                        backgroundColor: Colors.grey.shade50,
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                      ),
                                     ),
-                                    backgroundColor: Colors.grey.shade50,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  // ★ NUEVO: Botón Archivos
+                                  Expanded(
+                                    child: TextButton.icon(
+                                      onPressed: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (context) => PolicyFilesScreen(
+                                              policyId: policy.id,
+                                              clientName: clientName,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                      icon: const Icon(
+                                        Icons.folder_outlined,
+                                        size: 18,
+                                      ),
+                                      label: const Text('Archivos'),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: _primaryDark,
+                                        padding: const EdgeInsets.symmetric(vertical: 16),
+                                        backgroundColor: Colors.grey.shade50,
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                ),
-                              )
+                                ],
+                              ),
                             ],
                           ),
                         );

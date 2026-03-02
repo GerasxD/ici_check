@@ -5,12 +5,15 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gal/gal.dart';
 import 'package:ici_check/features/devices/data/devices_repository.dart';
 import 'package:ici_check/features/reports/services/device_location_service.dart';
+import 'package:ici_check/features/reports/services/offline_photo_queue.dart';
 import 'package:ici_check/features/reports/services/photo_storage_service.dart';
 import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
 import 'package:ici_check/features/reports/widgets/renumber_dialog.dart';
@@ -1028,6 +1031,10 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     setState(() => _isUploadingPhoto = true);
     int successCount = 0;
 
+    // ★ OFFLINE: Verificar conectividad
+    final connectivity = await Connectivity().checkConnectivity();
+    final bool isOffline = connectivity.contains(ConnectivityResult.none);
+
     try {
       for (int i = 0; i < images.length; i++) {
         final image = images[i];
@@ -1046,7 +1053,9 @@ void _handleNotifierUpdate(ServiceReportModel report) {
                   ),
                 ),
                 const SizedBox(width: 12),
-                Text('Subiendo ${i + 1} de ${images.length}...'),
+                Text(isOffline
+                    ? 'Guardando localmente ${i + 1} de ${images.length}...'
+                    : 'Subiendo ${i + 1} de ${images.length}...'),
               ],
             ),
             duration: const Duration(seconds: 10),
@@ -1060,13 +1069,51 @@ void _handleNotifierUpdate(ServiceReportModel report) {
         final currentState = ref.read(reportNotifierProvider)!;
         final entry = currentState.report.entries[entryIdx];
 
-        final photoUrl = await _photoService.uploadPhoto(
-          photoBytes: bytes,
-          reportId: '${widget.policyId}_${widget.dateStr}',
-          deviceInstanceId: entry.instanceId,
-          activityId: activityId,
-        );
+        String? photoUrl;
 
+        if (isOffline) {
+          // ★ OFFLINE: Guardar localmente
+          photoUrl = await OfflinePhotoQueue.enqueue(
+            photoBytes: bytes,
+            reportId: '${widget.policyId}_${widget.dateStr}',
+            deviceInstanceId: entry.instanceId,
+            entryIndex: entryIdx,
+            activityId: activityId,
+          );
+
+          if (photoUrl == null) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            _showSnackBar(
+              'Almacenamiento offline lleno. Conecta a internet para sincronizar.',
+              Colors.red,
+              seconds: 4,
+            );
+            break;
+          }
+        } else {
+          // ★ ONLINE: Subir normalmente, con fallback offline si falla
+          try {
+            photoUrl = await _photoService.uploadPhoto(
+              photoBytes: bytes,
+              reportId: '${widget.policyId}_${widget.dateStr}',
+              deviceInstanceId: entry.instanceId,
+              activityId: activityId,
+            );
+          } catch (e) {
+            debugPrint('⚠️ Upload online falló, guardando offline: $e');
+            photoUrl = await OfflinePhotoQueue.enqueue(
+              photoBytes: bytes,
+              reportId: '${widget.policyId}_${widget.dateStr}',
+              deviceInstanceId: entry.instanceId,
+              entryIndex: entryIdx,
+              activityId: activityId,
+            );
+          }
+        }
+
+        if (photoUrl == null) continue;
+
+        // Actualizar el reporte con la URL (local o remota)
         if (activityId != null) {
           final currentData = entry.activityData[activityId] ??
               ActivityData(photoUrls: [], observations: '');
@@ -1086,10 +1133,16 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       }
 
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      _showSnackBar(
-        successCount == 1 ? 'Foto subida' : '$successCount fotos subidas',
-        Colors.green,
-      );
+      if (successCount > 0) {
+        _showSnackBar(
+          isOffline
+              ? '$successCount foto(s) guardadas localmente ☁️'
+              : successCount == 1
+                  ? 'Foto subida'
+                  : '$successCount fotos subidas',
+          isOffline ? Colors.orange : Colors.green,
+        );
+      }
     } catch (e) {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       _showSnackBar('Error: $e', Colors.red);
@@ -1266,9 +1319,54 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       appBar: _buildAppBar(adminTooltip, reportState),
       body: CustomScrollView(
         slivers: [
+
           SliverToBoxAdapter(
             child: Column(
               children: [
+                // ★ OFFLINE: Banner de estado
+                StreamBuilder<List<ConnectivityResult>>(
+                  stream: Connectivity().onConnectivityChanged,
+                  builder: (context, snapshot) {
+                    final isOffline =
+                        snapshot.data?.contains(ConnectivityResult.none) ?? false;
+                    if (!isOffline) return const SizedBox.shrink();
+                    return Container(
+                      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF7ED),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFFED7AA)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.cloud_off,
+                              size: 16, color: Color(0xFFF59E0B)),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: FutureBuilder<int>(
+                              future: OfflinePhotoQueue.pendingCount(),
+                              builder: (ctx, snap) {
+                                final pending = snap.data ?? 0;
+                                return Text(
+                                  pending > 0
+                                      ? 'Modo Offline — $pending foto(s) pendientes de subir.'
+                                      : 'Modo Offline — Los cambios se sincronizarán al reconectarse.',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Color(0xFF92400E),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
                 ReportHeader(
                   companySettings: _companySettings!,
                   client: widget.client,
@@ -2006,6 +2104,8 @@ void _handleNotifierUpdate(ServiceReportModel report) {
   }
 
   Widget _buildPhotoThumbnail(String photoUrl, int index) {
+    final bool isLocal = photoUrl.startsWith('local://');
+
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
@@ -2022,44 +2122,103 @@ void _handleNotifierUpdate(ServiceReportModel report) {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Image.network(
-              photoUrl,
-              fit: BoxFit.cover,
-              loadingBuilder: (context, child, loadingProgress) {
-                if (loadingProgress == null) return child;
-                return Container(
-                  color: const Color(0xFFF1F5F9),
-                  child: Center(
-                    child: CircularProgressIndicator(
-                      value: loadingProgress.expectedTotalBytes != null
-                          ? loadingProgress.cumulativeBytesLoaded /
-                              loadingProgress.expectedTotalBytes!
-                          : null,
-                      strokeWidth: 2,
-                      color: const Color(0xFF3B82F6),
+            // ★ Imagen local o remota
+            if (isLocal)
+              Builder(builder: (context) {
+                final thumbPath = OfflinePhotoQueue.getThumbnailPath(photoUrl);
+                final filePath =
+                    thumbPath ?? photoUrl.replaceFirst('local://', '');
+                return Image.file(
+                  File(filePath),
+                  fit: BoxFit.cover,
+                  cacheWidth: 200, // ★ Limita RAM del decoder
+                  errorBuilder: (_, __, ___) => Container(
+                    color: const Color(0xFFFEE2E2),
+                    child: const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.broken_image,
+                              color: Color(0xFFEF4444), size: 24),
+                          SizedBox(height: 4),
+                          Text('Error',
+                              style: TextStyle(
+                                  fontSize: 10, color: Color(0xFFEF4444))),
+                        ],
+                      ),
                     ),
                   ),
                 );
-              },
-              errorBuilder: (context, error, stackTrace) {
-                return Container(
-                  color: const Color(0xFFFEE2E2),
-                  child: const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.error_outline,
-                            color: Color(0xFFEF4444), size: 24),
-                        SizedBox(height: 4),
-                        Text('Error',
-                            style: TextStyle(
-                                fontSize: 10, color: Color(0xFFEF4444))),
-                      ],
+              })
+            else
+              Image.network(
+                photoUrl,
+                fit: BoxFit.cover,
+                cacheWidth: 200, // ★ Limita RAM del decoder
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return Container(
+                    color: const Color(0xFFF1F5F9),
+                    child: Center(
+                      child: CircularProgressIndicator(
+                        value: loadingProgress.expectedTotalBytes != null
+                            ? loadingProgress.cumulativeBytesLoaded /
+                                loadingProgress.expectedTotalBytes!
+                            : null,
+                        strokeWidth: 2,
+                        color: const Color(0xFF3B82F6),
+                      ),
                     ),
+                  );
+                },
+                errorBuilder: (context, error, stackTrace) {
+                  return Container(
+                    color: const Color(0xFFFEE2E2),
+                    child: const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.error_outline,
+                              color: Color(0xFFEF4444), size: 24),
+                          SizedBox(height: 4),
+                          Text('Error',
+                              style: TextStyle(
+                                  fontSize: 10, color: Color(0xFFEF4444))),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+
+            // ★ Badge "Local" para fotos offline
+            if (isLocal)
+              Positioned(
+                top: 6,
+                left: 6,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withOpacity(0.9),
+                    borderRadius: BorderRadius.circular(4),
                   ),
-                );
-              },
-            ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.cloud_off, size: 10, color: Colors.white),
+                      SizedBox(width: 3),
+                      Text('Local',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 8,
+                              fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+              ),
+
+            // Botón eliminar
             Positioned(
               top: 6,
               right: 6,
@@ -2078,6 +2237,8 @@ void _handleNotifierUpdate(ServiceReportModel report) {
                 ),
               ),
             ),
+
+            // Número
             Positioned(
               bottom: 6,
               left: 6,
@@ -2100,7 +2261,7 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       ),
     );
   }
-
+  
   void _showDeleteConfirmation(int photoIndex) {
     showDialog(
       context: context,

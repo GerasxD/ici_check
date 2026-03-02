@@ -8,6 +8,8 @@ class DeviceLocationService {
   String _docId(String policyId, String instanceId) =>
       '${policyId}_$instanceId';
 
+  // En device_location_service.dart, modificar saveLocation:
+
   Future<void> saveLocation({
     required String policyId,
     required String instanceId,
@@ -17,7 +19,8 @@ class DeviceLocationService {
     if (customId.isEmpty && area.isEmpty) return;
 
     try {
-      await _db.collection(_collection).doc(_docId(policyId, instanceId)).set({
+      // ★ Fire-and-forget: no awaitar, Firestore cache se encarga
+      _db.collection(_collection).doc(_docId(policyId, instanceId)).set({
         'policyId': policyId,
         'instanceId': instanceId,
         'customId': customId,
@@ -43,11 +46,20 @@ class DeviceLocationService {
     for (final chunk in chunks) {
       final docIds = chunk.map((id) => _docId(policyId, id)).toList();
 
-      try {
-        final snapshots = await _db
-            .collection(_collection)
-            .where(FieldPath.documentId, whereIn: docIds)
-            .get();
+       try {
+        // ★ OFFLINE FIX: Cache-first
+        QuerySnapshot<Map<String, dynamic>> snapshots;
+        try {
+          snapshots = await _db
+              .collection(_collection)
+              .where(FieldPath.documentId, whereIn: docIds)
+              .get(const GetOptions(source: Source.cache));
+        } catch (_) {
+          snapshots = await _db
+              .collection(_collection)
+              .where(FieldPath.documentId, whereIn: docIds)
+              .get();
+        }
 
         for (final doc in snapshots.docs) {
           final data = doc.data();

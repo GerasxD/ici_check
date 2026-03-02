@@ -1,7 +1,7 @@
 name: ici_check
 description: "A new Flutter project."
 publish_to: 'none'
-version: 0.7.0
+version: 0.8.0
 
 environment:
   sdk: ^3.10.4
@@ -35,6 +35,9 @@ dependencies:
   http: ^1.2.0
   sticky_headers: ^0.3.0+2
   flutter_riverpod: ^2.5.0
+
+  connectivity_plus: ^6.0.0  # Verificar última versión
+  shared_preferences: ^2.2.0 # Para la cola de fotos
   
 dev_dependencies:
   flutter_test:

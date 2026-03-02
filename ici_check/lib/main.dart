@@ -1,8 +1,11 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/auth/presentation/main_layout_screen.dart';
+import 'package:ici_check/features/reports/services/offline_photo_queue.dart';
+import 'package:ici_check/features/reports/services/photo_sync_service.dart';
 import 'firebase_options.dart'; // Generado por flutterfire configure
 
 // Importamos la pantalla de login que creamos en el paso anterior
@@ -16,6 +19,18 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  FirebaseFirestore.instance.settings = const Settings(
+    persistenceEnabled: true,
+    cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED, // o un valor grande como 100MB
+  );
+
+  OfflinePhotoQueue.cleanOrphans();
+
+  // ★ OFFLINE: Iniciar sincronización automática de fotos
+  final photoSync = PhotoSyncService();
+  photoSync.startListening();
+  photoSync.syncPendingPhotos();
 
   runApp(const ProviderScope(child: MainApp()));
 }
@@ -69,7 +84,7 @@ class AuthWrapper extends StatelessWidget {
   const AuthWrapper({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) {  
     return StreamBuilder<User?>(
       stream: FirebaseAuth.instance.authStateChanges(),
       builder: (context, snapshot) {

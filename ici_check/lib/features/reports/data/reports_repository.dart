@@ -8,6 +8,7 @@ import 'report_model.dart';
 
 class ReportsRepository {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  FirebaseFirestore get db => _db; // Exponer para PhotoSyncService
   // ignore: unused_field
   final _uuid = const Uuid();
   final Set<String> _savedReportIds = {};
@@ -18,13 +19,28 @@ class ReportsRepository {
     return '${baseInstanceId}_$unitIndex';
   }
 
+  // Stream<ServiceReportModel?> getReportStream(String policyId, String dateStr) {
+  //   return _db
+  //       .collection('reports')
+  //       .where('policyId', isEqualTo: policyId)
+  //       .where('dateStr', isEqualTo: dateStr)
+  //       .limit(1)
+  //       .snapshots()
+  //       .map((snapshot) {
+  //     if (snapshot.docs.isEmpty) return null;
+  //     final data = snapshot.docs.first.data();
+  //     data['id'] = snapshot.docs.first.id;
+  //     return ServiceReportModel.fromMap(data);
+  //   });
+  // }
+
   Stream<ServiceReportModel?> getReportStream(String policyId, String dateStr) {
     return _db
         .collection('reports')
         .where('policyId', isEqualTo: policyId)
         .where('dateStr', isEqualTo: dateStr)
         .limit(1)
-        .snapshots()
+        .snapshots(includeMetadataChanges: true) // ★ OFFLINE FIX: emite cambios del cache
         .map((snapshot) {
       if (snapshot.docs.isEmpty) return null;
       final data = snapshot.docs.first.data();
@@ -33,29 +49,92 @@ class ReportsRepository {
     });
   }
 
+  Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
+    // ★ OFFLINE FIX: Intentar cache primero
+    try {
+      final cacheSnapshot = await _db
+          .collection('reports')
+          .where('policyId', isEqualTo: policyId)
+          .where('dateStr', isEqualTo: dateStr)
+          .limit(1)
+          .get(const GetOptions(source: Source.cache));
+
+      if (cacheSnapshot.docs.isNotEmpty) {
+        final data = cacheSnapshot.docs.first.data();
+        data['id'] = cacheSnapshot.docs.first.id;
+        return ServiceReportModel.fromMap(data);
+      }
+    } catch (_) {
+      // Cache vacío, intentar server
+    }
+
+    // Fallback al server
+    try {
+      final snapshot = await _db
+          .collection('reports')
+          .where('policyId', isEqualTo: policyId)
+          .where('dateStr', isEqualTo: dateStr)
+          .limit(1)
+          .get();
+
+      if (snapshot.docs.isEmpty) return null;
+      final data = snapshot.docs.first.data();
+      data['id'] = snapshot.docs.first.id;
+      return ServiceReportModel.fromMap(data);
+    } catch (e) {
+      debugPrint('Error en getReportOnce: $e');
+      return null;
+    }
+  }
+
+  // Future<void> saveReport(ServiceReportModel report) async {
+  //   try {
+  //     final data = report.toMap();
+  //     final docRef = _db.collection('reports').doc(report.id);
+  //     // Usamos merge: true para simplificar y evitar errores.
+  //     await docRef.set(data, SetOptions(merge: true));
+  //     _savedReportIds.add(report.id);
+  //   } catch (e) {
+  //     debugPrint('Error en saveReport: $e');
+  //     rethrow;
+  //   }
+  // }
+
   Future<void> saveReport(ServiceReportModel report) async {
     try {
       final data = report.toMap();
       final docRef = _db.collection('reports').doc(report.id);
-      // Usamos merge: true para simplificar y evitar errores.
-      await docRef.set(data, SetOptions(merge: true));
+      // ★ OFFLINE FIX: Sin await → Firestore encola localmente si no hay red
+      docRef.set(data, SetOptions(merge: true));
       _savedReportIds.add(report.id);
     } catch (e) {
       debugPrint('Error en saveReport: $e');
-      rethrow;
+      // ★ NO rethrow → el dato queda en cache de Firestore para sync posterior
     }
   }
 
   /// Evita llamar report.toMap() en el main thread.
-  Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
+  // Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
+  //   try {
+  //     final docRef = _db.collection('reports').doc(reportId);
+  //     // Usamos merge: true. Si el documento no existe, lo crea. Si existe, lo actualiza.
+  //     await docRef.set(data, SetOptions(merge: true));
+  //     _savedReportIds.add(reportId); // Mantenemos el registro por si acaso
+  //   } catch (e) {
+  //     debugPrint('Error en saveReportRaw: $e');
+  //     rethrow;
+  //   }
+  // }
+
+   Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
     try {
       final docRef = _db.collection('reports').doc(reportId);
-      // Usamos merge: true. Si el documento no existe, lo crea. Si existe, lo actualiza.
-      await docRef.set(data, SetOptions(merge: true));
-      _savedReportIds.add(reportId); // Mantenemos el registro por si acaso
+      // ★ OFFLINE FIX: Sin await → fire-and-forget
+      docRef.set(data, SetOptions(merge: true));
+      _savedReportIds.add(reportId);
     } catch (e) {
       debugPrint('Error en saveReportRaw: $e');
-      rethrow;
+      // ★ NO rethrow
     }
   }
 
@@ -252,19 +331,19 @@ class ReportsRepository {
     return result;
   }
 
-  Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
-    final snapshot = await _db
-        .collection('reports')
-        .where('policyId', isEqualTo: policyId)
-        .where('dateStr', isEqualTo: dateStr)
-        .limit(1)
-        .get();
+  // Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
+  //   final snapshot = await _db
+  //       .collection('reports')
+  //       .where('policyId', isEqualTo: policyId)
+  //       .where('dateStr', isEqualTo: dateStr)
+  //       .limit(1)
+  //       .get();
 
-    if (snapshot.docs.isEmpty) return null;
-    final data = snapshot.docs.first.data();
-    data['id'] = snapshot.docs.first.id;
-    return ServiceReportModel.fromMap(data);
-  }
+  //   if (snapshot.docs.isEmpty) return null;
+  //   final data = snapshot.docs.first.data();
+  //   data['id'] = snapshot.docs.first.id;
+  //   return ServiceReportModel.fromMap(data);
+  // }
 
   ServiceReportModel initializeReport(
     PolicyModel policy,
