@@ -24,7 +24,6 @@ interface ReportEntry {
   activityData: Record<string, ActivityData>;
 }
 
-// ★ NUEVO: Sesión de trabajo (multi-día)
 interface ServiceSession {
   id: string;
   date: Timestamp;
@@ -40,7 +39,6 @@ interface ServiceReport {
   serviceDate: Timestamp;
   startTime?: string;
   endTime?: string;
-  // ★ NUEVO: Historial de sesiones
   sessions?: ServiceSession[];
   assignedTechnicianIds: string[];
   entries: ReportEntry[];
@@ -168,10 +166,24 @@ function groupByDef(
     if (!map.has(pd.definitionId)) map.set(pd.definitionId, []);
     map.get(pd.definitionId)!.push(entry);
   }
-  return map;
+
+  // ★ Reordenar según el orden de devices en la póliza
+  const defOrder = new Map<string, number>();
+  policyDevices.forEach((d, i) => {
+    if (!defOrder.has(d.definitionId)) defOrder.set(d.definitionId, i);
+  });
+
+  const sorted = new Map<string, ReportEntry[]>(
+    [...map.entries()].sort((a, b) =>
+      (defOrder.get(a[0]) ?? 999) - (defOrder.get(b[0]) ?? 999)
+    )
+  );
+
+  return sorted;
 }
 
 function periodLabel(dateStr: string): string {
+  if (dateStr === "CUMULATIVE") return "Acumulativo";
   if (dateStr.includes("W")) return `Semana ${dateStr}`;
   try {
     const [y, m] = dateStr.split("-").map(Number);
@@ -210,6 +222,7 @@ function calcStats(entries: ReportEntry[]) {
       else if (s === "NOK") nok++;
       else if (s === "NA") na++;
       else if (s === "NR") nr++;
+      else if (s && s.trim() !== "") ok++; // ★ valor medido = completado
     }
   }
   return { ok, nok, na, nr };
@@ -265,7 +278,6 @@ function needsNewPage(
   return currentY + requiredSpace > PAGE_HEIGHT - MARGIN - 25;
 }
 
-// ─── HELPER: Calcula duración entre dos strings "HH:mm" ───────────────────
 function calcSessionDuration(startTime: string, endTime?: string): string {
   if (!endTime) return "En curso";
   try {
@@ -281,10 +293,46 @@ function calcSessionDuration(startTime: string, endTime?: string): string {
   }
 }
 
-// ─── HELPER: Formatea Timestamp de sesión como "DD/MM" ────────────────────
 function formatSessionDate(ts: Timestamp): string {
   const d = ts.toDate();
   return `${d.getDate().toString().padStart(2, "0")}/${(d.getMonth() + 1).toString().padStart(2, "0")}`;
+}
+
+// ─── HELPER: Calcular altura de una celda de actividad en vista lista ──────
+
+interface ListActivityCell {
+  entry: ReportEntry;
+  entryIndex: number;
+  activity: ActivityConfig;
+  actData: ActivityData | undefined;
+  isFirstActivityOfEntry: boolean;
+}
+
+function calcListCellHeight(
+  doc: PDFKit.PDFDocument,
+  cell: ListActivityCell,
+  colWidth: number,
+  photoSize: number
+): number {
+  const ACTIVITY_BASE_HEIGHT = 14;
+  let h = ACTIVITY_BASE_HEIGHT;
+
+  const hasPhotos = cell.actData?.photoUrls && cell.actData.photoUrls.length > 0;
+  if (hasPhotos) {
+    const innerW = colWidth - 6;
+    const maxPhotosPerRow = Math.max(1, Math.floor(innerW / (photoSize + 3)));
+    const photoRows = Math.ceil(cell.actData!.photoUrls.length / maxPhotosPerRow);
+    h += photoRows * (photoSize + 3) + 2;
+  }
+
+  if (cell.actData?.observations?.trim()) {
+    const obsW = colWidth - 8;
+    doc.fontSize(4);
+    const obsH = doc.heightOfString(cell.actData.observations, { width: obsW });
+    h += Math.min(obsH + 2, 14);
+  }
+
+  return h;
 }
 
 // ─── CONSTRUCTOR DEL PDF ───────────────────────────────────────────────────
@@ -352,99 +400,114 @@ async function buildPdf(p: {
       // ═══════════════════════════════════════════════════════════════════
       const drawHeader = (doc: PDFKit.PDFDocument): number => {
         const startY = MARGIN;
-        const HEADER_HEIGHT = 80;
+        const HEADER_HEIGHT = 46;
 
-        doc.rect(MARGIN, startY, W, HEADER_HEIGHT).stroke(PDF_COLORS.black);
+        const LOGO_W = 40;
+        const LOGO_H = 20;
+        const LOGO_PAD = 4;
 
-        // ── Columna 1: PROVEEDOR ──
-        const col1Width = W * 0.28;
-        renderImage(doc, imgCache, company.logoUrl, MARGIN + 8, startY + 8, 35, 35);
-
-        const infoX = MARGIN + (company.logoUrl ? 49 : 8);
-
-        doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-          .text(company.name, infoX, startY + 6, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
-
-        doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.grey700)
-          .text(company.legalName, infoX, startY + 15, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
-
-        doc.fontSize(5.5).fillColor(PDF_COLORS.grey700)
-          .text(company.address, infoX, startY + 24, { width: col1Width - (infoX - MARGIN) - 4, height: 14, ellipsis: true });
-
-        doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-          .text(company.email || "", infoX, startY + 40, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
-
-        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-          .text(company.phone, infoX, startY + 48, { width: col1Width - (infoX - MARGIN) - 4, ellipsis: true });
-
-        doc.moveTo(MARGIN + col1Width, startY).lineTo(MARGIN + col1Width, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
-
-        // ── Columna 2: TÍTULO ──
-        const col2Width = W * 0.44;
-        const col2X = MARGIN + col1Width;
-
+        // ── Calcular ancho de columna central según el contenido más ancho ──
+        const isCumulative = report.dateStr === "CUMULATIVE";
+        const reportTitle = isCumulative ? "REPORTE ACUMULATIVO" : "REPORTE DE SERVICIO";
         const executionDate = new Intl.DateTimeFormat("es", {
           day: "2-digit", month: "short", year: "numeric",
         }).format(report.serviceDate.toDate()).toUpperCase();
         const periodLabelText = periodLabel(report.dateStr);
-
-        doc.fontSize(10).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-          .text("REPORTE DE SERVICIO", col2X, startY + 12, { width: col2Width, align: "center" });
-        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
-          .text("SISTEMA DE DETECCIÓN DE INCENDIOS", col2X, startY + 24, { width: col2Width, align: "center" });
-
-        const boxW = 180;
-        const boxX = col2X + (col2Width - boxW) / 2;
-        doc.rect(boxX, startY + 38, boxW, 11).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
-
-        doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-          .text(`EJECUCIÓN: ${executionDate}  |  PERIODO: ${periodLabelText.toUpperCase()}`, boxX + 3, startY + 40.5, { width: boxW - 6, align: "center" });
-
         const frequencies = getInvolvedFrequencies(report, devices);
-        doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-          .text(`Frecuencias: ${frequencies}`, col2X, startY + 56, { width: col2Width, align: "center", ellipsis: true });
 
-        doc.moveTo(col2X + col2Width, startY).lineTo(col2X + col2Width, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
+        doc.fontSize(8).font("Helvetica-Bold");
+        const titleW = doc.widthOfString(reportTitle);
+        doc.fontSize(5).font("Helvetica-Bold");
+        const subtitleW = doc.widthOfString("SISTEMA DE DETECCIÓN DE INCENDIOS");
+        const boxContentW = doc.widthOfString(
+          `EJECUCIÓN: ${executionDate}  |  PERIODO: ${periodLabelText.toUpperCase()}`
+        ) + 16; // padding interno de la caja
 
-        // ── Columna 3: CLIENTE ──
-        const col3Width = W * 0.28;
-        const col3X = col2X + col2Width;
+        const CENTER_COL_W = Math.max(titleW, subtitleW, boxContentW) + 16; // margen cómodo
+        const SIDE_COL_W = (W - CENTER_COL_W) / 2;
 
-        doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-          .text(client.name, col3X + 8, startY + 6, { width: col3Width - 50, ellipsis: true });
+        doc.rect(MARGIN, startY, W, HEADER_HEIGHT).stroke(PDF_COLORS.black);
 
+        // ── Separadores pegados al centro ──
+        const col2X = MARGIN + SIDE_COL_W;
+        doc.moveTo(col2X, startY).lineTo(col2X, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
+        doc.moveTo(col2X + CENTER_COL_W, startY).lineTo(col2X + CENTER_COL_W, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
+
+        // ════════════════════════════════════════
+        // COLUMNA 1: Logo IZQUIERDA + texto derecha
+        // ════════════════════════════════════════
+        const logo1X = MARGIN + LOGO_PAD;
+        const logo1Y = startY + (HEADER_HEIGHT - LOGO_H) / 2;
+        renderImage(doc, imgCache, company.logoUrl, logo1X, logo1Y, LOGO_W, LOGO_H);
+
+        const info1X = logo1X + LOGO_W + 5;
+        const info1W = SIDE_COL_W - LOGO_W - LOGO_PAD - 8;
+        const info1Y = startY + 5;
+
+        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+          .text(company.name, info1X, info1Y, { width: info1W, ellipsis: true });
+        doc.fontSize(4.5).font("Helvetica").fillColor(PDF_COLORS.grey700)
+          .text(company.legalName, info1X, info1Y + 8, { width: info1W, ellipsis: true });
+        doc.fontSize(4).fillColor(PDF_COLORS.grey700)
+          .text(company.address, info1X, info1Y + 14, { width: info1W, height: 8, ellipsis: true });
+        doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
+          .text(`${company.phone}  ${company.email || ""}`, info1X, info1Y + 22, { width: info1W, ellipsis: true });
+
+        // ════════════════════════════════════════
+        // COLUMNA 2: Centro — título + fecha + frecuencias
+        // ════════════════════════════════════════
+        doc.fontSize(8).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+          .text(reportTitle, col2X, startY + 4, { width: CENTER_COL_W, align: "center" });
+
+        doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
+          .text("SISTEMA DE DETECCIÓN DE INCENDIOS", col2X, startY + 14, { width: CENTER_COL_W, align: "center" });
+
+        const boxW = Math.max(boxContentW, 140);
+        const boxX = col2X + (CENTER_COL_W - boxW) / 2;
+        doc.rect(boxX, startY + 22, boxW, 10).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
+        doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+          .text(
+            `EJECUCIÓN: ${executionDate}  |  PERIODO: ${periodLabelText.toUpperCase()}`,
+            boxX + 3, startY + 24.5,
+            { width: boxW - 6, align: "center" }
+          );
+
+        doc.fontSize(4.5).font("Helvetica").fillColor(PDF_COLORS.grey600)
+          .text(`Frecuencias: ${frequencies}`, col2X, startY + 36, { width: CENTER_COL_W, align: "center", ellipsis: true });
+
+        // ════════════════════════════════════════
+        // COLUMNA 3: texto izquierda + Logo DERECHA
+        // ════════════════════════════════════════
+        const col3X = col2X + CENTER_COL_W;
+        const logo3X = col3X + SIDE_COL_W - LOGO_W - LOGO_PAD;
+        const logo3Y = startY + (HEADER_HEIGHT - LOGO_H) / 2;
+        renderImage(doc, imgCache, client.logoUrl, logo3X, logo3Y, LOGO_W, LOGO_H);
+
+        const info3W = SIDE_COL_W - LOGO_W - LOGO_PAD - 8;
+        const info3X = col3X + 4;
+        const info3Y = startY + 5;
+
+        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+          .text(client.name, info3X, info3Y, { width: info3W, ellipsis: true });
         if (client.razonSocial) {
-          doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.grey700)
-            .text(client.razonSocial, col3X + 8, startY + 14, { width: col3Width - 50, ellipsis: true });
+          doc.fontSize(4.5).font("Helvetica").fillColor(PDF_COLORS.grey700)
+            .text(client.razonSocial, info3X, info3Y + 8, { width: info3W, ellipsis: true });
         }
+        doc.fontSize(4).fillColor(PDF_COLORS.grey700)
+          .text(client.address, info3X, info3Y + 14, { width: info3W, height: 8, ellipsis: true });
+        doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
+          .text(
+            `Tel: ${client.contact}${client.nombreContacto ? "  " + client.nombreContacto : ""}`,
+            info3X, info3Y + 22,
+            { width: info3W, ellipsis: true }
+          );
 
-        if (client.nombreContacto) {
-          doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(`Contacto: ${client.nombreContacto}`, col3X + 8, startY + 22, { width: col3Width - 50, ellipsis: true });
-        }
-
-        doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.black)
-          .text(`Tel: ${client.contact}`, col3X + 8, startY + 30, { width: col3Width - 50, ellipsis: true });
-
-        doc.fontSize(5).fillColor(PDF_COLORS.grey700)
-          .text(client.address, col3X + 8, startY + 38, { width: col3Width - 50, height: 18, ellipsis: true });
-
-        renderImage(doc, imgCache, client.logoUrl, col3X + col3Width - 40, startY + 8, 35, 35);
-
-        return MARGIN + HEADER_HEIGHT + 10;
+        return MARGIN + HEADER_HEIGHT + 8;
       };
-
       let Y = drawHeader(doc);
 
       // ═══════════════════════════════════════════════════════════════════
-      // ★ INFO BAR — SESIONES DE TRABAJO
-      //
-      // LÓGICA:
-      //   • Si report.sessions tiene 2+ sesiones → mostramos tabla de sesiones
-      //     con una fila por sesión: N° | Fecha | Inicio → Fin | Duración
-      //   • Si hay 0 o 1 sesión → mostramos el bar simple original con
-      //     Fecha | Horario | Personal (igual que antes)
-      //   • En ambos casos la segunda barra NFPA se mantiene igual
+      // INFO BAR — SESIONES DE TRABAJO
       // ═══════════════════════════════════════════════════════════════════
 
       const staffNames = report.assignedTechnicianIds
@@ -460,7 +523,7 @@ async function buildPdf(p: {
       const INFO_BAR_HEIGHT = 12;
 
       if (!hasMultipleSessions) {
-        // ── CASO A: Bar simple (original) ──
+        // ── CASO A: Bar simple ──
         doc.rect(MARGIN, Y, W, INFO_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
 
         doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
@@ -480,29 +543,22 @@ async function buildPdf(p: {
 
         Y += INFO_BAR_HEIGHT;
 
-      } else {
-        // ── CASO B: Tabla de sesiones de trabajo ──────────────────────
-        //
-        // Estructura:
-        //   [ HISTORIAL DE SESIONES header bar        ]
-        //   [ N° | FECHA | INICIO | FIN | DURACIÓN   ]  ← sub-header
-        //   [ 1  | dd/mm | HH:mm | HH:mm | Xh Ym    ]  ← fila por sesión
-        //   [ 2  | dd/mm | HH:mm | HH:mm | Xh Ym    ]
-        //   ...
-        //   [ PERSONAL: nombre, nombre...             ]  ← pie
+        const NFPA_BAR_HEIGHT = 10;
+        doc.rect(MARGIN, Y, W, NFPA_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
+        doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+          .text("Norma de Referencia: NFPA", MARGIN + 4, Y + 3);
+        Y += NFPA_BAR_HEIGHT + 8;
 
+      } else {
+        // ── CASO B: Tabla de sesiones ──
         const SESSION_TITLE_H = 11;
         const SESSION_ROW_H   = 10;
-        const SESSION_FOOT_H  = 10;
 
-        // ── Título de la sección ──
         doc.rect(MARGIN, Y, W, SESSION_TITLE_H)
           .fillAndStroke(PDF_COLORS.grey800, PDF_COLORS.black);
-
         doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.white)
-          .text("HISTORIAL DE SESIONES DE TRABAJO", MARGIN + 4, Y + 3, { width: W * 0.5 });
+          .text("PERIODOS DE ACTIVIDAD DEL MANTENIMIENTO", MARGIN + 4, Y + 3, { width: W * 0.5 });
 
-        // Totales a la derecha
         const closedSessions = sessions.filter((s) => s.endTime);
         let totalMinutes = 0;
         for (const s of closedSessions) {
@@ -524,14 +580,11 @@ async function buildPdf(p: {
         doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.grey400)
           .text(
             `${sessions.length} sesión${sessions.length !== 1 ? "es" : ""}  ·  Tiempo total: ${totalStr}`,
-            MARGIN + W * 0.5,
-            Y + 3.5,
+            MARGIN + W * 0.5, Y + 3.5,
             { width: W * 0.49, align: "right" }
           );
-
         Y += SESSION_TITLE_H;
 
-        // ── Sub-header de columnas ──
         const colN    = 20;
         const colDate = 44;
         const colFrom = 44;
@@ -543,32 +596,25 @@ async function buildPdf(p: {
 
         const drawColumnLabels = (rowY: number) => {
           let cx = MARGIN;
-          const labelStyle = { fontSize: 5, font: "Helvetica-Bold", color: PDF_COLORS.grey700 };
-
-          doc.fontSize(labelStyle.fontSize).font(labelStyle.font).fillColor(labelStyle.color)
+          doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
             .text("N°", cx, rowY + 3, { width: colN, align: "center" });
           cx += colN;
           doc.moveTo(cx, rowY).lineTo(cx, rowY + SESSION_ROW_H).stroke(PDF_COLORS.grey400);
-
           doc.text("FECHA", cx + 2, rowY + 3, { width: colDate - 4 });
           cx += colDate;
           doc.moveTo(cx, rowY).lineTo(cx, rowY + SESSION_ROW_H).stroke(PDF_COLORS.grey400);
-
           doc.text("INICIO", cx + 2, rowY + 3, { width: colFrom - 4, align: "center" });
           cx += colFrom;
           doc.moveTo(cx, rowY).lineTo(cx, rowY + SESSION_ROW_H).stroke(PDF_COLORS.grey400);
-
           doc.text("FIN", cx + 2, rowY + 3, { width: colTo - 4, align: "center" });
           cx += colTo;
           doc.moveTo(cx, rowY).lineTo(cx, rowY + SESSION_ROW_H).stroke(PDF_COLORS.grey400);
-
           doc.text("DURACIÓN", cx + 2, rowY + 3, { width: colDur - 4, align: "center" });
         };
 
         drawColumnLabels(Y);
         Y += SESSION_ROW_H;
 
-        // ── Filas de sesiones ──
         sessions.forEach((session, idx) => {
           const isEven = idx % 2 === 0;
           const rowBg = isEven ? PDF_COLORS.white : PDF_COLORS.grey50;
@@ -581,33 +627,27 @@ async function buildPdf(p: {
           const isOpen = !session.endTime;
 
           let cx = MARGIN;
-
-          // N°
           doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey700)
             .text(`${idx + 1}`, cx, Y + 2.5, { width: colN, align: "center" });
           cx += colN;
           doc.moveTo(cx, Y).lineTo(cx, Y + SESSION_ROW_H).stroke(PDF_COLORS.grey300);
 
-          // Fecha
           doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
             .text(sessionDateStr, cx + 3, Y + 2.5, { width: colDate - 6 });
           cx += colDate;
           doc.moveTo(cx, Y).lineTo(cx, Y + SESSION_ROW_H).stroke(PDF_COLORS.grey300);
 
-          // Inicio
           doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
             .text(session.startTime, cx + 2, Y + 2.5, { width: colFrom - 4, align: "center" });
           cx += colFrom;
           doc.moveTo(cx, Y).lineTo(cx, Y + SESSION_ROW_H).stroke(PDF_COLORS.grey300);
 
-          // Fin
           doc.fontSize(6).font(isOpen ? "Helvetica" : "Helvetica-Bold")
             .fillColor(isOpen ? PDF_COLORS.grey400 : PDF_COLORS.black)
             .text(session.endTime ?? "--:--", cx + 2, Y + 2.5, { width: colTo - 4, align: "center" });
           cx += colTo;
           doc.moveTo(cx, Y).lineTo(cx, Y + SESSION_ROW_H).stroke(PDF_COLORS.grey300);
 
-          // Duración
           doc.fontSize(6).font("Helvetica")
             .fillColor(isOpen ? PDF_COLORS.orange : PDF_COLORS.grey700)
             .text(dur, cx + 2, Y + 2.5, { width: colDur - 4, align: "center" });
@@ -615,35 +655,24 @@ async function buildPdf(p: {
           Y += SESSION_ROW_H;
         });
 
-        // ── Pie: Personal designado ──
-        doc.rect(MARGIN, Y, W, SESSION_FOOT_H)
+        const FOOT_H = 10;
+        doc.rect(MARGIN, Y, W, FOOT_H)
           .fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
 
-        doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
-          .text("PERSONAL DESIGNADO: ", MARGIN + 4, Y + 3);
+        doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+          .text("Norma de Referencia: NFPA", MARGIN + 4, Y + 3);
 
-        // Calcular el ancho del label para posicionar el valor
-        const labelWidth = doc.widthOfString("PERSONAL DESIGNADO: ") + 4;
+        doc.fontSize(5.5).font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
+          .text("PERSONAL: ", MARGIN + W * 0.45, Y + 3);
+        const personalLabelW = doc.widthOfString("PERSONAL: ");
         doc.fontSize(5.5).font("Helvetica").fillColor(PDF_COLORS.black)
-          .text(staffNames || "N/A", MARGIN + labelWidth + 4, Y + 3, {
-            width: W - labelWidth - 12,
+          .text(staffNames || "N/A", MARGIN + W * 0.45 + personalLabelW, Y + 3, {
+            width: W * 0.54 - personalLabelW - 4,
             ellipsis: true,
           });
 
-        Y += SESSION_FOOT_H;
+        Y += FOOT_H + 8;
       }
-
-      // ── Barra NFPA (siempre presente) ──
-      const NFPA_BAR_HEIGHT = 10;
-      doc.rect(MARGIN, Y, W, NFPA_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey400);
-
-      doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-        .text("Norma de Referencia: NFPA", MARGIN + 4, Y + 3, {
-          width: W - 8,
-          align: "center",
-        });
-
-      Y += NFPA_BAR_HEIGHT + 8;
 
       // ═══════════════════════════════════════════════════════════════════
       // DISPOSITIVOS
@@ -686,7 +715,7 @@ async function buildPdf(p: {
         const isListView = def.viewMode === "list";
 
         if (!isListView) {
-          // ══════ VISTA TABLA ══════
+          // ══════ VISTA TABLA (sin cambios) ══════
           const MAX_ACTIVITIES_PER_TABLE = 12;
           const activityGroups: ActivityConfig[][] = [];
 
@@ -697,7 +726,7 @@ async function buildPdf(p: {
           for (let groupIdx = 0; groupIdx < activityGroups.length; groupIdx++) {
             const activityGroup = activityGroups[groupIdx];
             const activityColWidth = activityGroup.length > 8 ? 25.0 : 38.0;
-            const idColWidth = 30;
+            const idColWidth = 50;
             const locationColWidth = W - idColWidth - (activityGroup.length * activityColWidth);
             const TABLE_HEADER_HEIGHT = 20;
 
@@ -715,7 +744,7 @@ async function buildPdf(p: {
               let cx = MARGIN;
 
               doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-                .text("ID", cx, currentY + 8, { width: idColWidth, align: "center" });
+                .text("ID", cx + 2, currentY + 8, { width: idColWidth - 4, align: "center" });
               doc.moveTo(cx + idColWidth, currentY).lineTo(cx + idColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
               cx += idColWidth;
 
@@ -764,7 +793,7 @@ async function buildPdf(p: {
               let cx = MARGIN;
 
               doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-                .text(entry.customId, cx, Y + ROW_HEIGHT / 2 - 3, { width: idColWidth, align: "center" });
+                .text(entry.customId, cx + 2, Y + ROW_HEIGHT / 2 - 3, { width: idColWidth - 4, align: "center", ellipsis: true });
               doc.moveTo(cx + idColWidth, Y).lineTo(cx + idColWidth, Y + ROW_HEIGHT).stroke(PDF_COLORS.black);
               cx += idColWidth;
 
@@ -796,9 +825,19 @@ async function buildPdf(p: {
                 } else if (status === "NOK") {
                   doc.fontSize(12).font("Helvetica-Bold").fillColor(PDF_COLORS.red)
                     .text("X", cx, cellCy - 6, { width: activityColWidth, align: "center" });
-                } else if (status === "NA" || status === "NR") {
+                } else if (status === "NA") {
                   doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-                    .text(status || "-", cx, cellCy - 3, { width: activityColWidth, align: "center" });
+                    .text("N/A", cx, cellCy - 3, { width: activityColWidth, align: "center" });
+                } else if (status === "NR") {
+                  doc.circle(cellCx, cellCy, 2.5).fill(PDF_COLORS.orange);
+                } else if (status && status.trim() !== "") {
+                  // ★ VALOR MEDIDO — mostrar el texto en azul
+                  doc.fontSize(5).font("Helvetica-Bold").fillColor("#2563EB")
+                    .text(status, cx + 1, cellCy - 3, {
+                      width: activityColWidth - 2,
+                      align: "center",
+                      ellipsis: true,
+                    });
                 }
 
                 doc.moveTo(cx + activityColWidth, Y).lineTo(cx + activityColWidth, Y + ROW_HEIGHT).stroke(PDF_COLORS.black);
@@ -811,182 +850,135 @@ async function buildPdf(p: {
             Y += 6;
           }
         } else {
-          // ══════ VISTA LISTA ══════
-          const ENTRY_AREA_WIDTH = W - 8;
-          const ENTRY_HEADER_HEIGHT = 14;
-          const ACTIVITY_ROW_HEIGHT = 18;
-          const PHOTO_SIZE = 64;
+          // ══════════════════════════════════════════════════════════════
+          // VISTA LISTA — LAYOUT DOS COLUMNAS
+          // ══════════════════════════════════════════════════════════════
+          //
+          // Estrategia: cada entry tiene un header (ID + ubicación) que
+          // ocupa todo el ancho W, y debajo sus actividades se reparten
+          // en dos columnas lado a lado. Cada fila de la grilla toma
+          // la altura máxima entre la celda izquierda y la derecha para
+          // mantener alineación visual.
+          // ══════════════════════════════════════════════════════════════
 
-          interface ActivityRow {
-            entry: ReportEntry;
-            entryIndex: number;
-            activity: ActivityConfig;
-            actData: ActivityData | undefined;
-            isFirstActivityOfEntry: boolean;
-          }
+          const COL_GAP = 4;
+          const COL_W = (W - COL_GAP) / 2;
+          const ENTRY_HEADER_HEIGHT = 12;
+          const PHOTO_SIZE = 48; // más compacto para caber en columna
 
-          const allActivityRows: ActivityRow[] = [];
-          entries.forEach((entry, entryIdx) => {
+          for (let entryIdx = 0; entryIdx < entries.length; entryIdx++) {
+            const entry = entries[entryIdx];
+
+            // Actividades relevantes para este entry
             const entryActivities = relevantActivities.filter((a) =>
               Object.prototype.hasOwnProperty.call(entry.results, a.id)
             );
-            entryActivities.forEach((activity, actIdx) => {
-              allActivityRows.push({
-                entry,
-                entryIndex: entryIdx,
-                activity,
-                actData: entry.activityData[activity.id],
-                isFirstActivityOfEntry: actIdx === 0,
+            if (entryActivities.length === 0) continue;
+
+            // Construir celdas
+            const cells: ListActivityCell[] = entryActivities.map((activity, actIdx) => ({
+              entry,
+              entryIndex: entryIdx,
+              activity,
+              actData: entry.activityData[activity.id],
+              isFirstActivityOfEntry: actIdx === 0,
+            }));
+
+            // ── Emparejar en filas de 2 ──
+            interface CellPair {
+              left: ListActivityCell;
+              right: ListActivityCell | null;
+              leftH: number;
+              rightH: number;
+              rowH: number;
+            }
+
+            const pairs: CellPair[] = [];
+            for (let i = 0; i < cells.length; i += 2) {
+              const left = cells[i];
+              const right = i + 1 < cells.length ? cells[i + 1] : null;
+              const leftH = calcListCellHeight(doc, left, COL_W, PHOTO_SIZE);
+              const rightH = right ? calcListCellHeight(doc, right, COL_W, PHOTO_SIZE) : 0;
+              pairs.push({
+                left,
+                right,
+                leftH,
+                rightH,
+                rowH: Math.max(leftH, rightH),
               });
-            });
-          });
-
-          for (let rowIdx = 0; rowIdx < allActivityRows.length; rowIdx++) {
-            const row = allActivityRows[rowIdx];
-            const hasPhotos = row.actData?.photoUrls && row.actData.photoUrls.length > 0;
-
-            let dynamicHeight = ACTIVITY_ROW_HEIGHT;
-
-            if (hasPhotos) {
-              const photos = row.actData!.photoUrls.length;
-              const maxPhotosPerRow = Math.floor((ENTRY_AREA_WIDTH - 8) / (PHOTO_SIZE + 4));
-              const photoRows = Math.ceil(photos / maxPhotosPerRow);
-              dynamicHeight += photoRows * (PHOTO_SIZE + 6);
             }
 
-            if (row.actData?.observations?.trim()) {
-              const obsWidth = Math.min(300, ENTRY_AREA_WIDTH - 8);
-              const obsHeight = doc.heightOfString(row.actData.observations, { width: obsWidth });
-              dynamicHeight += obsHeight + 4;
+            // Altura total estimada del entry header + primera fila
+            const firstRowH = pairs.length > 0 ? pairs[0].rowH : 14;
+
+            if (needsNewPage(doc, Y, ENTRY_HEADER_HEIGHT + firstRowH + 4)) {
+              doc.addPage();
+              Y = drawHeader(doc);
             }
 
-            const rowHeight = dynamicHeight;
+            // ── Entry header: ID + ubicación ──
+            doc.rect(MARGIN, Y, W, ENTRY_HEADER_HEIGHT)
+              .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey300);
 
-            if (row.isFirstActivityOfEntry) {
-              if (needsNewPage(doc, Y, rowHeight + 4)) {
-                doc.addPage();
-                Y = drawHeader(doc);
-              }
+            doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+              .text(entry.customId, MARGIN + 4, Y + 3, { width: 60 });
+            doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
+              .text(entry.area, MARGIN + 65, Y + 3, {
+                width: W - 69,
+                ellipsis: true,
+              });
 
-              const headerX = MARGIN + 4;
-              doc.rect(MARGIN, Y, ENTRY_AREA_WIDTH, ENTRY_HEADER_HEIGHT)
-                .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey300);
+            Y += ENTRY_HEADER_HEIGHT;
 
-              doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-                .text(row.entry.customId, headerX, Y + 3, { width: 60 });
-              doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-                .text(row.entry.area, headerX + 65, Y + 3, {
-                  width: ENTRY_AREA_WIDTH - 73,
-                  align: "right",
-                  ellipsis: true,
-                });
+            // ── Dibujar pares de actividades ──
+            for (let pairIdx = 0; pairIdx < pairs.length; pairIdx++) {
+              const pair = pairs[pairIdx];
 
-              Y += ENTRY_HEADER_HEIGHT;
-            } else {
-              if (needsNewPage(doc, Y, rowHeight + 2)) {
+              // ¿Necesita nueva página para esta fila?
+              if (needsNewPage(doc, Y, pair.rowH + 2)) {
                 doc.addPage();
                 Y = drawHeader(doc);
 
-                const headerX = MARGIN + 4;
-                doc.rect(MARGIN, Y, ENTRY_AREA_WIDTH, ENTRY_HEADER_HEIGHT)
+                // Re-dibujar mini-header del entry para contexto
+                doc.rect(MARGIN, Y, W, ENTRY_HEADER_HEIGHT)
                   .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey300);
-
                 doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-                  .text(row.entry.customId, headerX, Y + 3, { width: 60 });
+                  .text(`${entry.customId} (cont.)`, MARGIN + 4, Y + 3, { width: 100 });
                 doc.fontSize(5).font("Helvetica").fillColor(PDF_COLORS.grey600)
-                  .text(row.entry.area, headerX + 65, Y + 3, {
-                    width: ENTRY_AREA_WIDTH - 73,
-                    align: "right",
-                    ellipsis: true,
-                  });
-
+                  .text(entry.area, MARGIN + 105, Y + 3, { width: W - 109, ellipsis: true });
                 Y += ENTRY_HEADER_HEIGHT;
               }
-            }
 
-            const rowX = MARGIN + 4;
-            const rowY = Y;
+              const rowY = Y;
 
-            if (rowIdx % 2 === 0) {
-              doc.rect(MARGIN, rowY, ENTRY_AREA_WIDTH, rowHeight).fill(PDF_COLORS.grey50);
-            }
-
-            doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-              .text(row.activity.name, rowX, rowY + 2, { width: 100, ellipsis: true });
-
-            const freqText = row.activity.frequency.split(".").pop() || "";
-            const freqBadgeX = rowX + 110;
-            doc.rect(freqBadgeX, rowY + 2, 20, 8).stroke(PDF_COLORS.grey400);
-            doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
-              .text(freqText, freqBadgeX, rowY + 3, { width: 20, align: "center" });
-
-            const status = row.entry.results[row.activity.id];
-            let statusText = "";
-            let statusColor = PDF_COLORS.grey600;
-            const statusBgColor =
-              status === "OK" ? PDF_COLORS.green
-              : status === "NOK" ? PDF_COLORS.red
-              : PDF_COLORS.grey300;
-
-            doc.circle(freqBadgeX + 35, rowY + 6, 4).fill(statusBgColor);
-
-            if (status === "OK") {
-              statusColor = PDF_COLORS.green;
-              statusText = "";
-            } else if (status === "NOK") {
-              statusColor = PDF_COLORS.red;
-              statusText = "X";
-            } else if (status === "NA") {
-              statusColor = PDF_COLORS.grey600;
-              statusText = "N/A";
-            } else if (status === "NR") {
-              statusColor = PDF_COLORS.grey600;
-              statusText = "NR";
-            } else {
-              statusColor = PDF_COLORS.grey600;
-              statusText = "-";
-            }
-
-            if (statusText) {
-              const statusFontSize = status === "NOK" ? 10 : 5;
-              doc.fontSize(statusFontSize).font("Helvetica-Bold").fillColor(statusColor)
-                .text(statusText, freqBadgeX + 50, rowY + 2, {
-                  width: ENTRY_AREA_WIDTH - 160,
-                  align: "left",
-                });
-            }
-
-            if (hasPhotos) {
-              let photoY = rowY + 12;
-              let photoX = rowX;
-              const maxPhotosPerRow = Math.floor((ENTRY_AREA_WIDTH - 8) / (PHOTO_SIZE + 4));
-              let photosDrawn = 0;
-
-              for (const url of row.actData!.photoUrls) {
-                if (photosDrawn >= maxPhotosPerRow) break;
-                const buf = imgCache.get(url);
-                if (buf) {
-                  drawClippedImage(doc, buf, photoX, photoY, PHOTO_SIZE, PHOTO_SIZE);
-                  photoX += PHOTO_SIZE + 4;
-                  photosDrawn++;
-                }
+              // Fondo zebra alternado por par
+              if (pairIdx % 2 === 0) {
+                doc.rect(MARGIN, rowY, W, pair.rowH).fill(PDF_COLORS.grey50);
               }
+
+              // Dibujar celda izquierda
+              drawListCell(doc, imgCache, pair.left, MARGIN, rowY, COL_W, pair.rowH, PHOTO_SIZE);
+
+              // Separador central vertical
+              doc.save();
+              doc.moveTo(MARGIN + COL_W + COL_GAP / 2, rowY)
+                .lineTo(MARGIN + COL_W + COL_GAP / 2, rowY + pair.rowH)
+                .dash(2, { space: 2 })
+                .stroke(PDF_COLORS.grey300);
+              doc.restore();
+
+              // Dibujar celda derecha
+              if (pair.right) {
+                drawListCell(doc, imgCache, pair.right, MARGIN + COL_W + COL_GAP, rowY, COL_W, pair.rowH, PHOTO_SIZE);
+              }
+
+              // Borde inferior de la fila
+              doc.rect(MARGIN, rowY, W, pair.rowH).stroke(PDF_COLORS.grey300);
+
+              Y = rowY + pair.rowH;
             }
 
-            if (row.actData?.observations && row.actData.observations.trim()) {
-              const obsY = hasPhotos ? rowY + 12 + PHOTO_SIZE + 2 : rowY + 12;
-              const obsWidth = Math.min(300, ENTRY_AREA_WIDTH - 8);
-              doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
-                .text(row.actData.observations, rowX, obsY, {
-                  width: obsWidth,
-                  height: 6,
-                  ellipsis: true,
-                });
-            }
-
-            doc.rect(MARGIN, rowY, ENTRY_AREA_WIDTH, rowHeight).stroke(PDF_COLORS.grey300);
-
-            Y = rowY + rowHeight;
+            Y += 4;
           }
 
           Y += 6;
@@ -1119,6 +1111,106 @@ async function buildPdf(p: {
   });
 }
 
+// ─── DIBUJAR UNA CELDA DE ACTIVIDAD (VISTA LISTA 2-COL) ──────────────────
+
+function drawListCell(
+  doc: PDFKit.PDFDocument,
+  imgCache: Map<string, Buffer | null>,
+  cell: ListActivityCell,
+  x: number,
+  y: number,
+  colW: number,
+  rowH: number,
+  photoSize: number
+): void {
+  const innerX = x + 3;
+  const innerW = colW - 6;
+  let cursorY = y + 2;
+
+  // ── Línea 1: Nombre actividad + Frecuencia + Status ──
+  const nameW = innerW * 0.50;
+  const freqW = 30;
+  const statusZoneX = innerX + nameW + freqW + 4;
+
+  // Nombre de actividad
+  doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+    .text(cell.activity.name, innerX, cursorY, { width: nameW, ellipsis: true });
+
+  // Frecuencia
+  const freqText = cell.activity.frequency.split(".").pop() || "";
+  doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
+    .text(freqText, innerX + nameW + 2, cursorY + 0.5, { width: freqW, ellipsis: true });
+
+  // Status indicator
+  const status = cell.entry.results[cell.activity.id];
+  const statusCenterX = statusZoneX + 4;
+  const statusCenterY = cursorY + 3;
+
+  if (status === "OK") {
+    doc.circle(statusCenterX, statusCenterY, 3).fill(PDF_COLORS.green);
+  } else if (status === "NOK") {
+    doc.fontSize(9).font("Helvetica-Bold").fillColor(PDF_COLORS.red)
+      .text("X", statusCenterX - 6, statusCenterY - 4.5, { width: 12, align: "center" });
+  } else if (status === "NA") {
+    doc.fontSize(4).font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
+      .text("N/A", statusCenterX - 2, cursorY + 0.5);
+  } else if (status === "NR") {
+    doc.circle(statusCenterX, statusCenterY, 3).fill(PDF_COLORS.orange);
+  } else if (status && status.trim() !== "") {
+    // ★ VALOR MEDIDO — mostrar el texto en azul dentro de una cajita
+    const valueW = innerW - nameW - freqW - 10;
+    doc.rect(statusZoneX - 1, cursorY - 1, valueW + 2, 8)
+      .fillAndStroke("#EFF6FF", "#BFDBFE");
+    doc.fontSize(4.5).font("Helvetica-Bold").fillColor("#2563EB")
+      .text(status, statusZoneX, cursorY + 0.5, {
+        width: valueW,
+        align: "center",
+        ellipsis: true,
+      });
+  } else {
+    doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
+      .text("-", statusCenterX - 2, cursorY + 0.5);
+  }
+
+  cursorY += 12;
+
+  // ── Fotos ──
+  const hasPhotos = cell.actData?.photoUrls && cell.actData.photoUrls.length > 0;
+  if (hasPhotos) {
+    let photoX = innerX;
+    const maxPhotosPerRow = Math.max(1, Math.floor(innerW / (photoSize + 3)));
+    let photosInRow = 0;
+
+    for (const url of cell.actData!.photoUrls) {
+      const buf = imgCache.get(url);
+      if (!buf) continue;
+
+      if (photosInRow >= maxPhotosPerRow) {
+        photosInRow = 0;
+        photoX = innerX;
+        cursorY += photoSize + 3;
+      }
+
+      drawClippedImage(doc, buf, photoX, cursorY, photoSize, photoSize);
+      photoX += photoSize + 3;
+      photosInRow++;
+    }
+
+    cursorY += photoSize + 3;
+  }
+
+  // ── Observaciones de actividad ──
+  if (cell.actData?.observations?.trim()) {
+    const obsW = innerW;
+    doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
+      .text(cell.actData.observations, innerX, cursorY, {
+        width: obsW,
+        height: 12,
+        ellipsis: true,
+      });
+  }
+}
+
 // ─── CLOUD FUNCTION ────────────────────────────────────────────────────────
 
 export const generateServiceReportPdf = onCall(
@@ -1151,7 +1243,6 @@ export const generateServiceReportPdf = onCall(
     const db = getFirestore();
     const storage = getStorage();
 
-    // 1. Obtener Reporte
     let report: ServiceReport;
     let docId: string;
 
@@ -1179,21 +1270,18 @@ export const generateServiceReportPdf = onCall(
       throw new HttpsError("invalid-argument", "Parámetros inválidos.");
     }
 
-    // 2. Póliza
     const policySnap = await db.collection("policies").doc(report.policyId).get();
     if (!policySnap.exists) {
       throw new HttpsError("not-found", "Póliza no encontrada.");
     }
     const policy = { id: policySnap.id, ...policySnap.data() } as Policy;
 
-    // 3. Cliente
     const clientSnap = await db.collection("clients").doc(policy.clientId).get();
     if (!clientSnap.exists) {
       throw new HttpsError("not-found", "Cliente no encontrado.");
     }
     const client = { id: clientSnap.id, ...clientSnap.data() } as Client;
 
-    // 4. Configuración empresa
     const settingsSnap = await db.collection("settings").doc("company_profile").get();
     const company = (settingsSnap.exists
       ? settingsSnap.data()
@@ -1206,13 +1294,11 @@ export const generateServiceReportPdf = onCall(
           logoUrl: "",
         }) as CompanySettings;
 
-    // 5. Dispositivos
     const devsSnap = await db.collection("devices").get();
     const devices = devsSnap.docs.map(
       (d) => ({ id: d.id, ...d.data() } as DeviceDefinition)
     );
 
-    // 6. Técnicos
     const techIds = report.assignedTechnicianIds ?? [];
     const technicians: UserModel[] = [];
     for (let i = 0; i < techIds.length; i += 10) {
@@ -1226,7 +1312,6 @@ export const generateServiceReportPdf = onCall(
       );
     }
 
-    // 7. Generar PDF
     const pdfBuffer = await buildPdf({
       report,
       policy,
@@ -1237,7 +1322,6 @@ export const generateServiceReportPdf = onCall(
     });
     logger.info(`✅ PDF generado: ${pdfBuffer.length} bytes`);
 
-    // 8. Guardar en Storage
     const bucket = storage.bucket();
     const timestamp = Date.now();
     const path = `generated_pdfs/${report.policyId}/${report.dateStr}_${timestamp}.pdf`;

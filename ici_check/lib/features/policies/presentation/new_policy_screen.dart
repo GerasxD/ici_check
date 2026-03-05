@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:ici_check/features/policies/presentation/import_locations_widget.dart';
+import 'package:ici_check/features/reports/services/location_import_service.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -43,8 +45,20 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
   final Map<String, _SelectedDeviceItem> _selectedDevices = {};
   final Map<String, TextEditingController> _controllers = {};
 
+  // ══════════════════════════════════════════════════════════════════════
+  // NUEVO: State de Filtros para Dispositivos (Paso 2)
+  // ══════════════════════════════════════════════════════════════════════
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+  _DeviceSortOption _currentSort = _DeviceSortOption.nameAsc;
+  _DeviceFilterOption _currentFilter = _DeviceFilterOption.all;
+
   // State de Personal (Paso 3)
   String? _selectedUserId;
+
+  // State de Importación de Ubicaciones
+  final LocationImportService _importService = LocationImportService();
+  Map<String, Map<int, LocationData>>? _importedLocations;
 
   // Colores mejorados
   final Color _primaryDark = const Color(0xFF0F172A);
@@ -59,6 +73,15 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
     initializeDateFormatting('es', null).then((_) {
       _loadData();
     });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
   }
 
   Future<void> _loadData() async {
@@ -91,14 +114,81 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
     }
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // NUEVO: Getter que retorna la lista de dispositivos filtrada y ordenada
+  // ══════════════════════════════════════════════════════════════════════
+  List<DeviceModel> get _filteredDevices {
+    List<DeviceModel> result = List.from(_devices);
+
+    // 1. Filtrar por búsqueda de texto
+    if (_searchQuery.isNotEmpty) {
+      final query = _searchQuery.toLowerCase();
+      result = result.where((dev) {
+        return dev.name.toLowerCase().contains(query);
+      }).toList();
+    }
+
+    // 2. Filtrar por estado de selección
+    switch (_currentFilter) {
+      case _DeviceFilterOption.all:
+        break;
+      case _DeviceFilterOption.selectedOnly:
+        result = result.where((dev) => _selectedDevices.containsKey(dev.id)).toList();
+        break;
+      case _DeviceFilterOption.unselectedOnly:
+        result = result.where((dev) => !_selectedDevices.containsKey(dev.id)).toList();
+        break;
+    }
+
+    // 3. Ordenar
+    switch (_currentSort) {
+      case _DeviceSortOption.nameAsc:
+        result.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        break;
+      case _DeviceSortOption.nameDesc:
+        result.sort((a, b) => b.name.toLowerCase().compareTo(a.name.toLowerCase()));
+        break;
+      case _DeviceSortOption.activitiesDesc:
+        result.sort((a, b) => b.activities.length.compareTo(a.activities.length));
+        break;
+      case _DeviceSortOption.activitiesAsc:
+        result.sort((a, b) => a.activities.length.compareTo(b.activities.length));
+        break;
+      case _DeviceSortOption.selectedFirst:
+        result.sort((a, b) {
+          final aSelected = _selectedDevices.containsKey(a.id) ? 0 : 1;
+          final bSelected = _selectedDevices.containsKey(b.id) ? 0 : 1;
+          if (aSelected != bSelected) return aSelected.compareTo(bSelected);
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        });
+        break;
+    }
+
+    return result;
+  }
+
+  void _clearFilters() {
+    setState(() {
+      _searchController.clear();
+      _searchQuery = '';
+      _currentSort = _DeviceSortOption.nameAsc;
+      _currentFilter = _DeviceFilterOption.all;
+    });
+  }
+
+  bool get _hasActiveFilters =>
+      _searchQuery.isNotEmpty ||
+      _currentSort != _DeviceSortOption.nameAsc ||
+      _currentFilter != _DeviceFilterOption.all;
+
   void _toggleDevice(DeviceModel def) {
     setState(() {
       if (_selectedDevices.containsKey(def.id)) {
         _selectedDevices.remove(def.id);
-        _controllers.remove(def.id); // Limpiamos el controlador
+        _controllers[def.id]?.dispose();
+        _controllers.remove(def.id);
       } else {
         _selectedDevices[def.id] = _SelectedDeviceItem(def: def, qty: 1);
-        // Creamos el controlador inicializado en "1"
         _controllers[def.id] = TextEditingController(text: '1');
       }
     });
@@ -113,24 +203,22 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
       
       _selectedDevices[defId] = _SelectedDeviceItem(def: item.def, qty: newQty);
       
-      // Actualizamos el texto visualmente para que coincida con el botón
       if (_controllers.containsKey(defId)) {
         _controllers[defId]!.text = newQty.toString();
       }
     });
   }
 
-  // Función para manejar la escritura manual del número
   void _setManualQty(String defId, String value) {
     if (!_selectedDevices.containsKey(defId)) return;
     
     int? newQty = int.tryParse(value);
     
     if (newQty != null && newQty > 0) {
-      // IMPORTANTE: Aquí NO llamamos a setState para evitar que 
-      // el teclado se cierre mientras escribes. Solo actualizamos el valor lógico.
-      final item = _selectedDevices[defId]!;
-      _selectedDevices[defId] = _SelectedDeviceItem(def: item.def, qty: newQty);
+      setState(() {
+        final item = _selectedDevices[defId]!;
+        _selectedDevices[defId] = _SelectedDeviceItem(def: item.def, qty: newQty);
+      });
     }
   }
 
@@ -140,29 +228,26 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
     setState(() => _isLoading = true);
 
     try {
-      // 1. Limpiar la fecha (quitar horas y minutos) para evitar desfases
       final cleanStartDate = DateTime(_startDate.year, _startDate.month, _startDate.day);
 
       final devicesList = _selectedDevices.values.map((item) {
-        // 2. Inicializar los offsets en 0 para todas las actividades
-        // Esto garantiza que la actividad comience el día exacto de la 'cleanStartDate'
         Map<String, int> initialOffsets = {};
         for (var activity in item.def.activities) {
-          initialOffsets[activity.id] = 0; 
+          initialOffsets[activity.id] = 0;
         }
 
         return PolicyDevice(
           instanceId: _uuid.v4(),
           definitionId: item.def.id,
           quantity: item.qty,
-          scheduleOffsets: initialOffsets, // <--- AGREGAR ESTO
+          scheduleOffsets: initialOffsets,
         );
       }).toList();
 
       final newPolicy = PolicyModel(
         id: _uuid.v4(),
         clientId: _selectedClientId!,
-        startDate: cleanStartDate, // <--- USAR LA FECHA LIMPIA
+        startDate: cleanStartDate,
         durationMonths: _durationMonths,
         includeWeekly: _includeWeekly,
         assignedUserIds: [_selectedUserId!],
@@ -171,14 +256,28 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
 
       await _policiesRepo.savePolicy(newPolicy);
 
+      // ★ NUEVO: Aplicar ubicaciones importadas si hay
+      int importedCount = 0;
+      if (_importedLocations != null) {
+        importedCount = await _importService.applyLocationsToNewPolicy(
+          importedLocations: _importedLocations!,
+          newPolicyId: newPolicy.id,
+          newDevices: devicesList,
+        );
+      }
+
       if (mounted) {
+        final message = importedCount > 0
+            ? 'Póliza creada con $importedCount ubicaciones importadas'
+            : 'Póliza creada exitosamente';
+            
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Row(
+            content: Row(
               children: [
-                Icon(Icons.check_circle, color: Colors.white),
-                SizedBox(width: 12),
-                Text('Póliza creada exitosamente'),
+                const Icon(Icons.check_circle, color: Colors.white),
+                const SizedBox(width: 12),
+                Expanded(child: Text(message)),
               ],
             ),
             backgroundColor: Colors.green.shade600,
@@ -255,7 +354,7 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
           constraints: const BoxConstraints(maxWidth: 1200),
           child: Column(
             children: [
-              // INDICADOR DE PASOS MEJORADO
+              // INDICADOR DE PASOS
               LayoutBuilder(
                 builder: (context, constraints) {
                   final isMobile = constraints.maxWidth < 600;
@@ -332,7 +431,7 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                 ),
               ),
 
-              // FOOTER DE NAVEGACIÓN MEJORADO
+              // FOOTER DE NAVEGACIÓN
               LayoutBuilder(
                 builder: (context, constraints) {
                   final isMobile = constraints.maxWidth < 600;
@@ -862,14 +961,224 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
     );
   }
 
-  // --- PASO 2: SELECCIÓN DE EQUIPOS ---
+  // ══════════════════════════════════════════════════════════════════════
+  // PASO 2: SELECCIÓN DE EQUIPOS (CON FILTROS)
+  // ══════════════════════════════════════════════════════════════════════
   Widget _buildStep2() {
+    final filteredDevices = _filteredDevices;
+
     return Container(
       key: const ValueKey(2),
       child: LayoutBuilder(
         builder: (context, constraints) {
           bool isWide = constraints.maxWidth > 700;
+          bool isMobile = constraints.maxWidth < 600;
+
+          // ── WIDGET DE IMPORTACIÓN DE UBICACIONES ──
+          Widget importWidget = ImportLocationsWidget(
+            key: ValueKey('import_${_selectedClientId}'), // ← solo cambia con el cliente
+            selectedClientId: _selectedClientId,
+            selectedDevices: _selectedDevices.values.map((item) {
+              return PolicyDevice(
+                instanceId: 'preview_${item.def.id}',
+                definitionId: item.def.id,
+                quantity: item.qty,
+              );
+            }).toList(),
+            definitionNames: {
+              for (final dev in _devices) dev.id: dev.name,
+            },
+            onImportChanged: (locations) {
+              setState(() {
+                _importedLocations = locations;
+              });
+            },
+          );
           
+          // ── BARRA DE BÚSQUEDA Y FILTROS ──
+          Widget searchAndFilters = Container(
+            margin: const EdgeInsets.only(bottom: 16),
+            padding: EdgeInsets.all(isMobile ? 12 : 16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _borderColor, width: 1.5),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.04),
+                  blurRadius: 10,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Barra de búsqueda
+                TextField(
+                  controller: _searchController,
+                  onChanged: (value) => setState(() => _searchQuery = value),
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: _primaryDark,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: 'Buscar equipo por nombre...',
+                    hintStyle: TextStyle(color: _textSlate.withOpacity(0.7), fontSize: 14),
+                    prefixIcon: Icon(Icons.search, color: _accentBlue, size: 20),
+                    suffixIcon: _searchQuery.isNotEmpty
+                        ? IconButton(
+                            icon: Icon(Icons.close, color: _textSlate, size: 18),
+                            onPressed: () {
+                              setState(() {
+                                _searchController.clear();
+                                _searchQuery = '';
+                              });
+                            },
+                          )
+                        : null,
+                    filled: true,
+                    fillColor: _bgLight,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: _borderColor),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: _borderColor),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: _accentBlue, width: 1.5),
+                    ),
+                  ),
+                ),
+                
+                const SizedBox(height: 12),
+
+                // Fila de filtros y ordenamiento
+                isMobile
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Chips de filtro rápido
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                _FilterChip(
+                                  label: 'Todos',
+                                  icon: Icons.apps,
+                                  isSelected: _currentFilter == _DeviceFilterOption.all,
+                                  onTap: () => setState(() => _currentFilter = _DeviceFilterOption.all),
+                                  accentColor: _accentBlue,
+                                ),
+                                const SizedBox(width: 8),
+                                _FilterChip(
+                                  label: 'Seleccionados',
+                                  icon: Icons.check_circle_outline,
+                                  isSelected: _currentFilter == _DeviceFilterOption.selectedOnly,
+                                  onTap: () => setState(() => _currentFilter = _DeviceFilterOption.selectedOnly),
+                                  accentColor: Colors.green.shade600,
+                                  count: _selectedDevices.length,
+                                ),
+                                const SizedBox(width: 8),
+                                _FilterChip(
+                                  label: 'Disponibles',
+                                  icon: Icons.circle_outlined,
+                                  isSelected: _currentFilter == _DeviceFilterOption.unselectedOnly,
+                                  onTap: () => setState(() => _currentFilter = _DeviceFilterOption.unselectedOnly),
+                                  accentColor: _accentBlue,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          // Dropdown de ordenamiento
+                          Row(
+                            children: [
+                              Expanded(child: _buildSortDropdown()),
+                              if (_hasActiveFilters) ...[
+                                const SizedBox(width: 8),
+                                _buildClearFiltersButton(),
+                              ],
+                            ],
+                          ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          // Chips de filtro rápido
+                          _FilterChip(
+                            label: 'Todos',
+                            icon: Icons.apps,
+                            isSelected: _currentFilter == _DeviceFilterOption.all,
+                            onTap: () => setState(() => _currentFilter = _DeviceFilterOption.all),
+                            accentColor: _accentBlue,
+                          ),
+                          const SizedBox(width: 8),
+                          _FilterChip(
+                            label: 'Seleccionados',
+                            icon: Icons.check_circle_outline,
+                            isSelected: _currentFilter == _DeviceFilterOption.selectedOnly,
+                            onTap: () => setState(() => _currentFilter = _DeviceFilterOption.selectedOnly),
+                            accentColor: Colors.green.shade600,
+                            count: _selectedDevices.length,
+                          ),
+                          const SizedBox(width: 8),
+                          _FilterChip(
+                            label: 'Disponibles',
+                            icon: Icons.circle_outlined,
+                            isSelected: _currentFilter == _DeviceFilterOption.unselectedOnly,
+                            onTap: () => setState(() => _currentFilter = _DeviceFilterOption.unselectedOnly),
+                            accentColor: _accentBlue,
+                          ),
+                          const Spacer(),
+                          // Dropdown de ordenamiento
+                          _buildSortDropdown(),
+                          if (_hasActiveFilters) ...[
+                            const SizedBox(width: 8),
+                            _buildClearFiltersButton(),
+                          ],
+                        ],
+                      ),
+
+                // Indicador de resultados
+                if (_searchQuery.isNotEmpty || _currentFilter != _DeviceFilterOption.all)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Row(
+                      children: [
+                        Icon(Icons.filter_list, size: 14, color: _textSlate),
+                        const SizedBox(width: 6),
+                        Text(
+                          '${filteredDevices.length} de ${_devices.length} equipos',
+                          style: TextStyle(
+                            color: _textSlate,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        if (filteredDevices.isEmpty) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            '— Sin resultados',
+                            style: TextStyle(
+                              color: Colors.orange.shade600,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          );
+
+          // ── LISTA DEL CATÁLOGO (ahora usa filteredDevices) ──
           Widget catalogList = Container(
             decoration: BoxDecoration(
               color: Colors.white,
@@ -912,7 +1221,7 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
-                          '${_devices.length}',
+                          '${filteredDevices.length}',
                           style: TextStyle(
                             color: _accentBlue,
                             fontWeight: FontWeight.w700,
@@ -926,26 +1235,48 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                 Divider(height: 1, color: _borderColor),
                 SizedBox(
                   height: 380,
-                  child: _devices.isEmpty
+                  child: filteredDevices.isEmpty
                       ? Center(
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(Icons.inbox_outlined, size: 48, color: _textSlate.withOpacity(0.5)),
+                              Icon(
+                                _searchQuery.isNotEmpty 
+                                    ? Icons.search_off 
+                                    : Icons.inbox_outlined,
+                                size: 48,
+                                color: _textSlate.withOpacity(0.5),
+                              ),
                               const SizedBox(height: 12),
                               Text(
-                                'No hay equipos disponibles',
-                                style: TextStyle(color: _textSlate),
+                                _searchQuery.isNotEmpty
+                                    ? 'No se encontraron equipos'
+                                    : _currentFilter == _DeviceFilterOption.selectedOnly
+                                        ? 'No hay equipos seleccionados'
+                                        : 'No hay equipos disponibles',
+                                style: TextStyle(color: _textSlate, fontWeight: FontWeight.w500),
                               ),
+                              if (_searchQuery.isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                TextButton.icon(
+                                  onPressed: _clearFilters,
+                                  icon: const Icon(Icons.clear_all, size: 16),
+                                  label: const Text('Limpiar filtros'),
+                                  style: TextButton.styleFrom(
+                                    foregroundColor: _accentBlue,
+                                    textStyle: const TextStyle(fontSize: 13),
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                         )
                       : ListView.separated(
                           padding: const EdgeInsets.all(8),
-                          itemCount: _devices.length,
+                          itemCount: filteredDevices.length,
                           separatorBuilder: (_, __) => const SizedBox(height: 4),
                           itemBuilder: (ctx, i) {
-                            final dev = _devices[i];
+                            final dev = filteredDevices[i];
                             final isSelected = _selectedDevices.containsKey(dev.id);
                             return Material(
                               color: isSelected ? _accentBlue.withOpacity(0.08) : Colors.transparent,
@@ -973,13 +1304,30 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                                       ),
                                       const SizedBox(width: 12),
                                       Expanded(
-                                        child: Text(
-                                          dev.name,
-                                          style: TextStyle(
-                                            fontSize: 14,
-                                            fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
-                                            color: isSelected ? _primaryDark : _textSlate,
-                                          ),
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              dev.name,
+                                              style: TextStyle(
+                                                fontSize: 14,
+                                                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                                                color: isSelected ? _primaryDark : _textSlate,
+                                              ),
+                                            ),
+                                            // Mostrar cantidad de actividades como info extra
+                                            if (dev.activities.isNotEmpty)
+                                              Padding(
+                                                padding: const EdgeInsets.only(top: 2),
+                                                child: Text(
+                                                  '${dev.activities.length} actividad${dev.activities.length != 1 ? 'es' : ''}',
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    color: _textSlate.withOpacity(0.7),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
                                         ),
                                       ),
                                       Icon(
@@ -999,6 +1347,7 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
             ),
           );
 
+          // ── LISTA DE SELECCIONADOS ──
           Widget selectedList = Container(
             decoration: BoxDecoration(
               color: Colors.white,
@@ -1118,7 +1467,6 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        // Botón Menos (-)
                                         IconButton(
                                           onPressed: () => _updateQty(item.def.id, -1),
                                           icon: const Icon(Icons.remove, size: 18),
@@ -1126,16 +1474,11 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                                           constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                                           color: _textSlate,
                                         ),
-                                        // CAMBIO PRINCIPAL: Campo de texto en lugar de Text
                                         SizedBox(
                                           width: 50,
                                           child: TextFormField(
-                                            // USAMOS EL CONTROLADOR
                                             controller: _controllers[item.def.id],
-                                            
-                                            // IMPORTANTE: Key estática (solo ID) para que no pierda el foco al escribir
                                             key: ValueKey(item.def.id), 
-                                            
                                             keyboardType: TextInputType.number,
                                             textAlign: TextAlign.center,
                                             style: const TextStyle(
@@ -1148,11 +1491,9 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
                                               border: InputBorder.none,
                                               focusedBorder: InputBorder.none,
                                             ),
-                                            // AHORA SE GUARDA MIENTRAS ESCRIBES
                                             onChanged: (val) => _setManualQty(item.def.id, val),
                                           ),
                                         ),                                    
-                                        // Botón Más (+)
                                         IconButton(
                                           onPressed: () => _updateQty(item.def.id, 1),
                                           icon: const Icon(Icons.add, size: 18),
@@ -1173,31 +1514,140 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
             ),
           );
 
-          if (isWide) {
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(child: catalogList),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 200),
-                  child: Icon(Icons.arrow_forward, color: _textSlate, size: 28),
+          // ── LAYOUT COMPLETO DEL PASO 2 ──
+          return Column(
+            children: [
+              importWidget,
+              // Barra de búsqueda y filtros arriba
+              searchAndFilters,
+
+              // Catálogo + Seleccionados debajo
+              if (isWide)
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: catalogList),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 200),
+                      child: Icon(Icons.arrow_forward, color: _textSlate, size: 28),
+                    ),
+                    Expanded(child: selectedList),
+                  ],
+                )
+              else
+                Column(
+                  children: [
+                    catalogList,
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 20),
+                      child: Icon(Icons.arrow_downward, color: _textSlate, size: 28),
+                    ),
+                    selectedList,
+                  ],
                 ),
-                Expanded(child: selectedList),
-              ],
-            );
-          } else {
-            return Column(
-              children: [
-                catalogList,
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 20),
-                  child: Icon(Icons.arrow_downward, color: _textSlate, size: 28),
-                ),
-                selectedList,
-              ],
-            );
-          }
+            ],
+          );
         },
+      ),
+    );
+  }
+
+  // ── Widget helper: Dropdown de Ordenamiento ──
+  Widget _buildSortDropdown() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+      decoration: BoxDecoration(
+        color: _bgLight,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: _borderColor),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<_DeviceSortOption>(
+          value: _currentSort,
+          isDense: true,
+          icon: Icon(Icons.unfold_more, color: _textSlate, size: 18),
+          style: TextStyle(fontSize: 13, color: _primaryDark, fontWeight: FontWeight.w500),
+          items: const [
+            DropdownMenuItem(
+              value: _DeviceSortOption.nameAsc,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.sort_by_alpha, size: 16, color: Color(0xFF64748B)),
+                  SizedBox(width: 6),
+                  Text('A → Z'),
+                ],
+              ),
+            ),
+            DropdownMenuItem(
+              value: _DeviceSortOption.nameDesc,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.sort_by_alpha, size: 16, color: Color(0xFF64748B)),
+                  SizedBox(width: 6),
+                  Text('Z → A'),
+                ],
+              ),
+            ),
+            DropdownMenuItem(
+              value: _DeviceSortOption.activitiesDesc,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.bar_chart, size: 16, color: Color(0xFF64748B)),
+                  SizedBox(width: 6),
+                  Text('Más actividades'),
+                ],
+              ),
+            ),
+            DropdownMenuItem(
+              value: _DeviceSortOption.activitiesAsc,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.bar_chart, size: 16, color: Color(0xFF64748B)),
+                  SizedBox(width: 6),
+                  Text('Menos actividades'),
+                ],
+              ),
+            ),
+            DropdownMenuItem(
+              value: _DeviceSortOption.selectedFirst,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.push_pin, size: 16, color: Color(0xFF64748B)),
+                  SizedBox(width: 6),
+                  Text('Seleccionados primero'),
+                ],
+              ),
+            ),
+          ],
+          onChanged: (v) {
+            if (v != null) setState(() => _currentSort = v);
+          },
+        ),
+      ),
+    );
+  }
+
+  // ── Widget helper: Botón limpiar filtros ──
+  Widget _buildClearFiltersButton() {
+    return Tooltip(
+      message: 'Limpiar todos los filtros',
+      child: InkWell(
+        onTap: _clearFilters,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.orange.shade50,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.orange.shade200),
+          ),
+          child: Icon(Icons.filter_alt_off, size: 18, color: Colors.orange.shade700),
+        ),
       ),
     );
   }
@@ -1400,6 +1850,24 @@ class _NewPolicyScreenState extends State<NewPolicyScreen> {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// ENUMS PARA FILTROS Y ORDENAMIENTO
+// ══════════════════════════════════════════════════════════════════════
+
+enum _DeviceSortOption {
+  nameAsc,
+  nameDesc,
+  activitiesDesc,
+  activitiesAsc,
+  selectedFirst,
+}
+
+enum _DeviceFilterOption {
+  all,
+  selectedOnly,
+  unselectedOnly,
+}
+
 // --- CLASE AUXILIAR LOCAL PARA STATE ---
 class _SelectedDeviceItem {
   final DeviceModel def;
@@ -1407,7 +1875,85 @@ class _SelectedDeviceItem {
   _SelectedDeviceItem({required this.def, required this.qty});
 }
 
-// --- WIDGETS UI MEJORADOS ---
+// ══════════════════════════════════════════════════════════════════════
+// WIDGETS UI
+// ══════════════════════════════════════════════════════════════════════
+
+class _FilterChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool isSelected;
+  final VoidCallback onTap;
+  final Color accentColor;
+  final int? count;
+
+  const _FilterChip({
+    required this.label,
+    required this.icon,
+    required this.isSelected,
+    required this.onTap,
+    required this.accentColor,
+    this.count,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: isSelected ? accentColor.withOpacity(0.12) : Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected ? accentColor : const Color(0xFFE2E8F0),
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 14,
+              color: isSelected ? accentColor : const Color(0xFF64748B),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                color: isSelected ? accentColor : const Color(0xFF64748B),
+              ),
+            ),
+            if (count != null && count! > 0) ...[
+              const SizedBox(width: 4),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: isSelected ? accentColor.withOpacity(0.2) : const Color(0xFFE2E8F0),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  '$count',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: isSelected ? accentColor : const Color(0xFF64748B),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _StepIndicator extends StatelessWidget {
   final int num;
   final String label;

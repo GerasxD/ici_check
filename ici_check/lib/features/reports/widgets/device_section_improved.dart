@@ -12,6 +12,7 @@
 import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
@@ -73,6 +74,7 @@ class FlatSectionData {
   final Function(int globalIndex, {String? activityId}) onCameraClick;
   final Function(int globalIndex, {String? activityId}) onObservationClick;
   final LinkedScrollGroup scrollGroup;
+  final Function(int globalIndex)? onRenumberFromHere;
 
   FlatSectionData({
     required this.defId,
@@ -89,6 +91,7 @@ class FlatSectionData {
     required this.onCameraClick,
     required this.onObservationClick,
     required this.scrollGroup,
+     this.onRenumberFromHere,
   });
 
   bool get canEdit {
@@ -185,9 +188,6 @@ List<Widget> buildFlatWidgetsForSection(FlatSectionData data, ReportNotifier not
   return widgets;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// SECTION HEADER
-// ═══════════════════════════════════════════════════════════════════════
 class DeviceSectionHeader extends ConsumerWidget {
   final String defId;
   final DeviceModel deviceDef;
@@ -248,8 +248,18 @@ class DeviceSectionHeader extends ConsumerWidget {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        _CountBadge(count: entries.length),
+                        const SizedBox(width: 8),
+                        // ★ NUEVO: Botón de ordenar + badge de conteo
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _SortButton(
+                              onTap: () => _confirmSort(context),
+                            ),
+                            const SizedBox(width: 8),
+                            _CountBadge(count: entries.length),
+                          ],
+                        ),
                       ],
                     ),
                     const SizedBox(height: 12),
@@ -279,7 +289,12 @@ class DeviceSectionHeader extends ConsumerWidget {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          const SizedBox(width: 12),
+                          const SizedBox(width: 8),
+                          // ★ NUEVO: Botón de ordenar
+                          _SortButton(
+                            onTap: () => _confirmSort(context),
+                          ),
+                          const SizedBox(width: 8),
                           _CountBadge(count: entries.length),
                         ],
                       ),
@@ -297,6 +312,160 @@ class DeviceSectionHeader extends ConsumerWidget {
           const SizedBox(height: 12),
           _ProgressBar(progress: progress),
         ],
+      ),
+    );
+  }
+
+  /// Diálogo de confirmación antes de ordenar
+  void _confirmSort(BuildContext context) {
+    // Si hay menos de 2 entries no tiene sentido ordenar
+    if (entries.length < 2) return;
+
+    // Verificar si hay al menos un customId no vacío
+    final hasIds = entries.any((e) => e.customId.isNotEmpty);
+    if (!hasIds) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Asigna IDs a los dispositivos antes de ordenar'),
+          backgroundColor: Color(0xFFF59E0B),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEFF6FF),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(
+                Icons.sort_rounded,
+                color: Color(0xFF3B82F6),
+                size: 20,
+              ),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Ordenar por ID',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Se ordenarán los ${entries.length} dispositivos de esta sección por su ID de menor a mayor.',
+              style: const TextStyle(fontSize: 14, color: Color(0xFF64748B)),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFE2E8F0)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.info_outline, size: 14, color: Color(0xFF94A3B8)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Los dispositivos sin ID quedarán al final.',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade600,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text(
+              'Cancelar',
+              style: TextStyle(color: Color(0xFF64748B)),
+            ),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              notifier.sortSectionByCustomId(defId);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Dispositivos ordenados por ID'),
+                  backgroundColor: Color(0xFF3B82F6),
+                  duration: Duration(seconds: 2),
+                ),
+              );
+            },
+            icon: const Icon(Icons.sort_rounded, size: 18),
+            label: const Text('Ordenar'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF3B82F6),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SORT BUTTON — Widget compacto para el header
+// ═══════════════════════════════════════════════════════════════════════
+class _SortButton extends StatelessWidget {
+  final VoidCallback onTap;
+  const _SortButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: const Color(0xFF334155).withOpacity(0.5),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: Colors.white.withOpacity(0.2)),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.sort_rounded, color: Colors.white70, size: 14),
+            SizedBox(width: 4),
+            Text(
+              'Ordenar',
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -328,7 +497,7 @@ class _TableColumnHeader extends StatelessWidget {
           controller: scrollController,
           scrollDirection: Axis.horizontal,
           child: SizedBox(
-            width: 230.0 + (activities.length * 100.0) + 110.0,
+            width: 250.0 + (activities.length * 100.0) + 110.0,
             child: Container(
               color: const Color(0xFFF1F5F9),
               // ELIMINAMOS IntrinsicHeight y forzamos altura constante para coincidir con el Delegate
@@ -336,7 +505,7 @@ class _TableColumnHeader extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _HeaderCell(text: 'ID', width: 80),
+                  _HeaderCell(text: 'ID', width: 100),
                   _HeaderCell(text: 'UBICACIÓN', width: 150),
                   ...activities.map((act) => _HeaderCell(text: act.name, width: 100)),
                   _HeaderCell(text: 'FOTO/OBS', width: 110),
@@ -361,6 +530,8 @@ class DeviceSectionTableRow extends ConsumerWidget {
   final Function(int, {String? activityId}) onCameraClick;
   final Function(int, {String? activityId}) onObservationClick;
   final ScrollController scrollController;
+  final Function(int globalIndex)? onRenumberFromHere;
+
 
   const DeviceSectionTableRow({
     super.key,
@@ -371,6 +542,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
     required this.onCameraClick,
     required this.onObservationClick,
     required this.scrollController,
+      this.onRenumberFromHere, 
   });
 
   @override
@@ -378,7 +550,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
     final entry = ref.watch(singleEntryProvider(globalIndex));
     if (entry == null) return const SizedBox(height: 52);
 
-    final double totalWidth = 230.0 + (activities.length * 100.0) + 110.0;
+    final double totalWidth = 250.0 + (activities.length * 100.0) + 110.0;
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -401,17 +573,22 @@ class DeviceSectionTableRow extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 SizedBox(
-                  width: 80,
+                  width: 100,
                   child: Center(
-                    child: SizedBox(
-                      width: 60,
-                      height: 32,
-                      child: _IsolatedTextField(
-                        key: ValueKey('id_${entry.instanceId}'),
-                        initialValue: entry.customId,
-                        enabled: canEdit,
-                        onChanged: (val) =>
-                            notifier.updateCustomId(globalIndex, val),
+                    child: GestureDetector(
+                      onLongPress: canEdit && onRenumberFromHere != null
+                          ? () => onRenumberFromHere!(globalIndex)
+                          : null,
+                      child: SizedBox(
+                        width: 85,
+                        height: 32,
+                        child: _IsolatedTextField(
+                          key: ValueKey('id_${entry.instanceId}'),
+                          initialValue: entry.customId,
+                          enabled: canEdit,
+                          forceUppercase: true,
+                          onChanged: (val) => notifier.updateCustomId(globalIndex, val),
+                        ),
                       ),
                     ),
                   ),
@@ -427,6 +604,7 @@ class DeviceSectionTableRow extends ConsumerWidget {
                         initialValue: entry.area,
                         hint: '...',
                         enabled: canEdit,
+                        forceUppercase: true, 
                         onChanged: (val) =>
                             notifier.updateArea(globalIndex, val),
                       ),
@@ -437,6 +615,26 @@ class DeviceSectionTableRow extends ConsumerWidget {
                   if (!entry.results.containsKey(act.id)) {
                     return const SizedBox(width: 100);
                   }
+
+                  // ★ NUEVO: Detectar si es tipo valor medido
+                  if (act.inputType == ActivityInputType.value) {
+                    return SizedBox(
+                      width: 100,
+                      child: Center(
+                        child: _ValueInputBadge(
+                          currentValue: entry.results[act.id],
+                          expectedValue: act.expectedValue,
+                          canEdit: canEdit,
+                          onChanged: (val) => notifier.toggleStatus(
+                            globalIndex, act.id,
+                            inputType: ActivityInputType.value,
+                            measuredValue: val,
+                          ),
+                        ),
+                      ),
+                    );
+                  }
+
                   return SizedBox(
                     width: 100,
                     child: Center(
@@ -498,6 +696,7 @@ class DeviceSectionListCard extends ConsumerWidget {
   final ReportNotifier notifier;
   final Function(int, {String? activityId}) onCameraClick;
   final Function(int, {String? activityId}) onObservationClick;
+  final Function(int globalIndex)? onRenumberFromHere;
 
   const DeviceSectionListCard({
     super.key,
@@ -507,6 +706,7 @@ class DeviceSectionListCard extends ConsumerWidget {
     required this.notifier,
     required this.onCameraClick,
     required this.onObservationClick,
+    this.onRenumberFromHere,
   });
 
   @override
@@ -535,16 +735,21 @@ class DeviceSectionListCard extends ConsumerWidget {
         children: [
           Row(
             children: [
-              SizedBox(
-                width: 60,
-                height: 32,
-                child: _IsolatedTextField(
-                  key: ValueKey('grid_id_${entry.instanceId}'),
-                  initialValue: entry.customId,
-                  hint: 'ID',
-                  enabled: canEdit,
-                  onChanged: (val) =>
-                      notifier.updateCustomId(globalIndex, val),
+              GestureDetector(
+                onLongPress: canEdit && onRenumberFromHere != null
+                    ? () => onRenumberFromHere!(globalIndex)
+                    : null,
+                child: SizedBox(
+                  width: 60,
+                  height: 32,
+                  child: _IsolatedTextField(
+                    key: ValueKey('grid_id_${entry.instanceId}'),
+                    initialValue: entry.customId,
+                    hint: 'ID',
+                    enabled: canEdit,
+                    forceUppercase: true,
+                    onChanged: (val) => notifier.updateCustomId(globalIndex, val),
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
@@ -556,6 +761,7 @@ class DeviceSectionListCard extends ConsumerWidget {
                     initialValue: entry.area,
                     hint: 'Ubicación...',
                     enabled: canEdit,
+                    forceUppercase: true,
                     onChanged: (val) =>
                         notifier.updateArea(globalIndex, val),
                   ),
@@ -614,6 +820,66 @@ class DeviceSectionListCard extends ConsumerWidget {
                         : null,
                   ),
                   const SizedBox(width: 4),
+                  if (act.inputType == ActivityInputType.value)
+                  _ValueInputBadge(
+                    currentValue: status,
+                    expectedValue: act.expectedValue,
+                    canEdit: canEdit,
+                    onChanged: (val) => notifier.toggleStatus(
+                      globalIndex, act.id,
+                      inputType: ActivityInputType.value,
+                      measuredValue: val,
+                    ),
+                  )
+                else
+                  if (act.inputType == ActivityInputType.value)
+                  _ValueInputBadge(
+                    currentValue: status,
+                    expectedValue: act.expectedValue,
+                    canEdit: canEdit,
+                    onChanged: (val) => notifier.toggleStatus(
+                      globalIndex, act.id,
+                      inputType: ActivityInputType.value,
+                      measuredValue: val,
+                    ),
+                  )
+                else
+                  if (act.inputType == ActivityInputType.value)
+                  _ValueInputBadge(
+                    currentValue: status,
+                    expectedValue: act.expectedValue,
+                    canEdit: canEdit,
+                    onChanged: (val) => notifier.toggleStatus(
+                      globalIndex, act.id,
+                      inputType: ActivityInputType.value,
+                      measuredValue: val,
+                    ),
+                  )
+                else
+                 if (act.inputType == ActivityInputType.value)
+                  _ValueInputBadge(
+                    currentValue: status,
+                    expectedValue: act.expectedValue,
+                    canEdit: canEdit,
+                    onChanged: (val) => notifier.toggleStatus(
+                      globalIndex, act.id,
+                      inputType: ActivityInputType.value,
+                      measuredValue: val,
+                    ),
+                  )
+                else
+                  if (act.inputType == ActivityInputType.value)
+                  _ValueInputBadge(
+                    currentValue: status,
+                    expectedValue: act.expectedValue,
+                    canEdit: canEdit,
+                    onChanged: (val) => notifier.toggleStatus(
+                      globalIndex, act.id,
+                      inputType: ActivityInputType.value,
+                      measuredValue: val,
+                    ),
+                  )
+                else
                   InkWell(
                     onTap: canEdit
                         ? () => notifier.toggleStatus(globalIndex, act.id)
@@ -1152,6 +1418,7 @@ Widget buildSliverGroupForSection(FlatSectionData data, ReportNotifier notifier)
                 onCameraClick: data.onCameraClick,
                 onObservationClick: data.onObservationClick,
                 scrollController: data.scrollGroup.createController(),
+                onRenumberFromHere: data.onRenumberFromHere
               ),
             );
           } else {
@@ -1164,6 +1431,7 @@ Widget buildSliverGroupForSection(FlatSectionData data, ReportNotifier notifier)
                 notifier: notifier,
                 onCameraClick: data.onCameraClick,
                 onObservationClick: data.onObservationClick,
+                onRenumberFromHere: data.onRenumberFromHere,
               ),
             );
           }
@@ -1195,7 +1463,9 @@ class _DragScrollableState extends State<_DragScrollable> {
       behavior: ScrollConfiguration.of(context).copyWith(
         dragDevices: {
           PointerDeviceKind.touch,
-          PointerDeviceKind.mouse,
+          PointerDeviceKind.mouse,     // ← AGREGA ESTO
+          PointerDeviceKind.trackpad,  // ← AGREGA ESTO
+          PointerDeviceKind.stylus,
         },
       ),
       child: widget.child,
@@ -1336,6 +1606,7 @@ class _IsolatedTextField extends StatefulWidget {
   final String initialValue;
   final String hint;
   final bool enabled;
+  final bool forceUppercase; 
   final Function(String) onChanged;
 
   const _IsolatedTextField({
@@ -1343,6 +1614,7 @@ class _IsolatedTextField extends StatefulWidget {
     required this.initialValue,
     this.hint = '',
     required this.enabled,
+    this.forceUppercase = false, // ★ POR DEFECTO APAGADO
     required this.onChanged,
   });
 
@@ -1385,6 +1657,8 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
       controller: _controller,
       enabled: widget.enabled,
       textAlign: TextAlign.center,
+      textCapitalization: widget.forceUppercase ? TextCapitalization.characters : TextCapitalization.none,
+      inputFormatters: widget.forceUppercase ? [UpperCaseTextFormatter()] : [],
       style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1E293B)),
       decoration: InputDecoration(
         isDense: true,
@@ -1404,6 +1678,120 @@ class _IsolatedTextFieldState extends State<_IsolatedTextField> {
           widget.onChanged(val);
         });
       },
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// VALUE INPUT BADGE — Campo para actividades de tipo "valor medido"
+// ═══════════════════════════════════════════════════════════════════════
+class _ValueInputBadge extends StatefulWidget {
+  final String? currentValue;
+  final String expectedValue; // Ej: "3000 RPM" — se muestra como hint
+  final bool canEdit;
+  final Function(String) onChanged;
+
+  const _ValueInputBadge({
+    // ignore: unused_element_parameter
+    super.key,
+    required this.currentValue,
+    required this.expectedValue,
+    required this.canEdit,
+    required this.onChanged,
+  });
+
+  @override
+  State<_ValueInputBadge> createState() => _ValueInputBadgeState();
+}
+
+class _ValueInputBadgeState extends State<_ValueInputBadge> {
+  late TextEditingController _controller;
+  Timer? _debounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.currentValue ?? '');
+  }
+
+  @override
+  void didUpdateWidget(covariant _ValueInputBadge oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.currentValue != widget.currentValue &&
+        _controller.text != (widget.currentValue ?? '')) {
+      _controller.text = widget.currentValue ?? '';
+    }
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Color get _valueColor {
+    if (_controller.text.isEmpty) return const Color(0xFF94A3B8);
+    return const Color(0xFF3B82F6);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 90,
+      height: 32,
+      decoration: BoxDecoration(
+        color: _controller.text.isEmpty
+            ? const Color(0xFFF8FAFC)
+            : const Color(0xFFEFF6FF),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: _controller.text.isEmpty
+              ? const Color(0xFFCBD5E1)
+              : const Color(0xFF3B82F6),
+          width: 1.5,
+        ),
+      ),
+      child: TextField(
+        controller: _controller,
+        enabled: widget.canEdit,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: _valueColor,
+        ),
+        decoration: InputDecoration(
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 7),
+          hintText: widget.expectedValue.isNotEmpty
+              ? widget.expectedValue
+              : 'Valor...',
+          hintStyle: const TextStyle(
+            fontSize: 10,
+            color: Color(0xFFCBD5E1),
+            fontWeight: FontWeight.w500,
+          ),
+          border: InputBorder.none,
+        ),
+        onChanged: (val) {
+          setState(() {}); // Actualizar color en tiempo real
+          _debounce?.cancel();
+          _debounce = Timer(const Duration(milliseconds: 700), () {
+            widget.onChanged(val);
+          });
+        },
+      ),
+    );
+  }
+}
+
+class UpperCaseTextFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) {
+    return TextEditingValue(
+      text: newValue.text.toUpperCase(),
+      selection: newValue.selection,
     );
   }
 }

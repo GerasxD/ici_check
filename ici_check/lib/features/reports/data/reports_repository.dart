@@ -8,6 +8,7 @@ import 'report_model.dart';
 
 class ReportsRepository {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  FirebaseFirestore get db => _db; // Exponer para PhotoSyncService
   // ignore: unused_field
   final _uuid = const Uuid();
   final Set<String> _savedReportIds = {};
@@ -18,13 +19,28 @@ class ReportsRepository {
     return '${baseInstanceId}_$unitIndex';
   }
 
+  // Stream<ServiceReportModel?> getReportStream(String policyId, String dateStr) {
+  //   return _db
+  //       .collection('reports')
+  //       .where('policyId', isEqualTo: policyId)
+  //       .where('dateStr', isEqualTo: dateStr)
+  //       .limit(1)
+  //       .snapshots()
+  //       .map((snapshot) {
+  //     if (snapshot.docs.isEmpty) return null;
+  //     final data = snapshot.docs.first.data();
+  //     data['id'] = snapshot.docs.first.id;
+  //     return ServiceReportModel.fromMap(data);
+  //   });
+  // }
+
   Stream<ServiceReportModel?> getReportStream(String policyId, String dateStr) {
     return _db
         .collection('reports')
         .where('policyId', isEqualTo: policyId)
         .where('dateStr', isEqualTo: dateStr)
         .limit(1)
-        .snapshots()
+        .snapshots(includeMetadataChanges: true) // ★ OFFLINE FIX: emite cambios del cache
         .map((snapshot) {
       if (snapshot.docs.isEmpty) return null;
       final data = snapshot.docs.first.data();
@@ -33,35 +49,92 @@ class ReportsRepository {
     });
   }
 
+  Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
+    // ★ OFFLINE FIX: Intentar cache primero
+    try {
+      final cacheSnapshot = await _db
+          .collection('reports')
+          .where('policyId', isEqualTo: policyId)
+          .where('dateStr', isEqualTo: dateStr)
+          .limit(1)
+          .get(const GetOptions(source: Source.cache));
+
+      if (cacheSnapshot.docs.isNotEmpty) {
+        final data = cacheSnapshot.docs.first.data();
+        data['id'] = cacheSnapshot.docs.first.id;
+        return ServiceReportModel.fromMap(data);
+      }
+    } catch (_) {
+      // Cache vacío, intentar server
+    }
+
+    // Fallback al server
+    try {
+      final snapshot = await _db
+          .collection('reports')
+          .where('policyId', isEqualTo: policyId)
+          .where('dateStr', isEqualTo: dateStr)
+          .limit(1)
+          .get();
+
+      if (snapshot.docs.isEmpty) return null;
+      final data = snapshot.docs.first.data();
+      data['id'] = snapshot.docs.first.id;
+      return ServiceReportModel.fromMap(data);
+    } catch (e) {
+      debugPrint('Error en getReportOnce: $e');
+      return null;
+    }
+  }
+
+  // Future<void> saveReport(ServiceReportModel report) async {
+  //   try {
+  //     final data = report.toMap();
+  //     final docRef = _db.collection('reports').doc(report.id);
+  //     // Usamos merge: true para simplificar y evitar errores.
+  //     await docRef.set(data, SetOptions(merge: true));
+  //     _savedReportIds.add(report.id);
+  //   } catch (e) {
+  //     debugPrint('Error en saveReport: $e');
+  //     rethrow;
+  //   }
+  // }
+
   Future<void> saveReport(ServiceReportModel report) async {
     try {
       final data = report.toMap();
       final docRef = _db.collection('reports').doc(report.id);
-      if (_savedReportIds.contains(report.id)) {
-        await docRef.update(data);
-      } else {
-        await docRef.set(data);
-        _savedReportIds.add(report.id);
-      }
+      // ★ OFFLINE FIX: Sin await → Firestore encola localmente si no hay red
+      docRef.set(data, SetOptions(merge: true));
+      _savedReportIds.add(report.id);
     } catch (e) {
       debugPrint('Error en saveReport: $e');
-      rethrow;
+      // ★ NO rethrow → el dato queda en cache de Firestore para sync posterior
     }
   }
 
   /// Evita llamar report.toMap() en el main thread.
-  Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
+  // Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
+  //   try {
+  //     final docRef = _db.collection('reports').doc(reportId);
+  //     // Usamos merge: true. Si el documento no existe, lo crea. Si existe, lo actualiza.
+  //     await docRef.set(data, SetOptions(merge: true));
+  //     _savedReportIds.add(reportId); // Mantenemos el registro por si acaso
+  //   } catch (e) {
+  //     debugPrint('Error en saveReportRaw: $e');
+  //     rethrow;
+  //   }
+  // }
+
+   Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
     try {
       final docRef = _db.collection('reports').doc(reportId);
-      if (_savedReportIds.contains(reportId)) {
-        await docRef.update(data);
-      } else {
-        await docRef.set(data);
-        _savedReportIds.add(reportId);
-      }
+      // ★ OFFLINE FIX: Sin await → fire-and-forget
+      docRef.set(data, SetOptions(merge: true));
+      _savedReportIds.add(reportId);
     } catch (e) {
       debugPrint('Error en saveReportRaw: $e');
-      rethrow;
+      // ★ NO rethrow
     }
   }
 
@@ -97,14 +170,25 @@ class ReportsRepository {
     };
     final dummyDevice = DeviceModel(id: 'err', name: 'Unknown', description: '', activities: []);
 
+    final Set<String> usedUids = {};
+
     for (final devInstance in policy.devices) {
       final def = definitionsMap[devInstance.definitionId] ?? dummyDevice;
       if (def.id == 'err') continue;
-
+      if (def.isCumulative) continue;
       final namePrefix = def.name.substring(0, min(3, def.name.length)).toUpperCase();
 
       for (int i = 1; i <= devInstance.quantity; i++) {
-        final String uid = unitInstanceId(devInstance.instanceId, i);
+        String uid = unitInstanceId(devInstance.instanceId, i);
+
+        int collisionCounter = 1;
+        String baseUid = uid;
+        while (usedUids.contains(uid)) {
+          uid = '${baseUid}_dup$collisionCounter';
+          collisionCounter++;
+        }
+        usedUids.add(uid);
+
         final Map<String, String?> activityResults = {};
 
         // (Lógica de frecuencias intacta)
@@ -173,56 +257,327 @@ class ReportsRepository {
     return entries;
   }
 
-  List<ReportEntry> mergeEntries(
-    List<ReportEntry> existing,
-    List<ReportEntry> ideal,
-    Map<String, Map<String, String>> savedLocations,
-  ) {
-    // Ya estaba usando un Map, lo cual es excelente.
-    final Map<String, ReportEntry> existingMap = {
-      for (final e in existing) e.instanceId: e,
+  /// Genera o recupera el reporte acumulativo de una póliza.
+  /// dateStr = "CUMULATIVE" lo diferencia de los mensuales/semanales.
+  Future<ServiceReportModel?> getOrCreateCumulativeReport({
+    required PolicyModel policy,
+    required List<DeviceModel> definitions,
+    required Map<String, Map<String, String>> savedLocations,
+  }) async {
+    const String dateStr = 'CUMULATIVE';
+
+    // 1. Buscar si ya existe
+    final existing = await getReportOnce(policy.id, dateStr);
+    if (existing != null) return existing;
+
+    // 2. Filtrar solo definiciones acumulativas
+    final cumulativeDefs = definitions.where((d) => d.isCumulative).toList();
+    if (cumulativeDefs.isEmpty) return null;
+
+    final cumulativeDefIds = cumulativeDefs.map((d) => d.id).toSet();
+
+    // 3. Generar entries para TODOS los dispositivos acumulativos
+    final entries = _generateCumulativeEntriesPublic(
+      policy: policy,
+      definitions: cumulativeDefs,
+      cumulativeDefIds: cumulativeDefIds,
+      savedLocations: savedLocations,
+    );
+
+    if (entries.isEmpty) return null;
+
+    final reportId = '${policy.id}_$dateStr';
+
+    final report = ServiceReportModel(
+      id: reportId,
+      policyId: policy.id,
+      dateStr: dateStr,
+      serviceDate: DateTime.now(),
+      assignedTechnicianIds: policy.assignedUserIds,
+      entries: entries,
+    );
+
+    await saveReport(report);
+    debugPrint('✅ Reporte acumulativo creado: ${entries.length} entradas');
+    return report;
+  }
+
+  /// Genera entries para TODOS los dispositivos acumulativos.
+  /// A diferencia de generateEntriesForDate(), NO filtra por frecuencia/tiempo:
+  /// incluye todas las actividades porque el técnico las irá llenando gradualmente.
+  List<ReportEntry> _generateCumulativeEntriesPublic({
+    required PolicyModel policy,
+    required List<DeviceModel> definitions,
+    required Set<String> cumulativeDefIds,
+    required Map<String, Map<String, String>> savedLocations,
+  }) {
+    final List<ReportEntry> entries = [];
+    final Map<String, int> deviceCounters = {};
+    final Map<String, DeviceModel> definitionsMap = {
+      for (final def in definitions) def.id: def
     };
+    final Set<String> usedUids = {};
 
-    return ideal.map((idealEntry) {
-      final existingEntry = existingMap[idealEntry.instanceId];
+    for (final devInstance in policy.devices) {
+      if (!cumulativeDefIds.contains(devInstance.definitionId)) continue;
 
-      if (existingEntry == null) {
-        final saved = savedLocations[idealEntry.instanceId];
-        return idealEntry.copyWith(
-          customId: (saved?['customId'] ?? '').isNotEmpty ? saved!['customId']! : idealEntry.customId,
-          area:     (saved?['area']     ?? '').isNotEmpty ? saved!['area']!     : idealEntry.area,
-        );
+      final def = definitionsMap[devInstance.definitionId];
+      if (def == null) continue;
+
+      final namePrefix = def.name
+          .substring(0, def.name.length < 3 ? def.name.length : 3)
+          .toUpperCase();
+
+      for (int i = 1; i <= devInstance.quantity; i++) {
+        String uid = unitInstanceId(devInstance.instanceId, i);
+
+        // Evitar colisiones de UID
+        int collisionCounter = 1;
+        String baseUid = uid;
+        while (usedUids.contains(uid)) {
+          uid = '${baseUid}_dup$collisionCounter';
+          collisionCounter++;
+        }
+        usedUids.add(uid);
+
+        // ★ CLAVE: Incluir TODAS las actividades, todas pendientes
+        final Map<String, String?> activityResults = {};
+        for (final act in def.activities) {
+          activityResults[act.id] = null;
+        }
+
+        final int deviceIndex =
+            (deviceCounters[devInstance.definitionId] ?? 0) + 1;
+        deviceCounters[devInstance.definitionId] = deviceIndex;
+
+        final saved = savedLocations[uid];
+        final savedCustomId = saved?['customId'] ?? '';
+        final savedArea = saved?['area'] ?? '';
+        final autoCustomId =
+            savedCustomId.isNotEmpty ? savedCustomId : '$namePrefix-$deviceIndex';
+
+        entries.add(ReportEntry(
+          instanceId: uid,
+          deviceIndex: deviceIndex,
+          customId: autoCustomId,
+          area: savedArea,
+          results: activityResults,
+          observations: '',
+          photoUrls: const [],
+          activityData: const {},
+        ));
       }
+    }
 
+    return entries;
+  }
+
+  /// Obtiene progreso global del reporte acumulativo para el cronograma.
+  /// Retorna {total: N, completed: N} o null si no existe.
+  Future<({int total, int completed})?> getCumulativeProgress(
+    String policyId,
+  ) async {
+    final report = await getReportOnce(policyId, 'CUMULATIVE');
+    if (report == null) return null;
+
+    int total = 0;
+    int completed = 0;
+
+    for (final entry in report.entries) {
+      for (final value in entry.results.values) {
+        total++;
+        if (value == 'OK' || value == 'NOK' || value == 'NA') {
+          completed++;
+        }
+      }
+    }
+
+    return (total: total, completed: completed);
+  }
+
+  /// Sincroniza el reporte acumulativo existente con los dispositivos
+  /// actuales de la póliza (agrega nuevos, elimina los removidos).
+  Future<ServiceReportModel?> syncCumulativeReport({
+    required PolicyModel policy,
+    required List<DeviceModel> definitions,
+    required Map<String, Map<String, String>> savedLocations,
+  }) async {
+    const String dateStr = 'CUMULATIVE';
+
+    final cumulativeDefs = definitions.where((d) => d.isCumulative).toList();
+    if (cumulativeDefs.isEmpty) {
+      // Si ya no hay dispositivos acumulativos, no hay nada que sincronizar
+      return null;
+    }
+
+    final cumulativeDefIds = cumulativeDefs.map((d) => d.id).toSet();
+
+    // Generar el set "ideal" de entries según la póliza actual
+    final idealEntries = _generateCumulativeEntriesPublic(
+      policy: policy,
+      definitions: cumulativeDefs,
+      cumulativeDefIds: cumulativeDefIds,
+      savedLocations: savedLocations,
+    );
+
+    // Buscar el reporte existente
+    final existing = await getReportOnce(policy.id, dateStr);
+
+    if (existing == null) {
+      // No existe aún → crear desde cero
+      if (idealEntries.isEmpty) return null;
+
+      final reportId = '${policy.id}_$dateStr';
+      final report = ServiceReportModel(
+        id: reportId,
+        policyId: policy.id,
+        dateStr: dateStr,
+        serviceDate: DateTime.now(),
+        assignedTechnicianIds: policy.assignedUserIds,
+        entries: idealEntries,
+      );
+      await saveReport(report);
+      return report;
+    }
+
+    // Merge: preserva respuestas existentes, agrega nuevos, elimina removidos
+    final mergedEntries = mergeEntries(
+      existing.entries,
+      idealEntries,
+      savedLocations,
+    );
+
+    // Solo guardar si realmente hubo cambios estructurales
+    final bool changed = _entriesStructureChanged(existing.entries, mergedEntries);
+    if (!changed) return existing;
+
+    final updatedReport = existing.copyWith(entries: mergedEntries);
+    await saveReport(updatedReport);
+    debugPrint('✅ Reporte acumulativo sincronizado: ${mergedEntries.length} entradas');
+    return updatedReport;
+  }
+
+  bool _entriesStructureChanged(
+    List<ReportEntry> oldEntries,
+    List<ReportEntry> newEntries,
+  ) {
+    if (oldEntries.length != newEntries.length) return true;
+    final oldIds = oldEntries.map((e) => e.instanceId).toSet();
+    final newIds = newEntries.map((e) => e.instanceId).toSet();
+    if (!oldIds.containsAll(newIds) || !newIds.containsAll(oldIds)) return true;
+
+    for (int i = 0; i < newEntries.length; i++) {
+      final newKeys = newEntries[i].results.keys.toSet();
+      final oldEntry = oldEntries.firstWhere(
+        (e) => e.instanceId == newEntries[i].instanceId,
+        orElse: () => newEntries[i],
+      );
+      final oldKeys = oldEntry.results.keys.toSet();
+      if (!newKeys.containsAll(oldKeys) || !oldKeys.containsAll(newKeys)) {
+        return true;
+      }
+    }
+    return false;
+  }
+    
+  List<ReportEntry> mergeEntries(
+  List<ReportEntry> existing,
+  List<ReportEntry> ideal,
+  Map<String, Map<String, String>> savedLocations,
+  ) {
+    final Map<String, ReportEntry> existingMap = {};
+    for (final e in existing) {
+      if (!existingMap.containsKey(e.instanceId)) {
+        existingMap[e.instanceId] = e;
+      }
+    }
+
+    // ★ Set de IDs ideales para saber cuáles actividades deben existir
+    // ignore: unused_local_variable
+    final Set<String> idealIds = ideal.map((e) => e.instanceId).toSet();
+    
+    // ★ Map de ideales para acceso rápido a los results esperados
+    final Map<String, ReportEntry> idealMap = {};
+    for (final e in ideal) {
+      idealMap[e.instanceId] = e;
+    }
+
+    final List<ReportEntry> result = [];
+    final Set<String> processedIds = {};
+
+    // ─── Paso 1: Recorrer EXISTENTES (preserva el orden guardado en Firebase) ───
+    for (final existingEntry in existing) {
+      if (processedIds.contains(existingEntry.instanceId)) continue;
+      processedIds.add(existingEntry.instanceId);
+
+      final idealEntry = idealMap[existingEntry.instanceId];
+      
+      // Si ya no está en el ideal (dispositivo eliminado de póliza), lo saltamos
+      if (idealEntry == null) continue;
+
+      // Combinar resultados para no perder lo que ya se respondió
       final Map<String, String?> mergedResults = {};
+
+      // Paso A: Agregar todas las actividades del ideal (las que "tocan" ahora)
       for (final actId in idealEntry.results.keys) {
         mergedResults[actId] = existingEntry.results.containsKey(actId)
             ? existingEntry.results[actId]
             : null;
       }
 
+      // Paso B: Preservar actividades existentes que YA tienen respuesta
+      // aunque no estén en el ideal (evita borrar respuestas guardadas)
+      for (final actId in existingEntry.results.keys) {
+        if (!mergedResults.containsKey(actId) &&
+            existingEntry.results[actId] != null) {
+          mergedResults[actId] = existingEntry.results[actId];
+        }
+      }
+
       final saved = savedLocations[existingEntry.instanceId];
-      return existingEntry.copyWith(
-        results:  mergedResults,
-        customId: (saved?['customId'] ?? '').isNotEmpty ? saved!['customId']! : existingEntry.customId,
-        area:     (saved?['area']     ?? '').isNotEmpty ? saved!['area']!     : existingEntry.area,
-      );
-    }).toList();
+      result.add(existingEntry.copyWith(
+        results: mergedResults,
+        customId: (saved?['customId'] ?? '').isNotEmpty
+            ? saved!['customId']!
+            : existingEntry.customId,
+        area: (saved?['area'] ?? '').isNotEmpty
+            ? saved!['area']!
+            : existingEntry.area,
+      ));
+    }
+
+    // ─── Paso 2: Agregar entradas nuevas del ideal que no existían ───
+    for (final idealEntry in ideal) {
+      if (processedIds.contains(idealEntry.instanceId)) continue;
+      processedIds.add(idealEntry.instanceId);
+
+      final saved = savedLocations[idealEntry.instanceId];
+      result.add(idealEntry.copyWith(
+        customId: (saved?['customId'] ?? '').isNotEmpty
+            ? saved!['customId']!
+            : idealEntry.customId,
+        area: (saved?['area'] ?? '').isNotEmpty
+            ? saved!['area']!
+            : idealEntry.area,
+      ));
+    }
+
+    return result;
   }
 
-  Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
-    final snapshot = await _db
-        .collection('reports')
-        .where('policyId', isEqualTo: policyId)
-        .where('dateStr', isEqualTo: dateStr)
-        .limit(1)
-        .get();
+  // Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
+  //   final snapshot = await _db
+  //       .collection('reports')
+  //       .where('policyId', isEqualTo: policyId)
+  //       .where('dateStr', isEqualTo: dateStr)
+  //       .limit(1)
+  //       .get();
 
-    if (snapshot.docs.isEmpty) return null;
-    final data = snapshot.docs.first.data();
-    data['id'] = snapshot.docs.first.id;
-    return ServiceReportModel.fromMap(data);
-  }
+  //   if (snapshot.docs.isEmpty) return null;
+  //   final data = snapshot.docs.first.data();
+  //   data['id'] = snapshot.docs.first.id;
+  //   return ServiceReportModel.fromMap(data);
+  // }
 
   ServiceReportModel initializeReport(
     PolicyModel policy,
@@ -264,3 +619,4 @@ class ReportsRepository {
     }
   }
 }
+

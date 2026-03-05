@@ -75,8 +75,8 @@ class SchedulePdfService {
         ? policy.durationMonths 
         : policy.durationMonths * 4;
 
-    List<_TimeColumnData> allColumns = _calculateColumnsData(policy, totalColumns, viewMode);
-
+    List<_TimeColumnData> allColumns = _calculateColumnsData(policy, totalColumns, viewMode, reports);
+      
     // 3. Paginación Horizontal
     final int columnsPerSlice = viewMode == 'weekly' ? 12 : 18;
     final int totalSlices = (allColumns.length / columnsPerSlice).ceil();
@@ -315,6 +315,7 @@ class SchedulePdfService {
       children: [
         // HEADER ROW
         pw.TableRow(
+          repeat: true,
           decoration: const pw.BoxDecoration(color: colorSlate50),
           children: [
             pw.Container(
@@ -358,6 +359,80 @@ class SchedulePdfService {
             orElse: () => DeviceModel(id: '?', name: 'Desconocido', description: '', activities: [])
           );
 
+          List<pw.TableRow> rows = [];
+
+          if (def.isCumulative) {
+            // Buscar reporte CUMULATIVE
+            Map<String, dynamic>? cumulativeReport;
+            try {
+              cumulativeReport =
+                  reports.firstWhere((r) => r['dateStr'] == 'CUMULATIVE');
+            } catch (_) {}
+
+            int total = 0, completed = 0;
+            if (cumulativeReport != null) {
+              final entries = cumulativeReport['entries'] as List<dynamic>? ?? [];
+              for (final entry in entries) {
+                final results = entry['results'] as Map<String, dynamic>? ?? {};
+                for (final value in results.values) {
+                  total++;
+                  if (value == 'OK' || value == 'NOK' || value == 'NA') {
+                    completed++;
+                  }
+                }
+              }
+            }
+
+            final pct = total > 0 ? (completed / total * 100) : 0.0;
+
+            rows.add(pw.TableRow(children: [
+              // Nombre + badge
+              pw.Container(
+                padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text('ACUMULATIVO',
+                      style: pw.TextStyle(
+                          font: fontBold, fontSize: 6, color: PdfColors.amber)),
+                    pw.SizedBox(height: 2),
+                    pw.Text(
+                      '$completed/$total (${pct.toStringAsFixed(0)}%)',
+                      style: pw.TextStyle(
+                          font: fontBold, fontSize: 8, color: PdfColors.grey800),
+                    ),
+                  ],
+                ),
+              ),
+              // Barra de progreso en cada columna
+              ...List.generate(sliceColumns.length, (_) => pw.Container(
+                height: 22,
+                alignment: pw.Alignment.center,
+                child: pw.Container(
+                  width: 60, height: 6,
+                  decoration: pw.BoxDecoration(
+                    color: PdfColors.grey200,
+                    borderRadius: pw.BorderRadius.circular(3),
+                  ),
+                  child: pw.ClipRRect(
+                    horizontalRadius: 3, verticalRadius: 3,
+                    child: pw.Container(
+                      alignment: pw.Alignment.centerLeft,
+                      child: pw.Container(
+                        width: 60 * (pct / 100).clamp(0.0, 1.0),
+                        decoration: pw.BoxDecoration(
+                          color: pct == 100 ? PdfColors.green : PdfColors.amber,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              )),
+            ]));
+
+            return rows; // No procesar actividades individuales
+          }
+
           final visibleActivities = def.activities.where((act) {
             bool isWeeklyFreq = act.frequency == Frequency.SEMANAL || 
                                 act.frequency == Frequency.QUINCENAL;
@@ -366,8 +441,6 @@ class SchedulePdfService {
           }).toList();
 
           if (visibleActivities.isEmpty && viewMode == 'weekly') return <pw.TableRow>[];
-
-          List<pw.TableRow> rows = [];
 
           // Device Header Row
           rows.add(pw.TableRow(
@@ -524,6 +597,15 @@ class SchedulePdfService {
   }
 
   // --- HELPERS VISUALES (Círculos) ---
+
+  /// Retorna el primer lunes A PARTIR de la fecha de inicio.
+  /// Si startDate ya es lunes, lo retorna tal cual.
+  static DateTime _getFirstMonday(DateTime startDate) {
+    if (startDate.weekday == DateTime.monday) return startDate;
+    final daysToAdd = (DateTime.monday - startDate.weekday + 7) % 7;
+    return DateTime(startDate.year, startDate.month, startDate.day + daysToAdd);
+  }
+  
   static pw.Widget _buildStatusCircle(ActivityType type, String status) {
     final PdfColor color = _getActivityColor(type);
     if (status == 'COMPLETE') {
@@ -593,7 +675,10 @@ class SchedulePdfService {
     }
   }
 
-  static List<_TimeColumnData> _calculateColumnsData(PolicyModel policy, int count, String viewMode) {
+  static List<_TimeColumnData> _calculateColumnsData(
+    PolicyModel policy, int count, String viewMode,
+    [List<Map<String, dynamic>> reports = const []]
+  ) {
     List<_TimeColumnData> data = [];
     for (int i = 0; i < count; i++) {
       DateTime date;
@@ -604,22 +689,65 @@ class SchedulePdfService {
       bool hasScheduledDay = false;
 
       if (viewMode == 'monthly') {
-        date = DateTime(policy.startDate.year, policy.startDate.month + i, 1);
-        labelMain = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
-        labelSub = DateFormat('yy', 'es').format(date);
-        dateKey = DateFormat('yyyy-MM').format(date);
+        // ✅ Match the UI: use startDate's year/month + offset
+        date = DateTime(
+          policy.startDate.year,
+          policy.startDate.month + i,
+          policy.startDate.day,
+        );
+
+        // ✅ Same format as _buildTimeHeader in scheduler_screen.dart
+        labelMain = DateFormat('MMM yyyy', 'es')
+            .format(date)
+            .toUpperCase()
+            .replaceAll('.', '');
+        labelSub = "Día ${DateFormat('d').format(date)}";
+        topLabel = ''; // No need — year is already in labelMain
+
+        // dateKey must use day 1 for Firebase lookup (same as UI)
+        DateTime keyDate = DateTime(date.year, date.month, 1);
+        dateKey = DateFormat('yyyy-MM').format(keyDate);
+
+        // Check if there's a real service date in reports
+        try {
+          final report = reports.firstWhere((r) => r['dateStr'] == dateKey);
+          final startTime = report['startTime'] as String?;
+          if (startTime != null && startTime.isNotEmpty && report['serviceDate'] != null) {
+            hasScheduledDay = true;
+            final serviceDate = (report['serviceDate'] as dynamic).toDate();
+            labelSub = "Día ${DateFormat('d').format(serviceDate)}";
+          }
+        } catch (_) {}
+
       } else {
-        date = policy.startDate.add(Duration(days: i * 7));
+        // ★ Weekly: usar primer lunes a partir de startDate (igual que scheduler_screen)
+        final firstMonday = _getFirstMonday(policy.startDate);
+        date = firstMonday.add(Duration(days: i * 7));
         DateTime endDate = date.add(const Duration(days: 6));
-        dateKey = "${date.year}-W${i + 1}"; 
-        topLabel = DateFormat('MMM', 'es').format(date).toUpperCase().replaceAll('.', '');
-        labelMain = "S${i + 1}";
-        if (date.month == endDate.month) {
-           labelSub = "${date.day}-${endDate.day}";
-        } else {
-           labelSub = "${date.day}-${endDate.day}/${endDate.month}";
-        }
+
+        topLabel = DateFormat('MMMM', 'es').format(date).toUpperCase();
+
+        String startDay = DateFormat('d').format(date);
+        String endDay = DateFormat('d').format(endDate);
+        int weekNumber = i + 1;
+
+        labelMain = "S$weekNumber";
+        labelSub = "($startDay-$endDay)";
+
+        dateKey = "${date.year}-W$weekNumber";
+
+        // Check for real service date
+        try {
+          final report = reports.firstWhere((r) => r['dateStr'] == dateKey);
+          final startTime = report['startTime'] as String?;
+          if (startTime != null && startTime.isNotEmpty && report['serviceDate'] != null) {
+            hasScheduledDay = true;
+            final serviceDate = (report['serviceDate'] as dynamic).toDate();
+            labelSub = "($startDay-$endDay)\nReal: ${DateFormat('d MMM', 'es').format(serviceDate)}";
+          }
+        } catch (_) {}
       }
+
       data.add(_TimeColumnData(labelMain, labelSub, topLabel, dateKey, hasScheduledDay));
     }
     return data;

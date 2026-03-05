@@ -5,14 +5,18 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gal/gal.dart';
 import 'package:ici_check/features/devices/data/devices_repository.dart';
 import 'package:ici_check/features/reports/services/device_location_service.dart';
+import 'package:ici_check/features/reports/services/offline_photo_queue.dart';
 import 'package:ici_check/features/reports/services/photo_storage_service.dart';
 import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
+import 'package:ici_check/features/reports/widgets/renumber_dialog.dart';
 import 'package:ici_check/features/reports/widgets/report_controls.dart';
 import 'package:ici_check/features/reports/widgets/report_header.dart';
 import 'package:ici_check/features/reports/widgets/report_signatures.dart';
@@ -85,7 +89,6 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   StreamSubscription? _reportSubscription;
   StreamSubscription? _devicesSubscription;
   // ★ Timestamp del último save para ignorar ecos de Firebase
-  DateTime? _lastSaveTime;
 
   // Ubicaciones guardadas
   Map<String, Map<String, String>> _savedLocations = {};
@@ -117,6 +120,10 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   // Location save debounce
   Timer? _locationSaveDebounce;
 
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+  Timer? _searchDebounce;
+
   // Colores
   static const Color _bgLight = Color(0xFFF8FAFC);
   static const Color _primaryDark = Color(0xFF0F172A);
@@ -127,6 +134,8 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   // Acceso rápido al notifier
   ReportNotifier get _notifier =>
       ref.read(reportNotifierProvider.notifier);
+
+  bool get _isCumulative => widget.dateStr == 'CUMULATIVE';
 
   // ══════════════════════════════════════════════════════════════════════
   // LIFECYCLE
@@ -143,6 +152,8 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
     _locationSaveDebounce?.cancel();
     _signatureDebounce?.cancel();
     _providerSigController.dispose();
@@ -294,6 +305,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   // ══════════════════════════════════════════════════════════════════════
 
   Future<void> _resyncReportWithCurrentDevices() async {
+    if (_isCumulative) return;
     final state = ref.read(reportNotifierProvider);
     if (state == null || _currentDevices.isEmpty) return;
 
@@ -329,6 +341,26 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   }
 
   Future<void> _syncReportWithPolicy(PolicyModel updatedPolicy) async {
+    if (_isCumulative) {
+      final synced = await _repo.syncCumulativeReport(
+        policy: updatedPolicy,
+        definitions: _devicesEffective,
+        savedLocations: _savedLocations,
+      );
+      if (synced == null || !mounted) return;
+
+      _notifier.syncFromFirebase(
+        synced,
+        groupedEntries: _buildGroupedEntries(synced),
+        frequencies: _computeFrequencies(),
+      );
+      _showSnackBar(
+        'Reporte acumulativo actualizado con los cambios de la póliza',
+        Colors.blue,
+      );
+      return;
+    }
+
     final state = ref.read(reportNotifierProvider);
     if (state == null) return;
 
@@ -375,102 +407,201 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     return false;
   }
 
-  void _syncAndLoadReport(ServiceReportModel existingReport) {
-    // No pisar cambios locales pendientes
-    if (_notifier.hasPendingChanges) return;
+  Future<void> _syncAndLoadCumulativeReport(
+    ServiceReportModel existingReport,
+  ) async {
+    final policyToUse = _currentPolicy ?? widget.policy;
+    final cumulativeDefs =
+        _devicesEffective.where((d) => d.isCumulative).toList();
 
-    // ★ FIX P2: Ignorar ecos de nuestros propios saves usando timestamp
-    if (_lastSaveTime != null &&
-        DateTime.now().difference(_lastSaveTime!) < const Duration(seconds: 3)) {
+    if (cumulativeDefs.isEmpty) {
+      _handleNotifierUpdate(existingReport);
       return;
     }
 
-    final currentState = ref.read(reportNotifierProvider);
-    if (currentState != null && !_isLoading) {
-      final current = currentState.report;
-      if (current.entries.length == existingReport.entries.length &&
-          current.startTime == existingReport.startTime &&
-          current.endTime == existingReport.endTime &&
-          current.generalObservations == existingReport.generalObservations &&
-          current.providerSignerName == existingReport.providerSignerName &&
-          current.clientSignerName == existingReport.clientSignerName) {
-        bool likelySame = true;
-        if (current.entries.isNotEmpty) {
-          final lastIdx = current.entries.length - 1;
-          for (final idx in [0, lastIdx]) {
-            if (idx < existingReport.entries.length) {
-              final a = current.entries[idx];
-              final b = existingReport.entries[idx];
-              if (a.instanceId != b.instanceId ||
-                  a.results.length != b.results.length) {
-                likelySame = false;
-                break;
-              }
-              if (likelySame) {
-                for (final key in a.results.keys) {
-                  if (a.results[key] != b.results[key]) {
-                    likelySame = false;
-                    break;
-                  }
+    // Generar el ideal según la póliza actual usando syncCumulativeReport
+    final synced = await _repo.syncCumulativeReport(
+      policy: policyToUse,
+      definitions: cumulativeDefs,
+      savedLocations: _savedLocations,
+    );
+
+    if (synced == null) {
+      _handleNotifierUpdate(existingReport);
+      return;
+    }
+
+    // Merge: preserva respuestas, agrega nuevos, elimina removidos
+    final mergedEntries = _mergeEntries(existingReport.entries, synced.entries);
+
+    // Verificar si realmente hubo cambios para no guardar innecesariamente
+    final hasChanges =
+        _entriesStructureChanged(existingReport.entries, mergedEntries);
+
+    if (!hasChanges) {
+      _handleNotifierUpdate(existingReport);
+      return;
+    }
+
+    final updatedReport = existingReport.copyWith(entries: mergedEntries);
+    _repo.saveReport(updatedReport); // fire-and-forget
+    _handleNotifierUpdate(updatedReport);
+  }
+
+  void _syncAndLoadReport(ServiceReportModel existingReport) {
+  // No pisar cambios locales pendientes
+  if (_notifier.hasPendingChanges) return;
+
+  final lastSave = _notifier.lastSaveTimestamp;
+  if (lastSave != null &&
+      DateTime.now().difference(lastSave) < const Duration(seconds: 3)) {
+    return;
+  }
+
+  if (_isCumulative) {
+    _syncAndLoadCumulativeReport(existingReport);
+    return;
+  }
+
+  final currentState = ref.read(reportNotifierProvider);
+  if (currentState != null && !_isLoading) {
+    final current = currentState.report;
+
+    // SOLUCIÓN 3: Validación de técnicos y secciones
+    if (current.entries.length == existingReport.entries.length &&
+        current.startTime == existingReport.startTime &&
+        current.endTime == existingReport.endTime &&
+        current.generalObservations == existingReport.generalObservations &&
+        current.providerSignerName == existingReport.providerSignerName &&
+        current.clientSignerName == existingReport.clientSignerName &&
+        jsonEncode(current.assignedTechnicianIds) ==
+            jsonEncode(existingReport.assignedTechnicianIds) &&
+        jsonEncode(current.sectionAssignments) ==
+            jsonEncode(existingReport.sectionAssignments)) {
+      bool likelySame = true;
+
+      if (current.entries.isNotEmpty) {
+        final lastIdx = current.entries.length - 1;
+        final midIdx = current.entries.length ~/ 2;
+
+       for (final idx in <int>{0, midIdx, lastIdx}) {
+          if (idx < existingReport.entries.length) {
+            final a = current.entries[idx];
+            final b = existingReport.entries[idx];
+
+            if (a.instanceId != b.instanceId ||
+                a.results.length != b.results.length) {
+              likelySame = false;
+              break;
+            }
+
+            if (likelySame) {
+              for (final key in a.results.keys) {
+                if (a.results[key] != b.results[key]) {
+                  likelySame = false;
+                  break;
                 }
               }
             }
           }
         }
-        if (likelySame) return;
       }
-    }
 
-    if (_devicesEffective.isEmpty) {
-      _initializeNotifier(existingReport);
-      return;
-    }
-
-    bool isWeekly = widget.dateStr.contains('W');
-    int timeIndex = _calculateTimeIndex(isWeekly);
-    final policyToUse = _currentPolicy ?? widget.policy;
-
-    final idealEntries = _repo.generateEntriesForDate(
-      policyToUse,
-      widget.dateStr,
-      _devicesEffective,
-      isWeekly,
-      timeIndex,
-      savedLocations: _savedLocations,
-    );
-
-    final mergedEntries = _mergeEntries(existingReport.entries, idealEntries);
-
-    bool hasStructureChanges =
-        _entriesStructureChanged(existingReport.entries, mergedEntries);
-
-    bool hasLocationChanges = false;
-    if (!hasStructureChanges && _savedLocations.isNotEmpty) {
-      for (int i = 0; i < mergedEntries.length; i++) {
-        if (i >= existingReport.entries.length) break;
-        final original = existingReport.entries[i];
-        final merged = mergedEntries[i];
-        if (original.customId != merged.customId ||
-            original.area != merged.area) {
-          hasLocationChanges = true;
-          break;
-        }
-      }
-    }
-
-    if (hasStructureChanges || hasLocationChanges) {
-      final updatedReport = existingReport.copyWith(entries: mergedEntries);
-      if (hasStructureChanges) {
-        _lastSaveTime = DateTime.now();
-        _repo.saveReport(updatedReport);
-      }
-      _initializeNotifier(updatedReport);
-    } else {
-      _initializeNotifier(existingReport);
+      if (likelySame) return;
     }
   }
 
+  if (_devicesEffective.isEmpty) {
+    _handleNotifierUpdate(existingReport);
+    return;
+  }
+
+  bool isWeekly = widget.dateStr.contains('W');
+  int timeIndex = _calculateTimeIndex(isWeekly);
+  final policyToUse = _currentPolicy ?? widget.policy;
+
+  // ★ FIX: Actualizar _savedLocations con los datos locales ANTES de hacer merge
+  // Esto evita que el merge sobreescriba los customId/area que el usuario acaba de editar
+  final localState = ref.read(reportNotifierProvider);
+  if (localState != null) {
+    for (final entry in localState.report.entries) {
+      _savedLocations[entry.instanceId] = {
+        'customId': entry.customId,
+        'area': entry.area,
+      };
+    }
+  }
+
+  final idealEntries = _repo.generateEntriesForDate(
+    policyToUse,
+    widget.dateStr,
+    _devicesEffective,
+    isWeekly,
+    timeIndex,
+    savedLocations: _savedLocations,
+  );
+
+  final mergedEntries =
+      _mergeEntries(existingReport.entries, idealEntries);
+
+  bool hasStructureChanges =
+      _entriesStructureChanged(existingReport.entries, mergedEntries);
+
+  bool hasLocationChanges = false;
+
+  if (!hasStructureChanges && _savedLocations.isNotEmpty) {
+    for (int i = 0; i < mergedEntries.length; i++) {
+      if (i >= existingReport.entries.length) break;
+
+      final original = existingReport.entries[i];
+      final merged = mergedEntries[i];
+
+      if (original.customId != merged.customId ||
+          original.area != merged.area) {
+        hasLocationChanges = true;
+        break;
+      }
+    }
+  }
+
+  if (hasStructureChanges || hasLocationChanges) {
+    // Al haber eliminado equipos en la póliza, es completamente normal y esperado
+    // que el número de respuestas disminuya. 
+    // Por lo tanto, confiamos ciegamente en el resultado de mergedEntries.
+    final updatedReport = existingReport.copyWith(entries: mergedEntries);
+    
+    // 1. Actualizamos la pantalla (lo que ya hacía)
+    _handleNotifierUpdate(updatedReport);
+    
+    // 🔥 2. EL SECRETO ESTÁ AQUÍ 🔥
+    // Obligamos a Firebase a guardar el reporte limpio inmediatamente.
+    // Así matamos a los "equipos fantasma" y sus respuestas viejas para siempre.
+    _repo.saveReport(updatedReport);
+    
+  } else {
+    _handleNotifierUpdate(existingReport);
+  }
+}
+
+// SOLUCIÓN 2: Función de apoyo para evitar reiniciar la UI si ya había cargado
+void _handleNotifierUpdate(ServiceReportModel report) {
+  if (_isLoading) {
+    _initializeNotifier(report);
+  } else {
+    _notifier.syncFromFirebase(
+      report,
+      groupedEntries: _buildGroupedEntries(report),
+      frequencies: _computeFrequencies(),
+    );
+  }
+}
+
   void _initializeNewReport() {
+    if (_isCumulative) {
+      _initializeCumulativeReport();
+      return;
+    }
+
     bool isWeekly = widget.dateStr.contains('W');
     int timeIndex = _calculateTimeIndex(isWeekly);
     final policyToUse = _currentPolicy ?? widget.policy;
@@ -486,6 +617,29 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
 
     _repo.saveReport(newReport);
     _initializeNotifier(newReport);
+  }
+
+  void _initializeCumulativeReport() async {
+    // ★ Usar syncCumulativeReport en lugar de getOrCreateCumulativeReport
+    // así siempre queda alineado con la póliza actual
+    final report = await _repo.syncCumulativeReport(
+      policy: _currentPolicy ?? widget.policy,
+      definitions: _devicesEffective,
+      savedLocations: _savedLocations,
+    );
+
+    if (report == null) {
+      if (mounted) {
+        _showSnackBar(
+          'No hay dispositivos acumulativos configurados',
+          Colors.orange,
+        );
+        Navigator.pop(context);
+      }
+      return;
+    }
+
+    _initializeNotifier(report);
   }
 
   /// Inicializa el Notifier con un report y marca la carga como completada
@@ -543,13 +697,37 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       if (deviceInstance == null) continue;
 
       final defId = deviceInstance.definitionId;
+      // ★ NUEVO: Saltar dispositivos acumulativos en reportes normales
+      if (!_isCumulative) {
+        final def = _devicesEffective.firstWhere(
+          (d) => d.id == defId,
+          orElse: () => DeviceModel(id: 'err', name: '', description: '', activities: []),
+        );
+        if (def.id != 'err' && def.isCumulative) continue;
+      }
       (grouped[defId] ??= []).add(entry);
     }
 
-    return grouped.entries.toList();
+   // ★ FIX: Ordenar las secciones según el orden de devices en la póliza
+    final policyDefOrder = <String, int>{};
+    for (int i = 0; i < policyToUse.devices.length; i++) {
+      final defId = policyToUse.devices[i].definitionId;
+      // Solo guardar la PRIMERA aparición (el orden del primer device de ese tipo)
+      policyDefOrder.putIfAbsent(defId, () => i);
+    }
+
+    final sortedEntries = grouped.entries.toList()
+      ..sort((a, b) {
+        final orderA = policyDefOrder[a.key] ?? 999;
+        final orderB = policyDefOrder[b.key] ?? 999;
+        return orderA.compareTo(orderB);
+      });
+
+    return sortedEntries;
   }
 
   String _computeFrequencies() {
+    if (_isCumulative) return "Acumulativo";
     final bool isWeekly = widget.dateStr.contains('W');
     if (!isWeekly) return "Mensual";
 
@@ -575,6 +753,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   }
 
   int _calculateTimeIndex(bool isWeekly) {
+    if (_isCumulative) return 0;
     if (!isWeekly) {
       DateTime pStart = DateTime(
         widget.policy.startDate.year,
@@ -642,9 +821,6 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     if (_adminOverride) return true;
     return state.report.startTime != null && state.report.endTime == null;
   }
-
-  bool _canSignReport() =>
-      ref.read(reportNotifierProvider) != null;
 
   bool _isUserCoordinator() {
     if (_currentUser == null) return false;
@@ -726,6 +902,104 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   }
 
   // ══════════════════════════════════════════════════════════════════════
+  // LLENAR TODO OK (Admin)
+  // ══════════════════════════════════════════════════════════════════════
+
+  void _confirmFillAllOk() {
+    final state = ref.read(reportNotifierProvider);
+    if (state == null) return;
+
+    final pendingCount = state.stats.pending + state.stats.nr;
+    if (pendingCount == 0) {
+      _showSnackBar('No hay actividades pendientes por llenar', Colors.blue);
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.done_all_rounded, color: Color(0xFF10B981), size: 24),
+            SizedBox(width: 12),
+            Text('Llenar Todo con OK', style: TextStyle(fontSize: 16)),
+          ],
+        ),
+        content: Text(
+          'Se marcarán $pendingCount actividades pendientes como OK.\n\nLas actividades ya marcadas como NOK o N/A no se modificarán.\n\n¿Deseas continuar?',
+          style: const TextStyle(fontSize: 14, color: Color(0xFF64748B)),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar', style: TextStyle(color: Color(0xFF64748B))),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _notifier.fillAllOk();
+              _showSnackBar(
+                '$pendingCount actividades marcadas como OK',
+                const Color(0xFF10B981),
+              );
+            },
+            icon: const Icon(Icons.done_all, size: 18),
+            label: const Text('Confirmar'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF10B981),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handleRenumberFromHere(
+    int globalIndex,
+    String defId,
+    List<ReportEntry> sectionEntries,
+    Map<String, int> indexMap,
+  ) async {
+    final state = ref.read(reportNotifierProvider);
+    if (state == null) return;
+
+    final entry = state.report.entries[globalIndex];
+
+    // Calcular cuántos entries quedan desde este punto en la sección
+    final sectionGlobalIndices = sectionEntries
+        .map((e) => indexMap[e.instanceId] ?? -1)
+        .where((i) => i >= globalIndex)
+        .toList()
+      ..sort();
+
+    if (sectionGlobalIndices.isEmpty) return;
+
+    final config = await showRenumberDialog(
+      context: context,
+      currentId: entry.customId,
+      remainingCount: sectionGlobalIndices.length,
+    );
+
+    if (config == null) return; // Usuario canceló
+
+    // Aplicar la renumeración a cada entry de la sección desde este punto
+    int offset = 0;
+    for (final gi in sectionGlobalIndices) {
+      final newId = config.generateId(offset);
+      _notifier.updateCustomId(gi, newId);
+      offset++;
+    }
+
+    _showSnackBar(
+      '${sectionGlobalIndices.length} IDs renumerados: ${config.generateId(0)} → ${config.generateId(sectionGlobalIndices.length - 1)}',
+      const Color(0xFF3B82F6),
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
   // FIRMAS
   // ══════════════════════════════════════════════════════════════════════
 
@@ -737,42 +1011,42 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   }
 
   Future<void> _processAndSaveSignatures() async {
-    final state = ref.read(reportNotifierProvider);
-    if (state == null) return;
+  final state = ref.read(reportNotifierProvider);
+  if (state == null) return;
 
-    String? providerSigBase64 = state.report.providerSignature;
-    String? clientSigBase64 = state.report.clientSignature;
-    bool hasChanges = false;
+  String? providerSigBase64 = state.report.providerSignature;
+  String? clientSigBase64 = state.report.clientSignature;
+  bool hasChanges = false;
 
-    if (_providerSigController.isNotEmpty) {
-      final bytes = await _providerSigController.toPngBytes();
-      if (bytes != null) {
-        final newSig = base64Encode(bytes);
-        if (newSig != providerSigBase64) {
-          providerSigBase64 = newSig;
-          hasChanges = true;
-        }
+  if (_providerSigController.isNotEmpty) {
+    final bytes = await _providerSigController.toPngBytes();
+    if (bytes != null) {
+      final newSig = base64Encode(bytes);
+      if (newSig != providerSigBase64) {
+        providerSigBase64 = newSig;
+        hasChanges = true;
       }
-    }
-
-    if (_clientSigController.isNotEmpty) {
-      final bytes = await _clientSigController.toPngBytes();
-      if (bytes != null) {
-        final newSig = base64Encode(bytes);
-        if (newSig != clientSigBase64) {
-          clientSigBase64 = newSig;
-          hasChanges = true;
-        }
-      }
-    }
-
-    if (hasChanges && mounted) {
-      _notifier.updateSignatures(
-        providerSignature: providerSigBase64,
-        clientSignature: clientSigBase64,
-      );
     }
   }
+
+  if (_clientSigController.isNotEmpty) {
+    final bytes = await _clientSigController.toPngBytes();
+    if (bytes != null) {
+      final newSig = base64Encode(bytes);
+      if (newSig != clientSigBase64) {
+        clientSigBase64 = newSig;
+        hasChanges = true;
+      }
+    }
+  }
+
+  if (hasChanges && mounted) {
+    _notifier.updateSignatures(
+      providerSignature: providerSigBase64,
+      clientSignature: clientSigBase64,
+    );
+  }
+}
 
   // ══════════════════════════════════════════════════════════════════════
   // FOTOS
@@ -880,6 +1154,10 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     setState(() => _isUploadingPhoto = true);
     int successCount = 0;
 
+    // ★ OFFLINE: Verificar conectividad
+    final connectivity = await Connectivity().checkConnectivity();
+    final bool isOffline = connectivity.contains(ConnectivityResult.none);
+
     try {
       for (int i = 0; i < images.length; i++) {
         final image = images[i];
@@ -898,7 +1176,9 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                Text('Subiendo ${i + 1} de ${images.length}...'),
+                Text(isOffline
+                    ? 'Guardando localmente ${i + 1} de ${images.length}...'
+                    : 'Subiendo ${i + 1} de ${images.length}...'),
               ],
             ),
             duration: const Duration(seconds: 10),
@@ -912,13 +1192,51 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
         final currentState = ref.read(reportNotifierProvider)!;
         final entry = currentState.report.entries[entryIdx];
 
-        final photoUrl = await _photoService.uploadPhoto(
-          photoBytes: bytes,
-          reportId: '${widget.policyId}_${widget.dateStr}',
-          deviceInstanceId: entry.instanceId,
-          activityId: activityId,
-        );
+        String? photoUrl;
 
+        if (isOffline) {
+          // ★ OFFLINE: Guardar localmente
+          photoUrl = await OfflinePhotoQueue.enqueue(
+            photoBytes: bytes,
+            reportId: '${widget.policyId}_${widget.dateStr}',
+            deviceInstanceId: entry.instanceId,
+            entryIndex: entryIdx,
+            activityId: activityId,
+          );
+
+          if (photoUrl == null) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            _showSnackBar(
+              'Almacenamiento offline lleno. Conecta a internet para sincronizar.',
+              Colors.red,
+              seconds: 4,
+            );
+            break;
+          }
+        } else {
+          // ★ ONLINE: Subir normalmente, con fallback offline si falla
+          try {
+            photoUrl = await _photoService.uploadPhoto(
+              photoBytes: bytes,
+              reportId: '${widget.policyId}_${widget.dateStr}',
+              deviceInstanceId: entry.instanceId,
+              activityId: activityId,
+            );
+          } catch (e) {
+            debugPrint('⚠️ Upload online falló, guardando offline: $e');
+            photoUrl = await OfflinePhotoQueue.enqueue(
+              photoBytes: bytes,
+              reportId: '${widget.policyId}_${widget.dateStr}',
+              deviceInstanceId: entry.instanceId,
+              entryIndex: entryIdx,
+              activityId: activityId,
+            );
+          }
+        }
+
+        if (photoUrl == null) continue;
+
+        // Actualizar el reporte con la URL (local o remota)
         if (activityId != null) {
           final currentData = entry.activityData[activityId] ??
               ActivityData(photoUrls: [], observations: '');
@@ -938,10 +1256,16 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       }
 
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      _showSnackBar(
-        successCount == 1 ? 'Foto subida' : '$successCount fotos subidas',
-        Colors.green,
-      );
+      if (successCount > 0) {
+        _showSnackBar(
+          isOffline
+              ? '$successCount foto(s) guardadas localmente ☁️'
+              : successCount == 1
+                  ? 'Foto subida'
+                  : '$successCount fotos subidas',
+          isOffline ? Colors.orange : Colors.green,
+        );
+      }
     } catch (e) {
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       _showSnackBar('Error: $e', Colors.red);
@@ -1047,6 +1371,17 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       final defId = entryGroup.key;
       final entries = entryGroup.value;
 
+      List<ReportEntry> filteredEntries = entries;
+      if (_searchQuery.isNotEmpty) {
+        filteredEntries = entries.where((e) {
+          final customIdMatch = e.customId.toLowerCase().contains(_searchQuery);
+          final areaMatch = e.area.toLowerCase().contains(_searchQuery);
+          return customIdMatch || areaMatch;
+        }).toList();
+      }
+
+      if (filteredEntries.isEmpty) continue;
+
       final deviceDef = _devicesEffective.firstWhere(
         (d) => d.id == defId,
         orElse: () => DeviceModel(
@@ -1073,7 +1408,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       final sectionData = FlatSectionData(
         defId: defId,
         deviceDef: deviceDef,
-        entries: entries,
+        entries: filteredEntries, // ★ PASAMOS LOS EQUIPOS FILTRADOS
         assignments: assignments,
         relevantActivities: relevantActivities,
         users: assignedUsers,
@@ -1091,6 +1426,12 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
           });
         },
         scrollGroup: _scrollGroups[defId]!,
+        onRenumberFromHere: (globalIndex) => _handleRenumberFromHere(
+          globalIndex,
+          defId,
+          filteredEntries,
+          indexMap,
+        ),
       );
 
       sliverSectionGroups.add(buildSliverGroupForSection(sectionData, notifier));
@@ -1101,9 +1442,54 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       appBar: _buildAppBar(adminTooltip, reportState),
       body: CustomScrollView(
         slivers: [
+
           SliverToBoxAdapter(
             child: Column(
               children: [
+                // ★ OFFLINE: Banner de estado
+                StreamBuilder<List<ConnectivityResult>>(
+                  stream: Connectivity().onConnectivityChanged,
+                  builder: (context, snapshot) {
+                    final isOffline =
+                        snapshot.data?.contains(ConnectivityResult.none) ?? false;
+                    if (!isOffline) return const SizedBox.shrink();
+                    return Container(
+                      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFFF7ED),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: const Color(0xFFFED7AA)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.cloud_off,
+                              size: 16, color: Color(0xFFF59E0B)),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: FutureBuilder<int>(
+                              future: OfflinePhotoQueue.pendingCount(),
+                              builder: (ctx, snap) {
+                                final pending = snap.data ?? 0;
+                                return Text(
+                                  pending > 0
+                                      ? 'Modo Offline — $pending foto(s) pendientes de subir.'
+                                      : 'Modo Offline — Los cambios se sincronizarán al reconectarse.',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Color(0xFF92400E),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
                 ReportHeader(
                   companySettings: _companySettings!,
                   client: widget.client,
@@ -1122,9 +1508,31 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
                   onEndService: _handleEndService,
                   onResumeService: _handleResumeService,
                 ),
+                const SizedBox(height: 16),
+                _buildSearchBar(),
               ],
             ),
           ),
+          if (sliverSectionGroups.isEmpty && _searchQuery.isNotEmpty)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.all(40.0),
+                child: Center(
+                  child: Column(
+                    children: [
+                      Icon(Icons.search_off_rounded, size: 64, color: Colors.grey.shade300),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No se encontraron equipos\ncon "$_searchQuery"',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey.shade500, fontSize: 16),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          else
           ...sliverSectionGroups,
           SliverToBoxAdapter(
             child: Column(
@@ -1134,20 +1542,28 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
                 ReportSignatures(
                   providerController: _providerSigController,
                   clientController: _clientSigController,
-                  providerName:
-                      reportState.report.providerSignerName,
-                  clientName:
-                      reportState.report.clientSignerName,
-                  providerSignatureData:
-                      reportState.report.providerSignature,
-                  clientSignatureData:
-                      reportState.report.clientSignature,
-                  isEditable: _canSignReport(),
+                  providerName: reportState.report.providerSignerName,
+                  clientName: reportState.report.clientSignerName,
+                  providerSignatureData: reportState.report.providerSignature,
+                  clientSignatureData: reportState.report.clientSignature,
+                  isEditable: true,
                   onProviderNameChanged: (val) {
                     _notifier.updateSignatures(providerName: val);
                   },
                   onClientNameChanged: (val) {
                     _notifier.updateSignatures(clientName: val);
+                  },
+                  onClearProviderSignature: () {
+                    _providerSigController.clear();
+                    _notifier.updateSignatures(
+                      providerSignature: '',
+                    );
+                  },
+                  onClearClientSignature: () {
+                    _clientSigController.clear();
+                    _notifier.updateSignatures(
+                      clientSignature: '',
+                    );
                   },
                 ),
                 const SizedBox(height: 20),
@@ -1215,7 +1631,18 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
           ),
         ],
       ),
-      actions: [
+        actions: [
+        // ★ NUEVO: Botón "Llenar Todo OK" solo para coordinadores con admin override
+        if (_isUserCoordinator() && _adminOverride && _isEditable(reportState))
+          IconButton(
+            icon: const Icon(
+              Icons.done_all_rounded,
+              color: Color(0xFF10B981),
+              size: 22,
+            ),
+            onPressed: () => _confirmFillAllOk(),
+            tooltip: 'Llenar todo con OK',
+          ),
         if (_isUserCoordinator())
           IconButton(
             icon: Icon(
@@ -1235,6 +1662,54 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       ],
     );
   }
+
+  Widget _buildSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      child: TextField(
+        controller: _searchController,
+        style: const TextStyle(fontSize: 14, color: Color(0xFF334155)),
+        decoration: InputDecoration(
+          hintText: 'Buscar equipo por ID o Ubicación...',
+          hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 13),
+          prefixIcon: const Icon(Icons.search, color: Color(0xFF94A3B8)),
+          suffixIcon: _searchQuery.isNotEmpty
+              ? IconButton(
+                  icon: const Icon(Icons.clear, color: Color(0xFF94A3B8), size: 20),
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() => _searchQuery = '');
+                  },
+                )
+              : null,
+          filled: true,
+          fillColor: Colors.white,
+          contentPadding: const EdgeInsets.symmetric(vertical: 0),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.grey.shade200),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.grey.shade200),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFF3B82F6), width: 1.5),
+          ),
+        ),
+        onChanged: (val) {
+          // ★ Debounce para no saturar el hilo principal al escribir rápido
+          if (_searchDebounce?.isActive ?? false) _searchDebounce!.cancel();
+          _searchDebounce = Timer(const Duration(milliseconds: 250), () {
+            setState(() {
+              _searchQuery = val.trim().toLowerCase();
+            });
+          });
+        },
+      ),
+    );
+  } 
 
   Widget _buildStatusChip(ReportState state) {
     final isRunning = state.report.endTime == null;
@@ -1752,6 +2227,8 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   }
 
   Widget _buildPhotoThumbnail(String photoUrl, int index) {
+    final bool isLocal = photoUrl.startsWith('local://');
+
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
@@ -1768,44 +2245,103 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Image.network(
-              photoUrl,
-              fit: BoxFit.cover,
-              loadingBuilder: (context, child, loadingProgress) {
-                if (loadingProgress == null) return child;
-                return Container(
-                  color: const Color(0xFFF1F5F9),
-                  child: Center(
-                    child: CircularProgressIndicator(
-                      value: loadingProgress.expectedTotalBytes != null
-                          ? loadingProgress.cumulativeBytesLoaded /
-                              loadingProgress.expectedTotalBytes!
-                          : null,
-                      strokeWidth: 2,
-                      color: const Color(0xFF3B82F6),
+            // ★ Imagen local o remota
+            if (isLocal)
+              Builder(builder: (context) {
+                final thumbPath = OfflinePhotoQueue.getThumbnailPath(photoUrl);
+                final filePath =
+                    thumbPath ?? photoUrl.replaceFirst('local://', '');
+                return Image.file(
+                  File(filePath),
+                  fit: BoxFit.cover,
+                  cacheWidth: 200, // ★ Limita RAM del decoder
+                  errorBuilder: (_, __, ___) => Container(
+                    color: const Color(0xFFFEE2E2),
+                    child: const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.broken_image,
+                              color: Color(0xFFEF4444), size: 24),
+                          SizedBox(height: 4),
+                          Text('Error',
+                              style: TextStyle(
+                                  fontSize: 10, color: Color(0xFFEF4444))),
+                        ],
+                      ),
                     ),
                   ),
                 );
-              },
-              errorBuilder: (context, error, stackTrace) {
-                return Container(
-                  color: const Color(0xFFFEE2E2),
-                  child: const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.error_outline,
-                            color: Color(0xFFEF4444), size: 24),
-                        SizedBox(height: 4),
-                        Text('Error',
-                            style: TextStyle(
-                                fontSize: 10, color: Color(0xFFEF4444))),
-                      ],
+              })
+            else
+              Image.network(
+                photoUrl,
+                fit: BoxFit.cover,
+                cacheWidth: 200, // ★ Limita RAM del decoder
+                loadingBuilder: (context, child, loadingProgress) {
+                  if (loadingProgress == null) return child;
+                  return Container(
+                    color: const Color(0xFFF1F5F9),
+                    child: Center(
+                      child: CircularProgressIndicator(
+                        value: loadingProgress.expectedTotalBytes != null
+                            ? loadingProgress.cumulativeBytesLoaded /
+                                loadingProgress.expectedTotalBytes!
+                            : null,
+                        strokeWidth: 2,
+                        color: const Color(0xFF3B82F6),
+                      ),
                     ),
+                  );
+                },
+                errorBuilder: (context, error, stackTrace) {
+                  return Container(
+                    color: const Color(0xFFFEE2E2),
+                    child: const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.error_outline,
+                              color: Color(0xFFEF4444), size: 24),
+                          SizedBox(height: 4),
+                          Text('Error',
+                              style: TextStyle(
+                                  fontSize: 10, color: Color(0xFFEF4444))),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+
+            // ★ Badge "Local" para fotos offline
+            if (isLocal)
+              Positioned(
+                top: 6,
+                left: 6,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withOpacity(0.9),
+                    borderRadius: BorderRadius.circular(4),
                   ),
-                );
-              },
-            ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.cloud_off, size: 10, color: Colors.white),
+                      SizedBox(width: 3),
+                      Text('Local',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 8,
+                              fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                ),
+              ),
+
+            // Botón eliminar
             Positioned(
               top: 6,
               right: 6,
@@ -1824,6 +2360,8 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
                 ),
               ),
             ),
+
+            // Número
             Positioned(
               bottom: 6,
               left: 6,
@@ -1846,7 +2384,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       ),
     );
   }
-
+  
   void _showDeleteConfirmation(int photoIndex) {
     showDialog(
       context: context,
@@ -2028,7 +2566,12 @@ class _ObservationModalState extends State<_ObservationModal> {
                 IconButton(
                   icon: const Icon(Icons.close_rounded,
                       color: Color(0xFF94A3B8), size: 22),
-                  onPressed: widget.onClose,
+                  onPressed: () {
+                    FocusScope.of(context).unfocus();
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      widget.onClose();
+                    });
+                  },
                   style: IconButton.styleFrom(
                     backgroundColor: Colors.white,
                     shape: RoundedRectangleBorder(
@@ -2119,7 +2662,12 @@ class _ObservationModalState extends State<_ObservationModal> {
             children: [
               Expanded(
                 child: OutlinedButton(
-                  onPressed: widget.onClose,
+                  onPressed: () {
+                    FocusScope.of(context).unfocus();
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      widget.onClose();
+                    });
+                  },
                   style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     foregroundColor: const Color(0xFF64748B),
@@ -2148,7 +2696,16 @@ class _ObservationModalState extends State<_ObservationModal> {
                         borderRadius: BorderRadius.circular(10)),
                     elevation: 0,
                   ),
-                  onPressed: () => widget.onSave(_controller.text),
+                  onPressed: () {
+                    // ★ FIX: Capturar el texto ANTES de cualquier cambio de estado
+                    final text = _controller.text;
+                    // Cerrar el teclado primero
+                    FocusScope.of(context).unfocus();
+                    // Esperar a que el teclado se cierre para evitar conflictos de layout
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      widget.onSave(text);
+                    });
+                  },
                 ),
               ),
             ],

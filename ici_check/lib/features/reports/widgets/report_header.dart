@@ -21,6 +21,10 @@ class ReportHeader extends StatelessWidget {
   });
 
   String _getPeriodLabel() {
+    if (dateStr == 'CUMULATIVE') {
+      return 'Reporte Acumulativo (Todo el periodo)';
+    }
+    
     if (dateStr.contains('W')) {
       return 'Semana $dateStr';
     } else {

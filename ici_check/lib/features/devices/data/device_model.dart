@@ -16,6 +16,11 @@ enum Frequency {
   ANUAL,
 }
 
+enum ActivityInputType {
+  toggle,  // OK / NOK / NA / NR  (comportamiento actual)
+  value,   // Texto libre / número medido (RPM, voltaje, etc.)
+}
+
 // --- MODELO ACTIVIDAD (Sin cambios necesarios, funciona automático) ---
 class ActivityConfig {
   String id;
@@ -23,6 +28,7 @@ class ActivityConfig {
   ActivityType type;
   Frequency frequency;
   String expectedValue;
+  ActivityInputType inputType; // ★ NUEVO
 
   ActivityConfig({
     required this.id,
@@ -30,6 +36,7 @@ class ActivityConfig {
     required this.type,
     required this.frequency,
     this.expectedValue = '',
+    this.inputType = ActivityInputType.toggle,
   });
 
   Map<String, dynamic> toMap() {
@@ -40,6 +47,7 @@ class ActivityConfig {
       'type': type.toString().split('.').last,
       'frequency': frequency.toString().split('.').last,
       'expectedValue': expectedValue,
+      'inputType': inputType.toString().split('.').last, // ★ NUEVO
     };
   }
 
@@ -55,6 +63,9 @@ class ActivityConfig {
           // Si encuentra 'CUATRIMESTRAL' en la base de datos, lo mapea correctamente aquí
           orElse: () => Frequency.MENSUAL),
       expectedValue: map['expectedValue'] ?? '',
+      inputType: ActivityInputType.values.firstWhere(
+          (e) => e.toString().split('.').last == (map['inputType'] ?? 'toggle'),
+          orElse: () => ActivityInputType.toggle),
     );
   }
 }
@@ -65,6 +76,7 @@ class DeviceModel {
   String name;
   String description;
   String viewMode;
+  bool isCumulative;    
   List<ActivityConfig> activities;
 
   DeviceModel({
@@ -72,6 +84,7 @@ class DeviceModel {
     required this.name,
     required this.description,
     this.viewMode = 'table',
+    this.isCumulative = false,
     required this.activities,
   });
 
@@ -80,6 +93,7 @@ class DeviceModel {
       'name': name,
       'description': description,
       'viewMode': viewMode,
+      'isCumulative': isCumulative,
       'activities': activities.map((x) => x.toMap()).toList(),
     };
   }
@@ -90,6 +104,7 @@ class DeviceModel {
       name: map['name'] ?? '',
       description: map['description'] ?? '',
       viewMode: map['viewMode'] ?? 'table',
+      isCumulative: map['isCumulative'] ?? false,
       activities: List<ActivityConfig>.from(
         (map['activities'] ?? []).map((x) => ActivityConfig.fromMap(x)),
       ),

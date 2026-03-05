@@ -28,10 +28,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
   DeviceModel? _selectedDevice;
   bool _isEditing = false;
   bool _isLoading = false;
-  String _searchQuery = ''; // Nuevo: Para el buscador
+  String _searchQuery = '';
   final ScrollController _listScrollCtrl = ScrollController();
-  List<DeviceModel> _allDevices = [];          // ✅ Estado local de la lista
-  StreamSubscription? _devicesSubscription;    // ✅ Suscripción manual al stream
+  List<DeviceModel> _allDevices = [];
+  StreamSubscription? _devicesSubscription;
 
   // Paleta de Colores Profesional
   final Color _primaryDark = const Color(0xFF0F172A);
@@ -42,7 +42,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
   @override
   void initState() {
     super.initState();
-    // ✅ Suscribirse al stream solo una vez — el scroll nunca se reinicia
     _devicesSubscription = _repo.getDevicesStream().listen((devices) {
       if (mounted) {
         setState(() {
@@ -54,7 +53,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
   @override
   void dispose() {
-    _devicesSubscription?.cancel();   // ✅ AGREGA
+    _devicesSubscription?.cancel();
     _listScrollCtrl.dispose();
     super.dispose();
   }
@@ -74,29 +73,26 @@ class _DevicesScreenState extends State<DevicesScreen> {
         name: device.name,
         description: device.description,
         viewMode: device.viewMode,
+        isCumulative: device.isCumulative,  // ★ NUEVO: Preservar el valor
         activities: device.activities.map((a) => ActivityConfig(
-          id: a.id, name: a.name, type: a.type, frequency: a.frequency, expectedValue: a.expectedValue
+          id: a.id, name: a.name, type: a.type, frequency: a.frequency, 
+          expectedValue: a.expectedValue,
+          inputType: a.inputType, // ★ NUEVO
         )).toList(),
       );
       _isEditing = true;
     });
-    // ✅ Hacer scroll para que el dispositivo seleccionado sea visible
-    // Se ejecuta después del frame para que el ListView ya tenga los items renderizados
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_listScrollCtrl.hasClients) {
         final devices = _filterDevices(_allDevices);
         final idx = devices.indexWhere((d) => d.id == device.id);
         if (idx >= 0) {
-          // Cada card tiene ~88px de altura aprox (padding 16 + contenido ~60 + margin 12)
           const double itemHeight = 100.0;
           final double targetOffset = idx * itemHeight;
           final double viewportHeight = _listScrollCtrl.position.viewportDimension;
           final double maxScroll = _listScrollCtrl.position.maxScrollExtent;
-
-          // Centramos el item en la pantalla
           double scrollTo = targetOffset - (viewportHeight / 2) + (itemHeight / 2);
           scrollTo = scrollTo.clamp(0.0, maxScroll);
-
           _listScrollCtrl.animateTo(
             scrollTo,
             duration: const Duration(milliseconds: 300),
@@ -165,13 +161,12 @@ class _DevicesScreenState extends State<DevicesScreen> {
     val = val.toLowerCase().trim();
     if (val.contains('diari')) return Frequency.DIARIO;
     if (val.contains('seman')) return Frequency.SEMANAL;
-    if (val.contains('quincen')) return Frequency.QUINCENAL; // ← AGREGAR
+    if (val.contains('quincen')) return Frequency.QUINCENAL;
     if (val.contains('mensual')) return Frequency.MENSUAL;
-    if (val.contains('cuatrimest')) return Frequency.CUATRIMESTRAL; // ✅ PRIMERO
-    if (val.contains('trimest')) return Frequency.TRIMESTRAL;        // ✅ DESPUÉS
+    if (val.contains('cuatrimest')) return Frequency.CUATRIMESTRAL;
+    if (val.contains('trimest')) return Frequency.TRIMESTRAL;
     if (val.contains('semest')) return Frequency.SEMESTRAL;
     if (val.contains('anual')) return Frequency.ANUAL;
-    
     return Frequency.MENSUAL;
   }
 
@@ -187,7 +182,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
       if (result != null) {
         setState(() => _isLoading = true);
         
-        // 1. Lectura del archivo (Igual que antes)
         Uint8List? fileBytes = result.files.single.bytes;
         if (fileBytes == null && !kIsWeb && result.files.single.path != null) {
           fileBytes = await File(result.files.single.path!).readAsBytes();
@@ -198,7 +192,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
         var decoder = SpreadsheetDecoder.decodeBytes(fileBytes);
         Map<String, DeviceModel> importedMap = {};
 
-        // 2. Parseo del Excel a Objetos en Memoria (Igual que antes)
         for (var table in decoder.tables.keys) {
           var sheet = decoder.tables[table];
           if (sheet == null) continue;
@@ -214,12 +207,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
             String devName = getCell(0);
             if (devName.trim().isEmpty) continue;
 
-            // Normalizamos el nombre (trim) para evitar duplicados en el mapa local
             String devNameKey = devName.trim();
 
             if (!importedMap.containsKey(devNameKey)) {
               importedMap[devNameKey] = DeviceModel(
-                id: _uuid.v4(), // ID temporal, se corregirá abajo si ya existe en Firebase
+                id: _uuid.v4(),
                 name: devNameKey,
                 description: getCell(1),
                 viewMode: getCell(2).toLowerCase().contains('list') ? 'list' : 'table',
@@ -240,20 +232,14 @@ class _DevicesScreenState extends State<DevicesScreen> {
           }
         }
 
-        // --- AQUI EMPIEZA LA LÓGICA ANTI-DUPLICADOS ---
-
         final collection = FirebaseFirestore.instance.collection('devices');
         
-        // 3. Obtener todos los dispositivos actuales de Firebase
-        // Esto es necesario para saber qué IDs ya existen.
         QuerySnapshot existingSnapshot = await collection.get();
         
-        // 4. Crear un mapa de "Nombre Normalizado" -> "ID de Firebase"
         Map<String, String> existingDevicesMap = {};
         for (var doc in existingSnapshot.docs) {
           final data = doc.data() as Map<String, dynamic>;
           if (data['name'] != null) {
-            // Guardamos el nombre en minúsculas y sin espacios para comparar mejor
             existingDevicesMap[data['name'].toString().trim().toLowerCase()] = doc.id;
           }
         }
@@ -262,66 +248,62 @@ class _DevicesScreenState extends State<DevicesScreen> {
         int opCount = 0;
 
         for (var dev in importedMap.values) {
-        DocumentReference docRef;
-        
-        String excelNameKey = dev.name.trim().toLowerCase();
+          DocumentReference docRef;
+          
+          String excelNameKey = dev.name.trim().toLowerCase();
 
-        if (existingDevicesMap.containsKey(excelNameKey)) {
-          // SI EXISTE: Usar el ID viejo para ACTUALIZAR
-          String existingId = existingDevicesMap[excelNameKey]!;
-          docRef = collection.doc(existingId);
-          dev.id = existingId;
+          if (existingDevicesMap.containsKey(excelNameKey)) {
+            String existingId = existingDevicesMap[excelNameKey]!;
+            docRef = collection.doc(existingId);
+            dev.id = existingId;
 
-          // ✅ FIX: Recuperar las actividades existentes para preservar sus IDs
-          // Esto evita que el cronograma pierda su configuración de offsets
-          try {
-            final existingDoc = await collection.doc(existingId).get();
-            if (existingDoc.exists) {
-              final existingData = existingDoc.data();
-              final existingActivitiesList = existingData?['activities'] as List<dynamic>? ?? [];
-              
-              // Construir mapa: nombre normalizado → ID existente
-              final Map<String, String> existingActivityIds = {};
-              for (var actMap in existingActivitiesList) {
-                if (actMap is Map<String, dynamic>) {
-                  final actName = (actMap['name'] ?? '').toString().trim().toLowerCase();
-                  final actId = (actMap['id'] ?? '').toString();
-                  if (actName.isNotEmpty && actId.isNotEmpty) {
-                    existingActivityIds[actName] = actId;
+            // ★ NUEVO: Preservar isCumulative del documento existente
+            try {
+              final existingDoc = await collection.doc(existingId).get();
+              if (existingDoc.exists) {
+                final existingData = existingDoc.data();
+                
+                // Preservar isCumulative si ya estaba configurado
+                dev.isCumulative = existingData?['isCumulative'] ?? false;
+                
+                final existingActivitiesList = existingData?['activities'] as List<dynamic>? ?? [];
+                
+                final Map<String, String> existingActivityIds = {};
+                for (var actMap in existingActivitiesList) {
+                  if (actMap is Map<String, dynamic>) {
+                    final actName = (actMap['name'] ?? '').toString().trim().toLowerCase();
+                    final actId = (actMap['id'] ?? '').toString();
+                    if (actName.isNotEmpty && actId.isNotEmpty) {
+                      existingActivityIds[actName] = actId;
+                    }
+                  }
+                }
+
+                for (var activity in dev.activities) {
+                  final actNameKey = activity.name.trim().toLowerCase();
+                  if (existingActivityIds.containsKey(actNameKey)) {
+                    activity.id = existingActivityIds[actNameKey]!;
                   }
                 }
               }
-
-              // Reusar IDs existentes para actividades con el mismo nombre
-              for (var activity in dev.activities) {
-                final actNameKey = activity.name.trim().toLowerCase();
-                if (existingActivityIds.containsKey(actNameKey)) {
-                  // ✅ MISMO NOMBRE = MISMO ID → el cronograma no pierde los offsets
-                  activity.id = existingActivityIds[actNameKey]!;
-                }
-                // Si es nueva actividad (nombre nuevo), conserva el UUID generado
-              }
+            } catch (e) {
+              debugPrint("⚠️ Error recuperando actividades existentes para $existingId: $e");
             }
-          } catch (e) {
-            debugPrint("⚠️ Error recuperando actividades existentes para $existingId: $e");
-            // Si falla, continúa con los IDs nuevos (degradación elegante)
+
+          } else {
+            docRef = collection.doc();
+            dev.id = docRef.id; 
           }
 
-        } else {
-          // NO EXISTE: Crear documento nuevo con IDs nuevos (correcto)
-          docRef = collection.doc();
-          dev.id = docRef.id; 
-        }
+          batch.set(docRef, dev.toMap());
+          opCount++;
 
-        batch.set(docRef, dev.toMap());
-        opCount++;
-
-        if (opCount >= 400) {
-          await batch.commit();
-          batch = FirebaseFirestore.instance.batch();
-          opCount = 0;
+          if (opCount >= 400) {
+            await batch.commit();
+            batch = FirebaseFirestore.instance.batch();
+            opCount = 0;
+          }
         }
-      }
         if (opCount > 0) await batch.commit();
 
         if(mounted) _showSnack('Proceso completado. Equipos procesados: ${importedMap.length}.', Colors.green);
@@ -342,11 +324,20 @@ class _DevicesScreenState extends State<DevicesScreen> {
       if (excel.sheets.containsKey('Sheet1')) excel.rename('Sheet1', sheetName);
       
       Sheet sheet = excel[sheetName];
-      sheet.appendRow(["Dispositivo", "Descripción", "Vista Reporte", "Actividad", "Tipo", "Frecuencia", "Valor Referencia"].map((e) => TextCellValue(e)).toList());
+      sheet.appendRow(["Dispositivo", "Descripción", "Vista Reporte", "Actividad", "Tipo", "Frecuencia", "Valor Referencia", "Acumulativo"].map((e) => TextCellValue(e)).toList());
 
       for (var dev in devices) {
         if (dev.activities.isEmpty) {
-          sheet.appendRow([TextCellValue(dev.name), TextCellValue(dev.description), TextCellValue(dev.viewMode), TextCellValue(""), TextCellValue(""), TextCellValue(""), TextCellValue("")]);
+          sheet.appendRow([
+            TextCellValue(dev.name), 
+            TextCellValue(dev.description), 
+            TextCellValue(dev.viewMode), 
+            TextCellValue(""), 
+            TextCellValue(""), 
+            TextCellValue(""), 
+            TextCellValue(""),
+            TextCellValue(dev.isCumulative ? "SI" : "NO"),  // ★ NUEVO
+          ]);
         } else {
           for (var act in dev.activities) {
             sheet.appendRow([
@@ -357,6 +348,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
               TextCellValue(act.type.toString().split('.').last), 
               TextCellValue(act.frequency.toString().split('.').last), 
               TextCellValue(act.expectedValue),
+              TextCellValue(dev.isCumulative ? "SI" : "NO"),  // ★ NUEVO
             ]);
           }
         }
@@ -404,7 +396,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
     });
   }
 
-  // Filtrar dispositivos
   List<DeviceModel> _filterDevices(List<DeviceModel> allDevices) {
     if (_searchQuery.isEmpty) return allDevices;
     return allDevices.where((d) => 
@@ -415,7 +406,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // LOADING OVERLAY
     if (_isLoading) {
       return Scaffold(
         backgroundColor: Colors.white,
@@ -436,7 +426,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
       builder: (context, constraints) {
         bool isLargeScreen = constraints.maxWidth > 900;
 
-        // MODO MÓVIL EDITOR (Pantalla Completa)
         if (!isLargeScreen && _isEditing) {
           return PopScope(
             canPop: false,
@@ -460,17 +449,15 @@ class _DevicesScreenState extends State<DevicesScreen> {
           );
         }
 
-        // VISTA PRINCIPAL
         return Scaffold(
           backgroundColor: _bgLight,
           body: Row(
             children: [
-              // --- COLUMNA IZQUIERDA: LISTA ---
               Expanded(
                 flex: 4,
                 child: Column(
                   children: [
-                    _buildHeader(isLargeScreen), // Header con Buscador
+                    _buildHeader(isLargeScreen),
                     Expanded(
                       child: Builder(
                         builder: (context) {
@@ -517,7 +504,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 ),
               ),
               
-              // --- COLUMNA DERECHA: EDITOR (Desktop) ---
               if (_isEditing && isLargeScreen)
                 Expanded(
                   flex: 6,
@@ -530,7 +516,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
                     ),
                     child: Column(
                       children: [
-                        // Header del Editor
                         Container(
                           padding: const EdgeInsets.fromLTRB(24, 20, 20, 20),
                           decoration: BoxDecoration(border: Border(bottom: BorderSide(color: Colors.grey.shade100))),
@@ -564,7 +549,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
     );
   }
 
- // --- HEADER CON BUSCADOR RESPONSIVE (SOLUCIÓN AL OVERFLOW) ---
   Widget _buildHeader(bool isLargeScreen) {
     return Container(
       padding: const EdgeInsets.all(24),
@@ -575,11 +559,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Fila 1: Título + Botón Crear (ajustable)
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              // Título (flexible para evitar overflow)
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -604,7 +586,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 ),
               ),
               
-              // Botón Crear (solo Desktop)
               if (isLargeScreen) ...[
                 const SizedBox(width: 16),
                 ElevatedButton.icon(
@@ -625,9 +606,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
           
           const SizedBox(height: 16),
           
-          // Fila 2: Buscador + Botones Excel (Responsive)
           if (isLargeScreen)
-            // VERSIÓN DESKTOP: Todo en una fila
             Row(
               children: [
                 Expanded(
@@ -665,10 +644,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
               ],
             )
           else
-            // VERSIÓN MÓVIL: Apilado verticalmente
             Column(
               children: [
-                // Buscador (ancho completo)
                 TextField(
                   onChanged: (val) => setState(() => _searchQuery = val),
                   decoration: InputDecoration(
@@ -684,7 +661,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 
                 const SizedBox(height: 12),
                 
-                // Botones Excel (fila compacta)
                 Row(
                   children: [
                     Expanded(
@@ -718,11 +694,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
     );
   }
 
-  // --- FORMULARIO DE EDICIÓN CON KEYS PARA ACTUALIZACIÓN ---
+  // --- FORMULARIO DE EDICIÓN ---
   Widget _buildEditorForm({required bool isMobile}) {
     if (_selectedDevice == null) return const SizedBox();
 
-    // Guardamos el ID para usarlo en las keys
     final String devId = _selectedDevice!.id;
 
     return Column(
@@ -738,7 +713,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 const SizedBox(height: 16),
                 
                 _CustomTextField(
-                  key: ValueKey('name_$devId'), // <--- KEY ÚNICA
+                  key: ValueKey('name_$devId'),
                   label: 'Nombre del Equipo',
                   hint: 'Ej. Bomba Diesel Principal',
                   initialValue: _selectedDevice!.name,
@@ -755,7 +730,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                   decoration: BoxDecoration(color: _bgLight, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.grey.shade200)),
                   child: DropdownButtonHideUnderline(
                     child: DropdownButton<String>(
-                      key: ValueKey('view_$devId'), // <--- KEY ÚNICA
+                      key: ValueKey('view_$devId'),
                       value: _selectedDevice!.viewMode,
                       isExpanded: true,
                       icon: const Icon(Icons.keyboard_arrow_down, color: Colors.grey),
@@ -770,7 +745,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 
                 const SizedBox(height: 16),
                 _CustomTextField(
-                  key: ValueKey('desc_$devId'), // <--- KEY ÚNICA
+                  key: ValueKey('desc_$devId'),
                   label: 'Descripción / Notas',
                   hint: 'Especificaciones técnicas...',
                   maxLines: 3,
@@ -779,14 +754,96 @@ class _DevicesScreenState extends State<DevicesScreen> {
                   onChanged: (v) => _selectedDevice!.description = v,
                 ),
 
+                const SizedBox(height: 24),
+
+                // ═══════════════════════════════════════════════════════
+                // ★ NUEVO: SWITCH REPORTE ACUMULATIVO
+                // ═══════════════════════════════════════════════════════
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: _selectedDevice!.isCumulative 
+                        ? const Color(0xFFFFF7ED)   // amber-50 cuando activo
+                        : _bgLight,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: _selectedDevice!.isCumulative 
+                          ? const Color(0xFFFBBF24)  // amber-400 cuando activo
+                          : Colors.grey.shade200,
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      // Ícono
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: _selectedDevice!.isCumulative
+                              ? const Color(0xFFF59E0B).withOpacity(0.15)
+                              : Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Icon(
+                          Icons.inventory_2_outlined,
+                          size: 22,
+                          color: _selectedDevice!.isCumulative
+                              ? const Color(0xFFF59E0B)
+                              : const Color(0xFF94A3B8),
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      // Texto
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Reporte Acumulativo',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 14,
+                                color: Color(0xFF0F172A),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Para equipos que se revisan por partes durante '
+                              'toda la póliza (ej. 400 detectores revisados '
+                              'gradualmente en múltiples visitas)',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: _textSlate,
+                                height: 1.4,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      // Switch
+                      Switch(
+                        value: _selectedDevice!.isCumulative,
+                        activeColor: const Color(0xFFF59E0B),
+                        activeTrackColor: const Color(0xFFFDE68A),
+                        onChanged: (val) {
+                          setState(() {
+                            _selectedDevice!.isCumulative = val;
+                          });
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                // ═══════════════════════════════════════════════════════
+
                 const SizedBox(height: 32),
                 
                 // --- SECCIÓN 2: ACTIVIDADES ---
                 Wrap(
                   alignment: WrapAlignment.spaceBetween,
                   crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8.0, // Espacio horizontal entre elementos
-                  runSpacing: 4.0, // Espacio vertical si baja de línea
+                  spacing: 8.0,
+                  runSpacing: 4.0,
                   children: [
                     Text(
                       'CONFIGURACIÓN DE MANTENIMIENTO',
@@ -825,7 +882,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
                 ..._selectedDevice!.activities.asMap().entries.map((entry) {
                   int idx = entry.key;
                   ActivityConfig act = entry.value;
-                  // Usamos el ID de la actividad para la key, así no se pierden al reordenar o borrar
                   final String actKey = act.id; 
 
                   return Container(
@@ -839,7 +895,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
                     ),
                     child: Column(
                       children: [
-                        // Encabezado
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -851,7 +906,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                             const SizedBox(width: 12),
                             Expanded(
                               child: _CustomTextField(
-                                key: ValueKey('act_name_$actKey'), // <--- KEY ÚNICA POR ACTIVIDAD
+                                key: ValueKey('act_name_$actKey'),
                                 label: 'Nombre de la Actividad',
                                 hint: 'Ej. Revisión de niveles',
                                 initialValue: act.name,
@@ -872,12 +927,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
                         
                         const SizedBox(height: 16),
                         
-                        // Fila 1: Tipo y Frecuencia
                         Row(
                           children: [
                             Expanded(
                               child: _DropdownEnum<ActivityType>(
-                                key: ValueKey('act_type_$actKey'), // <--- KEY ÚNICA
+                                key: ValueKey('act_type_$actKey'),
                                 label: 'Tipo',
                                 value: act.type,
                                 values: ActivityType.values,
@@ -887,7 +941,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                             const SizedBox(width: 12),
                             Expanded(
                               child: _DropdownEnum<Frequency>(
-                                key: ValueKey('act_freq_$actKey'), // <--- KEY ÚNICA
+                                key: ValueKey('act_freq_$actKey'),
                                 label: 'Frecuencia',
                                 value: act.frequency,
                                 values: Frequency.values,
@@ -899,11 +953,55 @@ class _DevicesScreenState extends State<DevicesScreen> {
                         
                         const SizedBox(height: 12),
                         
-                        // Fila 2: Valor de Referencia
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Padding(
+                              padding: EdgeInsets.only(bottom: 8),
+                              child: Text(
+                                'Tipo de Respuesta',
+                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black87),
+                              ),
+                            ),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _InputTypeOption(
+                                    label: 'OK / NOK / N/A',
+                                    subtitle: 'Estado',
+                                    icon: Icons.toggle_on_outlined,
+                                    isSelected: act.inputType == ActivityInputType.toggle,
+                                    selectedColor: const Color(0xFF10B981),
+                                    onTap: () => setState(() => act.inputType = ActivityInputType.toggle),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: _InputTypeOption(
+                                    label: 'Valor Medido',
+                                    subtitle: 'RPM, PSI, °C...',
+                                    icon: Icons.speed_outlined,
+                                    isSelected: act.inputType == ActivityInputType.value,
+                                    selectedColor: const Color(0xFF3B82F6),
+                                    onTap: () => setState(() => act.inputType = ActivityInputType.value),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+
+                        const SizedBox(height: 12),
+
+                        // El hint cambia según el tipo seleccionado
                         _CustomTextField(
-                          key: ValueKey('act_val_$actKey'), // <--- KEY ÚNICA
-                          label: 'Valor de Referencia / Esperado',
-                          hint: 'Ej. > 50 PSI, Led encendido, Sin fugas...',
+                          key: ValueKey('act_val_$actKey'),
+                          label: act.inputType == ActivityInputType.value
+                              ? 'Valor Esperado (aparece como hint para el técnico)'
+                              : 'Valor de Referencia / Esperado',
+                          hint: act.inputType == ActivityInputType.value
+                              ? 'Ej. 3000 RPM, 220V, 80 PSI...'
+                              : 'Ej. Led encendido, Sin fugas, Nivel OK...',
                           initialValue: act.expectedValue,
                           onChanged: (v) => act.expectedValue = v,
                           noIcon: true,
@@ -953,7 +1051,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 }
 
-// --- WIDGET AUXILIAR ACTUALIZADO ---
+// --- WIDGETS AUXILIARES ---
 class _ActionButton extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -1008,6 +1106,80 @@ class _ActionButton extends StatelessWidget {
   }
 }
 
+
+class _InputTypeOption extends StatelessWidget {
+  final String label;
+  final String subtitle;
+  final IconData icon;
+  final bool isSelected;
+  final Color selectedColor;
+  final VoidCallback onTap;
+
+  const _InputTypeOption({
+    required this.label,
+    required this.subtitle,
+    required this.icon,
+    required this.isSelected,
+    required this.selectedColor,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: isSelected ? selectedColor.withOpacity(0.08) : const Color(0xFFF8FAFC),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: isSelected ? selectedColor : Colors.grey.shade200,
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              size: 18,
+              color: isSelected ? selectedColor : Colors.grey.shade400,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: isSelected ? selectedColor : Colors.grey.shade600,
+                    ),
+                  ),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: isSelected
+                          ? selectedColor.withOpacity(0.7)
+                          : Colors.grey.shade400,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (isSelected)
+              Icon(Icons.check_circle, size: 14, color: selectedColor),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DeviceProCard extends StatelessWidget {
   final DeviceModel device;
   final bool isActive;
@@ -1034,7 +1206,6 @@ class _DeviceProCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            // Indicador visual lateral
             Container(
               width: 4,
               height: 40,
@@ -1048,7 +1219,37 @@ class _DeviceProCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(device.name, style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.blueGrey.shade900)),
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          device.name, 
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.blueGrey.shade900),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      // ★ NUEVO: Badge "ACUMULATIVO" en la lista
+                      if (device.isCumulative) ...[
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF59E0B),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'ACUM.',
+                            style: TextStyle(
+                              fontSize: 8,
+                              fontWeight: FontWeight.w900,
+                              color: Colors.white,
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                   const SizedBox(height: 4),
                   Text(
                     device.description.isEmpty ? 'Sin descripción' : device.description, 
@@ -1056,7 +1257,6 @@ class _DeviceProCard extends StatelessWidget {
                     maxLines: 1, overflow: TextOverflow.ellipsis,
                   ),
                   const SizedBox(height: 8),
-                  // Chips de información
                   Row(
                     children: [
                       Container(
@@ -1095,9 +1295,7 @@ class _CustomTextField extends StatelessWidget {
   final Function(String) onChanged;
   final bool noIcon;
 
-  // CAMBIO AQUÍ: Agregamos super.key
   const _CustomTextField({
-    // ignore: unused_element_parameter
     super.key, 
     required this.label, 
     this.hint, 
@@ -1105,13 +1303,11 @@ class _CustomTextField extends StatelessWidget {
     this.maxLines = 1, 
     this.icon, 
     required this.onChanged, 
-    // ignore: unused_element_parameter
     this.noIcon = false
   });
 
   @override
   Widget build(BuildContext context) {
-    // ... (El resto del build se queda igual)
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1121,7 +1317,7 @@ class _CustomTextField extends StatelessWidget {
             child: Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.black87)),
           ),
         TextFormField(
-          initialValue: initialValue, // Ahora sí se actualizará gracias a la Key
+          initialValue: initialValue,
           maxLines: maxLines,
           onChanged: onChanged,
           style: const TextStyle(fontSize: 14),
@@ -1149,7 +1345,6 @@ class _DropdownEnum<T> extends StatelessWidget {
   final List<T> values;
   final Function(T?) onChanged;
 
-  // CAMBIO AQUÍ: Agregamos super.key
   const _DropdownEnum({
     super.key, 
     required this.label, 
@@ -1160,7 +1355,6 @@ class _DropdownEnum<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // ... (El resto del build se queda igual)
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

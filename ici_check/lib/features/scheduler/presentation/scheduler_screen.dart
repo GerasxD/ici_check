@@ -67,6 +67,9 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
 
   final ScrollController _verticalScrollCtrl = ScrollController();
 
+  ({int total, int completed})? _cumulativeProgress;
+  StreamSubscription? _cumulativeReportSub;
+
   // Paleta de colores
   final Color _primaryDark = const Color(0xFF1E293B);
   final Color _primaryBlue = const Color(0xFF3B82F6);
@@ -104,6 +107,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     _headerScrollCtrl.dispose();
     _bodyScrollCtrl.dispose();
     _reportsSub?.cancel(); // IMPORTANTE: Cancelar al salir
+    _cumulativeReportSub?.cancel();
     _verticalScrollCtrl.dispose();
     super.dispose();
   }
@@ -168,6 +172,54 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
               });
             }
           });
+
+          // ★ Suscribir al reporte acumulativo para progreso en tiempo real
+        _cumulativeReportSub?.cancel();
+        _cumulativeReportSub = FirebaseFirestore.instance
+            .collection('reports')
+            .where('policyId', isEqualTo: widget.policyId)
+            .where('dateStr', isEqualTo: 'CUMULATIVE')
+            .limit(1)
+            .snapshots()
+            .listen((snapshot) {
+          if (!mounted) return;
+
+          // ★ Calcular el TOTAL esperado directamente desde la póliza actual,
+          // no desde el reporte guardado (que puede estar desactualizado)
+          int expectedTotal = 0;
+          for (final devInstance in _policy.devices) {
+            final def = _deviceDefinitions.firstWhere(
+              (d) => d.id == devInstance.definitionId,
+              orElse: () => DeviceModel(id: 'err', name: '', description: '', activities: []),
+            );
+            if (def.id == 'err' || !def.isCumulative) continue;
+            // Total = actividades × unidades
+            expectedTotal += def.activities.length * devInstance.quantity;
+          }
+
+          if (snapshot.docs.isEmpty) {
+            setState(() => _cumulativeProgress = 
+                expectedTotal > 0 ? (total: expectedTotal, completed: 0) : null);
+            return;
+          }
+
+          final data = snapshot.docs.first.data();
+          final entries = data['entries'] as List<dynamic>? ?? [];
+
+          int completed = 0;
+          for (final entry in entries) {
+            final results = entry['results'] as Map<String, dynamic>? ?? {};
+            for (final value in results.values) {
+              if (value == 'OK' || value == 'NOK' || value == 'NA') {
+                completed++;
+              }
+            }
+          }
+
+          setState(() {
+            _cumulativeProgress = (total: expectedTotal, completed: completed);
+          });
+        });
 
       if (mounted) {
         setState(() {
@@ -370,10 +422,10 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         1, // Forzamos día 1 para generar la clave 'yyyy-MM' correctamente
       );
     } else {
-      // Para semanas sumamos 7 días exactos
-      columnDate = _policy.startDate.add(Duration(days: index * 7));
+      // ★ Semanas de lunes a domingo
+      final firstMonday = _getFirstMonday();
+      columnDate = firstMonday.add(Duration(days: index * 7));
     }
-
     // 2. Generar la clave (dateStr) para buscar en la lista _reports
     String dateKey = _viewMode == 'monthly'
         ? DateFormat('yyyy-MM').format(columnDate)
@@ -400,10 +452,9 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         _policy.startDate.day,
       );
     } else {
-      // Para semanas, sumar 7 días es seguro y exacto
-      columnDate = _policy.startDate.add(Duration(days: index * 7));
+      final firstMonday = _getFirstMonday();
+      columnDate = firstMonday.add(Duration(days: index * 7));
     }
-
     // 2. Normalización (Mantener tu lógica de bucket mensual)
     // Si estamos en modo mensual, forzamos al día 1 para generar el ID del reporte (YYYY-MM)
     // y que todos los eventos de ese mes caigan en el mismo reporte.
@@ -1010,7 +1061,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         1,
       );
     } else {
-      columnDate = _policy.startDate.add(Duration(days: index * 7));
+      final firstMonday = _getFirstMonday();
+      columnDate = firstMonday.add(Duration(days: index * 7));
     }
 
     String dateKey = _viewMode == 'monthly'
@@ -1054,7 +1106,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
           _policy.startDate.month + index, 1,
         );
       } else {
-        columnDate = _policy.startDate.add(Duration(days: index * 7));
+        final firstMonday = _getFirstMonday();
+        columnDate = firstMonday.add(Duration(days: index * 7));
       }
 
       final dateKey = _viewMode == 'monthly'
@@ -1171,7 +1224,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         _policy.startDate.day,
       );
     } else {
-      date = _policy.startDate.add(Duration(days: index * 7));
+      final firstMonday = _getFirstMonday();
+      date = firstMonday.add(Duration(days: index * 7));
     }
 
     String label = _viewMode == 'monthly'
@@ -1303,6 +1357,72 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     );
   }
 
+  Future<bool> _showExitConfirmationDialog() async {
+    return await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cambios sin guardar'),
+        content: const Text('Tienes cambios pendientes en el cronograma. ¿Estás seguro de que quieres salir sin guardar?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false), // No sale
+            child: const Text('QUEDARSE', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(context, true), // Sí sale
+            child: const Text('SALIR SIN GUARDAR', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    ) ?? false;
+  }
+
+  void _openCumulativeReport() {
+    Navigator.push(context, MaterialPageRoute(
+      builder: (_) => ServiceReportScreen(
+        policyId: widget.policyId,
+        dateStr: 'CUMULATIVE',          // ★ La clave especial
+        policy: _policy,
+        devices: _deviceDefinitions,
+        users: _allTechnicians,
+        client: _client!,
+      ),
+    ));
+  }
+
+  Future<void> _downloadCumulativePdf() async {
+    try {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const AlertDialog(
+          content: Row(children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 16),
+            Expanded(child: Text("Generando PDF acumulativo...\nEsto puede tardar unos segundos.")),
+          ]),
+        ),
+      );
+
+      final result = await _callGeneratePdfFunction(
+        policyId: widget.policyId,
+        dateStr: 'CUMULATIVE',
+      );
+
+      if (Navigator.canPop(context)) Navigator.pop(context);
+
+      if (result != null) {
+        await _downloadAndOpenPdf(result['downloadUrl'], result['fileName']);
+      }
+    } catch (e) {
+      if (Navigator.canPop(context)) Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
@@ -1312,13 +1432,24 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       );
     }
 
-    return Scaffold(
-      backgroundColor: _bgLight,
-      appBar: _buildAppBar(),
-      body: SingleChildScrollView(
-        // ✅ SCROLL VERTICAL PRINCIPAL - Todo se mueve junto
-        child: Column(
-          children: [_buildHeaderInfo(), _buildGrid(), _buildLegend()],
+    return PopScope(
+      canPop: !_hasChanges, // Si no hay cambios, permite salir normalmente
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return; // Si ya salió, no hacemos nada
+
+        // Si intentó salir pero había cambios (canPop era false)
+        final shouldPop = await _showExitConfirmationDialog();
+        if (shouldPop && context.mounted) {
+          Navigator.pop(context); // Salir manualmente si el usuario confirmó
+        }
+      },
+      child: Scaffold(
+        backgroundColor: _bgLight,
+        appBar: _buildAppBar(),
+        body: SingleChildScrollView(
+          child: Column(
+            children: [_buildHeaderInfo(), _buildGrid(), _buildLegend()],
+          ),
         ),
       ),
     );
@@ -1330,7 +1461,16 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       elevation: 0,
       leading: IconButton(
         icon: Icon(Icons.arrow_back_ios_new, color: _textPrimary, size: 20),
-        onPressed: () => Navigator.pop(context),
+        onPressed: () async {
+          if (_hasChanges) {
+            final shouldPop = await _showExitConfirmationDialog();
+            if (shouldPop && mounted) {
+              Navigator.pop(context);
+            }
+          } else {
+            Navigator.pop(context);
+          }
+        },
       ),
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1749,6 +1889,315 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     );
   }
 
+
+  Widget _buildCumulativeDeviceRow(
+  int dIdx,
+  PolicyDevice devInstance,
+  DeviceModel def,
+  int colCount,
+) {
+  final total = _cumulativeProgress?.total ?? 0;
+  final completed = _cumulativeProgress?.completed ?? 0;
+  final pct = total > 0 ? (completed / total * 100) : 0.0;
+
+  // Color según progreso
+  final Color progressColor;
+  if (pct == 0) {
+    progressColor = const Color(0xFF64748B);      // gris
+  } else if (pct < 50) {
+    progressColor = const Color(0xFFEF4444);       // rojo
+  } else if (pct < 80) {
+    progressColor = const Color(0xFFF59E0B);       // amber
+  } else if (pct < 100) {
+    progressColor = const Color(0xFF3B82F6);       // azul
+  } else {
+    progressColor = const Color(0xFF10B981);       // verde
+  }
+
+  // ── Header sticky ──
+  Widget stickyHeader = Container(
+    color: const Color(0xFFF1F5F9),
+    child: Table(
+      defaultColumnWidth: const FixedColumnWidth(100),
+      columnWidths: const {0: FixedColumnWidth(280)},
+      border: TableBorder(
+        top: BorderSide(color: _borderLight, width: 1),
+        bottom: BorderSide(color: _borderLight, width: 1),
+      ),
+      children: [
+        TableRow(children: [
+          TableCell(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF59E0B).withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Icon(Icons.inventory_2_outlined,
+                        size: 16, color: Color(0xFFF59E0B)),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                def.name,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 13,
+                                  color: _textPrimary,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                                maxLines: 1,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF59E0B),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: const Text(
+                                  'ACUMULATIVO',
+                                  style: TextStyle(
+                                    fontSize: 8,
+                                    fontWeight: FontWeight.w900,
+                                    color: Colors.white,
+                                    letterSpacing: 0.3,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: _borderLight),
+                          ),
+                          child: Text(
+                            "${devInstance.quantity} UNIDADES",
+                            style: TextStyle(
+                              fontSize: 9,
+                              fontWeight: FontWeight.bold,
+                              color: _textSecondary,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          ...List.generate(
+            colCount,
+            (_) => TableCell(child: Container(height: 50)),
+          ),
+        ]),
+      ],
+    ),
+  );
+
+  // ── Contenido: fila con progreso y botón ──
+  Widget content = Table(
+      defaultColumnWidth: const FixedColumnWidth(100),
+      columnWidths: const {0: FixedColumnWidth(280)},
+      children: [
+        TableRow(
+          decoration: const BoxDecoration(color: Colors.white),
+          children: [
+            // Columna izquierda: actividades + botón
+              TableCell(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ...def.activities.map((act) => Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                color: _getActivityColor(act.type),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                act.name,
+                                style: const TextStyle(
+                                    fontSize: 11, color: Color(0xFF64748B)),
+                                overflow: TextOverflow.ellipsis,
+                                maxLines: 1,
+                              ),
+                            ),
+                          ],
+                        ),
+                      )),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _openCumulativeReport,
+                          icon: const Icon(Icons.assignment_outlined, size: 16),
+                          label: const Text(
+                            'ABRIR REPORTE',
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF0F172A),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8)),
+                            elevation: 0,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _cumulativeProgress != null && _cumulativeProgress!.completed > 0
+                              ? _downloadCumulativePdf
+                              : null,
+                          icon: const Icon(Icons.picture_as_pdf_rounded, size: 16),
+                          label: const Text(
+                            'DESCARGAR PDF',
+                            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF10B981),
+                            foregroundColor: Colors.white,
+                            disabledBackgroundColor: const Color(0xFFE2E8F0),
+                            disabledForegroundColor: const Color(0xFF94A3B8),
+                            padding: const EdgeInsets.symmetric(vertical: 10),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8)),
+                            elevation: 0,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            // Primera columna de tiempo: progreso global
+              TableCell(
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Wrap(
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 6,
+                        children: [
+                          Text(
+                            '$completed / $total',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                              color: progressColor,
+                            ),
+                          ),
+                          Text(
+                            '${pct.toStringAsFixed(0)}%',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: progressColor.withOpacity(0.7),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          return Container(
+                            height: 8,
+                            width: constraints.maxWidth,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFE2E8F0),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: FractionallySizedBox(
+                                alignment: Alignment.centerLeft,
+                                widthFactor: (pct / 100).clamp(0.0, 1.0),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      colors: [
+                                        progressColor,
+                                        progressColor.withOpacity(0.7),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        completed == 0
+                            ? 'Sin iniciar'
+                            : completed == total
+                                ? '¡Completado!'
+                                : 'En progreso',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: _textSecondary,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            // Columnas restantes vacías
+            ...List.generate(
+              colCount > 1 ? colCount - 1 : 0,
+              (_) => const TableCell(child: SizedBox(height: 70)),
+            ),
+          ],
+        ),
+      ],
+    );
+
+    return StickyHeader(header: stickyHeader, content: content);
+  }
+
   // ✅ ESTE ES EL NUEVO MÉTODO QUE MANTIENE TU LÓGICA
   Widget _buildDeviceSection(int dIdx, int colCount) {
     final devInstance = _policy.devices[dIdx];
@@ -1757,6 +2206,10 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       orElse: () => DeviceModel(
           id: 'err', name: 'Unknown', description: '', activities: []),
     );
+
+     if (def.isCumulative) {
+      return _buildCumulativeDeviceRow(dIdx, devInstance, def, colCount);
+    }
 
     // 1. HEADER PEGAJOSO (El renglón gris del dispositivo)
     Widget stickyHeader = Container(
@@ -1928,86 +2381,63 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                     ),
                     
                     // ✅ AQUI MANTENEMOS TU BOTON DE CAMBIAR FRECUENCIA
-                    if (isWeeklyFreq)
-                      GestureDetector(
-                        onTap: _isEditing
-                            ? () => _showFrequencyChangeDialog(
-                                  devInstance,
-                                  activity,
-                                )
-                            : null,
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 200),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 5,
+                    // ✅ BOTÓN DE CAMBIAR FRECUENCIA — UNIVERSAL (semanal + mensual)
+                    GestureDetector(
+                      onTap: _isEditing
+                          ? () => isWeeklyFreq
+                              ? _showFrequencyChangeDialog(devInstance, activity)
+                              : _showMonthlyFrequencyChangeDialog(devInstance, activity)
+                          : null,
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: _getFrequencyBadgeColor(activity.frequency).withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _getFrequencyBadgeColor(activity.frequency).withOpacity(0.6),
+                            width: _isEditing ? 1.5 : 1,
                           ),
-                          decoration: BoxDecoration(
-                            color: activity.frequency == Frequency.QUINCENAL
-                                ? Colors.purple.shade50
-                                : Colors.blue.shade50,
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: activity.frequency == Frequency.QUINCENAL
-                                  ? Colors.purple.shade300
-                                  : Colors.blue.shade300,
-                              width: _isEditing ? 1.5 : 1,
+                          boxShadow: _isEditing
+                              ? [
+                                  BoxShadow(
+                                    color: _getFrequencyBadgeColor(activity.frequency).withOpacity(0.2),
+                                    blurRadius: 4,
+                                    offset: const Offset(0, 2),
+                                  ),
+                                ]
+                              : [],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _getFrequencyIcon(activity.frequency),
+                              size: 11,
+                              color: _getFrequencyBadgeColor(activity.frequency),
                             ),
-                            boxShadow: _isEditing
-                                ? [
-                                    BoxShadow(
-                                      color: activity.frequency ==
-                                              Frequency.QUINCENAL
-                                          ? Colors.purple.withOpacity(0.2)
-                                          : Colors.blue.withOpacity(0.2),
-                                      blurRadius: 4,
-                                      offset: const Offset(0, 2),
-                                    ),
-                                  ]
-                                : [],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                activity.frequency == Frequency.QUINCENAL
-                                    ? Icons.repeat
-                                    : Icons.repeat_one,
-                                size: 11,
-                                color: activity.frequency == Frequency.QUINCENAL
-                                    ? Colors.purple.shade600
-                                    : Colors.blue.shade600,
+                            const SizedBox(width: 4),
+                            Text(
+                              _getFrequencyLabel(activity.frequency),
+                              style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w900,
+                                color: _getFrequencyBadgeColor(activity.frequency),
+                                letterSpacing: 0.3,
                               ),
+                            ),
+                            if (_isEditing) ...[
                               const SizedBox(width: 4),
-                              Text(
-                                activity.frequency == Frequency.QUINCENAL
-                                    ? 'QUINCENAL'
-                                    : 'SEMANAL',
-                                style: TextStyle(
-                                  fontSize: 9,
-                                  fontWeight: FontWeight.w900,
-                                  color:
-                                      activity.frequency == Frequency.QUINCENAL
-                                          ? Colors.purple.shade600
-                                          : Colors.blue.shade600,
-                                  letterSpacing: 0.3,
-                                ),
+                              Icon(
+                                Icons.swap_horiz_rounded,
+                                size: 11,
+                                color: _getFrequencyBadgeColor(activity.frequency).withOpacity(0.7),
                               ),
-                              if (_isEditing) ...[
-                                const SizedBox(width: 4),
-                                Icon(
-                                  Icons.swap_horiz_rounded,
-                                  size: 11,
-                                  color:
-                                      activity.frequency == Frequency.QUINCENAL
-                                          ? Colors.purple.shade400
-                                          : Colors.blue.shade400,
-                                ),
-                              ],
                             ],
-                          ),
+                          ],
                         ),
                       ),
+                    ),
                   ],
                 ),
               ),
@@ -2068,6 +2498,58 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       ),
     );
   }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // HELPERS DE FRECUENCIA (Color, Icono, Label)
+  // ═══════════════════════════════════════════════════════════════════
+
+  Color _getFrequencyBadgeColor(Frequency freq) {
+    switch (freq) {
+      case Frequency.SEMANAL:       return Colors.blue.shade600;
+      case Frequency.QUINCENAL:     return Colors.purple.shade600;
+      case Frequency.MENSUAL:       return Colors.teal.shade600;
+      case Frequency.TRIMESTRAL:    return Colors.orange.shade700;
+      case Frequency.CUATRIMESTRAL: return Colors.deepOrange.shade600;
+      case Frequency.SEMESTRAL:     return Colors.indigo.shade600;
+      case Frequency.ANUAL:         return Colors.red.shade700;
+      default:                      return Colors.grey.shade600;
+    }
+  }
+
+  IconData _getFrequencyIcon(Frequency freq) {
+    switch (freq) {
+      case Frequency.SEMANAL:       return Icons.repeat_one;
+      case Frequency.QUINCENAL:     return Icons.repeat;
+      case Frequency.MENSUAL:       return Icons.calendar_view_month;
+      case Frequency.TRIMESTRAL:    return Icons.date_range;
+      case Frequency.CUATRIMESTRAL: return Icons.date_range;
+      case Frequency.SEMESTRAL:     return Icons.calendar_today;
+      case Frequency.ANUAL:         return Icons.event;
+      default:                      return Icons.schedule;
+    }
+  }
+
+  String _getFrequencyLabel(Frequency freq) {
+    switch (freq) {
+      case Frequency.SEMANAL:       return 'SEMANAL';
+      case Frequency.QUINCENAL:     return 'QUINCENAL';
+      case Frequency.MENSUAL:       return 'MENSUAL';
+      case Frequency.TRIMESTRAL:    return 'TRIMESTRAL';
+      case Frequency.CUATRIMESTRAL: return 'CUATRIMESTRAL';
+      case Frequency.SEMESTRAL:     return 'SEMESTRAL';
+      case Frequency.ANUAL:         return 'ANUAL';
+      default:                      return 'OTRO';
+    }
+  }
+
+  /// Retorna el lunes de la semana que contiene la fecha de inicio de la póliza.
+  DateTime _getFirstMonday() {
+    final start = _policy.startDate;
+    if (start.weekday == DateTime.monday) return start;
+    // Avanzar al siguiente lunes
+    final daysToAdd = (DateTime.monday - start.weekday + 7) % 7;
+    return DateTime(start.year, start.month, start.day + daysToAdd);
+  }
   
   // --- MODIFICADO: AHORA INCLUYE LOS BOTONES DE ACCIÓN ---
   Widget _buildTimeHeader(int index) {
@@ -2081,7 +2563,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         _policy.startDate.day,
       );
     } else {
-      date = _policy.startDate.add(Duration(days: index * 7));
+      final firstMonday = _getFirstMonday();
+      date = firstMonday.add(Duration(days: index * 7));
     }
 
     // 2. Buscar si hay Reporte Real
@@ -2121,18 +2604,16 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       // --- VISTA SEMANAL ---
       labelMain = DateFormat('MMMM', 'es').format(date).toUpperCase();
 
-      DateTime weekEnd = date.add(const Duration(days: 6));
-      String startDay = DateFormat('d').format(date);
-      String endDay = DateFormat('d').format(weekEnd);
+      DateTime weekEnd = date.add(const Duration(days: 6)); // Domingo
+      String startDay = DateFormat('d MMM', 'es').format(date);     // Lunes
+      String endDay = DateFormat('d MMM', 'es').format(weekEnd);     // Domingo
       int weekNumber = index + 1;
 
       if (showRealDate && serviceDate != null) {
-        // Solo si fue programado explícitamente (tiene técnicos) mostramos "Real"
         labelSub =
-            "S$weekNumber ($startDay-$endDay) \nReal: ${DateFormat('d MMM').format(serviceDate)}";
+            "S$weekNumber (Lun $startDay)\nReal: ${DateFormat('d MMM').format(serviceDate)}";
       } else {
-        // Si no, mostramos el rango estándar
-        labelSub = "S$weekNumber ($startDay-$endDay)";
+        labelSub = "S$weekNumber ($startDay - $endDay)";
       }
     }
 
@@ -2490,6 +2971,152 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                 fontWeight: FontWeight.bold,
                 fontSize: 12,
               ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // DIÁLOGO PARA CAMBIAR FRECUENCIAS MENSUALES (Mensual ↔ Trim ↔ Cuatrim ↔ Sem ↔ Anual)
+  // ═══════════════════════════════════════════════════════════════════
+  void _showMonthlyFrequencyChangeDialog(
+    PolicyDevice devInstance,
+    ActivityConfig activity,
+  ) {
+    final options = [
+      Frequency.MENSUAL,
+      Frequency.TRIMESTRAL,
+      Frequency.CUATRIMESTRAL,
+      Frequency.SEMESTRAL,
+      Frequency.ANUAL,
+    ];
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Colors.white,
+        surfaceTintColor: Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'CAMBIAR FRECUENCIA',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFF1E293B),
+                letterSpacing: 0.5,
+              ),
+            ),
+            Text(
+              activity.name,
+              style: const TextStyle(
+                fontSize: 11,
+                color: Color(0xFF64748B),
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: options.map((freq) {
+              final isCurrentFreq = activity.frequency == freq;
+              final label = _getFrequencyLabel(freq);
+              final color = _getFrequencyBadgeColor(freq);
+              final icon = _getFrequencyIcon(freq);
+
+              String sublabel;
+              switch (freq) {
+                case Frequency.MENSUAL:       sublabel = 'Cada mes'; break;
+                case Frequency.TRIMESTRAL:    sublabel = 'Cada 3 meses'; break;
+                case Frequency.CUATRIMESTRAL: sublabel = 'Cada 4 meses'; break;
+                case Frequency.SEMESTRAL:     sublabel = 'Cada 6 meses'; break;
+                case Frequency.ANUAL:         sublabel = 'Una vez al año'; break;
+                default:                      sublabel = '';
+              }
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: InkWell(
+                  onTap: isCurrentFreq
+                      ? null
+                      : () {
+                          Navigator.pop(ctx);
+                          _changeActivityFrequency(devInstance, activity, freq);
+                        },
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: isCurrentFreq ? color.withOpacity(0.08) : Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: isCurrentFreq ? color : Colors.grey.shade200,
+                        width: isCurrentFreq ? 2 : 1,
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(icon, color: isCurrentFreq ? color : const Color(0xFF64748B), size: 22),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Text(
+                                    label,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w800,
+                                      color: isCurrentFreq ? color : const Color(0xFF1E293B),
+                                    ),
+                                  ),
+                                  if (isCurrentFreq) ...[
+                                    const SizedBox(width: 8),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: color,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: const Text(
+                                        'ACTUAL',
+                                        style: TextStyle(fontSize: 8, color: Colors.white, fontWeight: FontWeight.w900),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                sublabel,
+                                style: const TextStyle(fontSize: 10, color: Color(0xFF94A3B8)),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text(
+              'CANCELAR',
+              style: TextStyle(color: Color(0xFF64748B), fontWeight: FontWeight.bold, fontSize: 12),
             ),
           ),
         ],

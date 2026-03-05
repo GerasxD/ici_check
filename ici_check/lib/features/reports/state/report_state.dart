@@ -27,29 +27,25 @@ class ReportStats {
     for (final entry in entries) {
       for (final status in entry.results.values) {
         switch (status) {
-          case 'OK':
-            ok++;
-            break;
-          case 'NOK':
-            nok++;
-            break;
-          case 'NA':
-            na++;
-            break;
-          case 'NR':
-            nr++;
-            break;
+          case 'OK': ok++; break;
+          case 'NOK': nok++; break;
+          case 'NA': na++; break;
+          case 'NR': nr++; break;
+          case null: pending++; break;
           default:
-            pending++;
+            // ★ Cualquier otro string no vacío = valor medido = cuenta como OK
+            // ignore: unnecessary_null_comparison
+            if (status != null && status.isNotEmpty) {
+              ok++;
+            } else {
+              pending++;
+            }
             break;
         }
       }
     }
     return ReportStats(
-      ok: ok,
-      nok: nok,
-      na: na,
-      nr: nr,
+      ok: ok, nok: nok, na: na, nr: nr,
       total: ok + nok + na + nr + pending,
       pending: pending,
     );
@@ -165,14 +161,13 @@ class ReportState {
     );
   }
 
-  /// Copia BARATA: solo cambia el report, NO recalcula stats.
   ReportState copyWithReportOnly(ServiceReportModel newReport) {
     return ReportState(
       report: newReport,
-      stats: stats,
-      isFullyComplete: isFullyComplete,
-      instanceIdToGlobalIndex: instanceIdToGlobalIndex,
-      groupedEntriesMap: groupedEntriesMap,
+      stats: stats, // sin cambio de estructura → no recalcular
+      isFullyComplete: _computeIsComplete(newReport.entries), // SIEMPRE recalcular
+      instanceIdToGlobalIndex: instanceIdToGlobalIndex, // estructura igual → reutilizar
+      groupedEntriesMap: groupedEntriesMap, // estructura igual → reutilizar
       frequencies: frequencies,
     );
   }

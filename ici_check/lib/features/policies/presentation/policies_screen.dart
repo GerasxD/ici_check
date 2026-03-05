@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:ici_check/features/policies/presentation/new_policy_screen.dart';
+import 'package:ici_check/features/policies/presentation/policy_files_screen.dart';
 import 'package:ici_check/features/scheduler/presentation/scheduler_screen.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:intl/intl.dart';
@@ -361,36 +362,67 @@ class _PoliciesScreenState extends State<PoliciesScreen> {
                               ),
                               const SizedBox(height: 16),
                               const Divider(),
-                              SizedBox(
-                                width: double.infinity,
-                                child: TextButton.icon(
-                                  onPressed: () {
-                                    Navigator.push(
-                                      context, 
-                                      MaterialPageRoute(
-                                        builder: (context) => SchedulerScreen(policyId: policy.id)
-                                      )
-                                    );
-                                  },
-                                  icon: const Icon(
-                                  Icons.calendar_month_outlined,
-                                  size: 18,
-                                  ),
-                                  label: const Text(
-                                    'Ver Cronograma de Servicios',
-                                  ),
-                                  style: TextButton.styleFrom(
-                                    foregroundColor: _primaryDark,
-                                    padding: const EdgeInsets.symmetric(
-                                      vertical: 16,
+                              Row(
+                                children: [
+                                  // Botón Cronograma
+                                  Expanded(
+                                    child: TextButton.icon(
+                                      onPressed: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (context) =>
+                                                SchedulerScreen(policyId: policy.id),
+                                          ),
+                                        );
+                                      },
+                                      icon: const Icon(
+                                        Icons.calendar_month_outlined,
+                                        size: 18,
+                                      ),
+                                      label: const Text('Cronograma'),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: _primaryDark,
+                                        padding: const EdgeInsets.symmetric(vertical: 16),
+                                        backgroundColor: Colors.grey.shade50,
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                      ),
                                     ),
-                                    backgroundColor: Colors.grey.shade50,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  // ★ NUEVO: Botón Archivos
+                                  Expanded(
+                                    child: TextButton.icon(
+                                      onPressed: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (context) => PolicyFilesScreen(
+                                              policyId: policy.id,
+                                              clientName: clientName,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                      icon: const Icon(
+                                        Icons.folder_outlined,
+                                        size: 18,
+                                      ),
+                                      label: const Text('Archivos'),
+                                      style: TextButton.styleFrom(
+                                        foregroundColor: _primaryDark,
+                                        padding: const EdgeInsets.symmetric(vertical: 16),
+                                        backgroundColor: Colors.grey.shade50,
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                      ),
                                     ),
                                   ),
-                                ),
-                              )
+                                ],
+                              ),
                             ],
                           ),
                         );
@@ -559,12 +591,49 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
   }
 
   void _removeDevice(int index) {
-    setState(() {
-      final instanceId = _devices[index].instanceId;
-      _qtyControllers[instanceId]?.dispose();
-      _qtyControllers.remove(instanceId);
-      _devices.removeAt(index);
-    });
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 24),
+            SizedBox(width: 10),
+            Text('¿Eliminar equipo?', style: TextStyle(fontSize: 17)),
+          ],
+        ),
+        content: Text(
+          'Se eliminará "${widget.deviceDefinitions.firstWhere(
+            (d) => d.id == _devices[index].definitionId,
+            orElse: () => DeviceModel(id: '', name: 'este equipo', description: '', activities: []),
+          ).name}" de la póliza.',
+          style: const TextStyle(fontSize: 14),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              setState(() {
+                final instanceId = _devices[index].instanceId;
+                _qtyControllers[instanceId]?.dispose();
+                _qtyControllers.remove(instanceId);
+                _devices.removeAt(index);
+              });
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red.shade600,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            child: const Text('Eliminar'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _updateQuantity(int index, int delta) {
@@ -576,6 +645,15 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
         final ctrl = _qtyControllers[_devices[index].instanceId];
         if (ctrl != null) ctrl.text = newQ.toString();
       }
+    });
+  }
+
+  void _moveDevice(int index, int direction) {
+    final newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= _devices.length) return;
+    setState(() {
+      final device = _devices.removeAt(index);
+      _devices.insert(newIndex, device);
     });
   }
 
@@ -950,7 +1028,38 @@ class _PolicyEditorDialogState extends State<_PolicyEditorDialog> {
                                       ],
                                     ),
                                   ),
-                                  const SizedBox(width: 8),
+                                  const SizedBox(width: 4),
+                                  // Flechas de reordenamiento
+                                  Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      InkWell(
+                                        onTap: index > 0 ? () => _moveDevice(index, -1) : null,
+                                        borderRadius: BorderRadius.circular(4),
+                                        child: Padding(
+                                          padding: const EdgeInsets.all(2),
+                                          child: Icon(
+                                            Icons.keyboard_arrow_up,
+                                            size: 18,
+                                            color: index > 0 ? Colors.grey.shade600 : Colors.grey.shade300,
+                                          ),
+                                        ),
+                                      ),
+                                      InkWell(
+                                        onTap: index < _devices.length - 1 ? () => _moveDevice(index, 1) : null,
+                                        borderRadius: BorderRadius.circular(4),
+                                        child: Padding(
+                                          padding: const EdgeInsets.all(2),
+                                          child: Icon(
+                                            Icons.keyboard_arrow_down,
+                                            size: 18,
+                                            color: index < _devices.length - 1 ? Colors.grey.shade600 : Colors.grey.shade300,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(width: 4),
                                   IconButton(
                                     onPressed: () => _removeDevice(index),
                                     icon: const Icon(Icons.close, color: Colors.red, size: 18),
