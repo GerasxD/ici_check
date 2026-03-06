@@ -306,6 +306,7 @@ interface ListActivityCell {
   activity: ActivityConfig;
   actData: ActivityData | undefined;
   isFirstActivityOfEntry: boolean;
+  activityNumber: number;
 }
 
 function calcListCellHeight(
@@ -402,8 +403,8 @@ async function buildPdf(p: {
         const startY = MARGIN;
         const HEADER_HEIGHT = 46;
 
-        const LOGO_W = 40;
-        const LOGO_H = 20;
+        const LOGO_W = 70;
+        const LOGO_H = 40;
         const LOGO_PAD = 4;
 
         // ── Calcular ancho de columna central según el contenido más ancho ──
@@ -728,7 +729,19 @@ async function buildPdf(p: {
             const activityColWidth = activityGroup.length > 8 ? 25.0 : 38.0;
             const idColWidth = 50;
             const locationColWidth = W - idColWidth - (activityGroup.length * activityColWidth);
-            const TABLE_HEADER_HEIGHT = 20;
+            // ★ Calcular altura dinámica del header según el texto más largo
+            const FREQ_LINE_HEIGHT = 8; // espacio para la frecuencia
+            const HEADER_PADDING = 4;   // padding arriba y abajo
+
+            // Medir la altura que necesita cada nombre de actividad
+            let maxNameHeight = 10; // mínimo
+            for (const act of activityGroup) {
+              doc.fontSize(4.5).font("Helvetica-Bold");
+              const nameH = doc.heightOfString(act.name, { width: activityColWidth - 4 });
+              if (nameH > maxNameHeight) maxNameHeight = nameH;
+            }
+
+            const TABLE_HEADER_HEIGHT = HEADER_PADDING + Math.ceil(maxNameHeight) + FREQ_LINE_HEIGHT + HEADER_PADDING;
 
             if (activityGroups.length > 1) {
               Y = addPageIfNeeded(doc, Y, 12);
@@ -743,23 +756,35 @@ async function buildPdf(p: {
               doc.rect(MARGIN, currentY, W, TABLE_HEADER_HEIGHT).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.black);
               let cx = MARGIN;
 
+              // ID y UBICACIÓN centrados verticalmente
+              const labelY = currentY + TABLE_HEADER_HEIGHT / 2 - 3;
               doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-                .text("ID", cx + 2, currentY + 8, { width: idColWidth - 4, align: "center" });
+                .text("ID", cx + 2, labelY, { width: idColWidth - 4, align: "center" });
               doc.moveTo(cx + idColWidth, currentY).lineTo(cx + idColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
               cx += idColWidth;
 
-              doc.text("UBICACIÓN", cx + 2, currentY + 8, { width: locationColWidth - 4 });
+              doc.text("UBICACIÓN", cx + 2, labelY, { width: locationColWidth - 4 });
               doc.moveTo(cx + locationColWidth, currentY).lineTo(cx + locationColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
               cx += locationColWidth;
 
               for (const act of activityGroup) {
-                doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-                  .text(act.name, cx + 2, currentY + 2, { width: activityColWidth - 4, height: 12, align: "center", ellipsis: true });
+                // Nombre completo — sin límite de height, usa todo el espacio disponible
+                const nameAreaHeight = TABLE_HEADER_HEIGHT - FREQ_LINE_HEIGHT - HEADER_PADDING * 2;
+                doc.fontSize(4.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+                  .text(act.name, cx + 2, currentY + HEADER_PADDING, {
+                    width: activityColWidth - 4,
+                    height: nameAreaHeight,
+                    align: "center",
+                  });
 
-                doc.rect(cx + 2, currentY + 14, activityColWidth - 4, 5).stroke(PDF_COLORS.grey400);
-
-                doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.black)
-                  .text(act.frequency.split(".").pop()!.substring(0, 1), cx + 2, currentY + 15, { width: activityColWidth - 4, align: "center" });
+                // Frecuencia completa debajo del nombre
+                const freqFull = act.frequency.split(".").pop() || act.frequency;
+                doc.fontSize(3.5).font("Helvetica").fillColor(PDF_COLORS.grey600)
+                  .text(freqFull, cx + 2, currentY + TABLE_HEADER_HEIGHT - FREQ_LINE_HEIGHT - HEADER_PADDING + 2, {
+                    width: activityColWidth - 4,
+                    align: "center",
+                    ellipsis: true,
+                  });
 
                 doc.moveTo(cx + activityColWidth, currentY).lineTo(cx + activityColWidth, currentY + TABLE_HEADER_HEIGHT).stroke(PDF_COLORS.black);
                 cx += activityColWidth;
@@ -882,6 +907,7 @@ async function buildPdf(p: {
               activity,
               actData: entry.activityData[activity.id],
               isFirstActivityOfEntry: actIdx === 0,
+              activityNumber: actIdx + 1,
             }));
 
             // ── Emparejar en filas de 2 ──
@@ -998,7 +1024,7 @@ async function buildPdf(p: {
         doc.rect(MARGIN, Y, W, 10).fill(PDF_COLORS.grey800);
         doc.rect(MARGIN, Y, W, 10).stroke(PDF_COLORS.black);
         doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.white)
-          .text("HALLAZGOS GENERALES", MARGIN + 5, Y + 2);
+          .text("Hallazgos / Mejoras / Comentarios generales", MARGIN + 5, Y + 2);
         Y += 10;
 
         for (const e of entriesWithObs) {
@@ -1132,9 +1158,9 @@ function drawListCell(
   const freqW = 30;
   const statusZoneX = innerX + nameW + freqW + 4;
 
-  // Nombre de actividad
+  // Nombre de actividad con número
   doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-    .text(cell.activity.name, innerX, cursorY, { width: nameW, ellipsis: true });
+    .text(`${cell.activityNumber}. ${cell.activity.name}`, innerX, cursorY, { width: nameW, ellipsis: true });
 
   // Frecuencia
   const freqText = cell.activity.frequency.split(".").pop() || "";
