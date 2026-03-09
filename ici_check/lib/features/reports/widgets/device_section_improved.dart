@@ -774,7 +774,9 @@ class DeviceSectionListCard extends ConsumerWidget {
             const Divider(height: 1, color: Color(0xFFF1F5F9)),
             const SizedBox(height: 8),
           ],
-          ...entryActivities.map((act) {
+          ...entryActivities.asMap().entries.map((mapEntry) {
+            final actIndex = mapEntry.key + 1; // ← número 1, 2, 3...
+            final act = mapEntry.value;
             final status = entry.results[act.id];
             final hasPhotos =
                 (entry.activityData[act.id]?.photoUrls.length ?? 0) > 0;
@@ -786,6 +788,18 @@ class DeviceSectionListCard extends ConsumerWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
+                  // ★ NÚMERO DE ACTIVIDAD
+                  SizedBox(
+                    width: 22,
+                    child: Text(
+                      '$actIndex.',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF94A3B8),
+                      ),
+                    ),
+                  ),
                   Expanded(
                     child: Text(
                       act.name,

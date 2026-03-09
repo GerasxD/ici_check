@@ -5,13 +5,19 @@ class PolicyDevice {
   String definitionId;
   int quantity;
   Map<String, int> scheduleOffsets;
+  Map<String, String> frequencyOverrides; // ★ NUEVO: activityId → frecuencia por póliza
+  List<String> excludedActivities;
 
   PolicyDevice({
     required this.instanceId,
     required this.definitionId,
     required this.quantity,
     Map<String, int>? scheduleOffsets,
-  }) : scheduleOffsets = scheduleOffsets ?? {};
+    Map<String, String>? frequencyOverrides,
+    List<String>? excludedActivities, 
+  }) : scheduleOffsets = scheduleOffsets ?? {},
+       frequencyOverrides = frequencyOverrides ?? {},
+       excludedActivities = excludedActivities ?? [];
 
   Map<String, dynamic> toMap() => {
     'instanceId': instanceId,
@@ -21,6 +27,8 @@ class PolicyDevice {
     'scheduleOffsets': Map<String, dynamic>.from(
       scheduleOffsets.map((k, v) => MapEntry(k, v)),
     ),
+    'frequencyOverrides': Map<String, dynamic>.from(frequencyOverrides),
+    'excludedActivities': List<String>.from(excludedActivities),  
   };
 
   factory PolicyDevice.fromMap(Map<String, dynamic> map) {
@@ -31,6 +39,12 @@ class PolicyDevice {
       scheduleOffsets: Map<String, int>.from(
         (map['scheduleOffsets'] as Map<String, dynamic>? ?? {})
             .map((k, v) => MapEntry(k, (v as num).toInt())),
+      ),
+      frequencyOverrides: Map<String, String>.from(
+        map['frequencyOverrides'] as Map<String, dynamic>? ?? {},
+      ),
+       excludedActivities: List<String>.from(             
+        map['excludedActivities'] ?? [],
       ),
     );
   }

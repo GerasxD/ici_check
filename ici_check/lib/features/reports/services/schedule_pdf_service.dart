@@ -434,12 +434,15 @@ class SchedulePdfService {
           }
 
           final visibleActivities = def.activities.where((act) {
+            // ★ Filtrar actividades excluidas
+            if (devInstance.excludedActivities.contains(act.id)) return false;
+            
             bool isWeeklyFreq = act.frequency == Frequency.SEMANAL || 
                                 act.frequency == Frequency.QUINCENAL;
             if (viewMode == 'monthly') return !isWeeklyFreq;
-            return isWeeklyFreq; // vista semanal muestra SEMANAL y QUINCENAL
+            return isWeeklyFreq;
           }).toList();
-
+          
           if (visibleActivities.isEmpty && viewMode == 'weekly') return <pw.TableRow>[];
 
           // Device Header Row

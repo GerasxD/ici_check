@@ -340,7 +340,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       final activity = def.activities.firstWhere((a) => a.id == activityId);
 
       // Ahora freqMonths es double (ej: 0.25 para semanal)
-      double freqMonths = _getFrequencyMonths(activity.frequency);
+      Frequency effectiveFreq = _getEffectiveFrequency(devInstance, activity);
+      double freqMonths = _getFrequencyMonths(effectiveFreq);
 
       // Si es 0 (ej: diario), retornamos false para evitar errores
       if (freqMonths == 0) return false;
@@ -380,7 +381,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       );
       final activity = def.activities.firstWhere((a) => a.id == activityId);
 
-      double freqMonths = _getFrequencyMonths(activity.frequency);
+      Frequency effectiveFreq = _getEffectiveFrequency(dev, activity);
+      double freqMonths = _getFrequencyMonths(effectiveFreq);
 
       if (freqMonths == 0) return;
 
@@ -958,8 +960,9 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
               bool isDue = false;
 
               if (isWeekly) {
-                if (act.frequency == Frequency.SEMANAL || act.frequency == Frequency.QUINCENAL) {
-                  double freqMonths = _getFrequencyMonths(act.frequency);
+                Frequency effFreq = _getEffectiveFrequency(devInstance, act);
+                if (effFreq == Frequency.SEMANAL || effFreq == Frequency.QUINCENAL) {
+                  double freqMonths = _getFrequencyMonths(effFreq);
                   int offset = devInstance.scheduleOffsets[act.id] ?? 0;
                   double adjustedTime = (timeIndex / 4.0) - offset.toDouble();
                   const double epsilon = 0.05;
@@ -2034,29 +2037,67 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      ...def.activities.map((act) => Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 6,
-                              height: 6,
-                              decoration: BoxDecoration(
-                                color: _getActivityColor(act.type),
-                                shape: BoxShape.circle,
+                      ...def.activities
+                        .where((act) => !devInstance.excludedActivities.contains(act.id))
+                        .map((act) => GestureDetector(
+                        onLongPress: _isEditing
+                            ? () => _showExcludeActivityDialog(devInstance, act, def)
+                            : null,
+                        child: Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  color: _getActivityColor(act.type),
+                                  shape: BoxShape.circle,
+                                ),
                               ),
-                            ),
-                            const SizedBox(width: 6),
-                            Expanded(
-                              child: Text(
-                                act.name,
-                                style: const TextStyle(
-                                    fontSize: 11, color: Color(0xFF64748B)),
-                                overflow: TextOverflow.ellipsis,
-                                maxLines: 1,
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      act.name,
+                                      style: const TextStyle(
+                                          fontSize: 11, color: Color(0xFF64748B)),
+                                      overflow: TextOverflow.ellipsis,
+                                      maxLines: 1,
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Container(
+                                          width: 5,
+                                          height: 5,
+                                          decoration: BoxDecoration(
+                                            color: _getActivityColor(act.type),
+                                            shape: BoxShape.circle,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          act.type.toString().split('.').last.substring(0, 1).toUpperCase() +
+                                              act.type.toString().split('.').last.substring(1).toLowerCase(),
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            color: _textSecondary,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
-                          ],
+                              if (_isEditing)
+                                Icon(Icons.more_horiz, size: 14, color: Colors.red.shade200),
+                            ],
+                          ),
                         ),
                       )),
                       SizedBox(
@@ -2304,8 +2345,10 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     List<TableRow> activityRows = [];
 
     for (var activity in def.activities) {
-      bool isWeeklyFreq = activity.frequency == Frequency.SEMANAL ||
-          activity.frequency == Frequency.QUINCENAL;
+      if (devInstance.excludedActivities.contains(activity.id)) continue;
+      Frequency effectiveFreq = _getEffectiveFrequency(devInstance, activity);
+      bool isWeeklyFreq = effectiveFreq == Frequency.SEMANAL ||
+          effectiveFreq == Frequency.QUINCENAL; 
       
       // Filtros de vista
       if (_viewMode == 'monthly' && isWeeklyFreq) continue;
@@ -2320,125 +2363,139 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
           children: [
             // --- CELDA DE NOMBRE DE ACTIVIDAD (AQUI ESTA TU LOGICA DE FRECUENCIA) ---
             TableCell(
-              child: Container(
-                padding: const EdgeInsets.only(
-                  left: 48,
-                  top: 8,
-                  bottom: 8,
-                  right: 12,
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            activity.name,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: _textPrimary,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Container(
-                                width: 6,
-                                height: 6,
-                                decoration: BoxDecoration(
-                                  color: _getActivityColor(activity.type),
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                activity.type
-                                        .toString()
-                                        .split('.')
-                                        .last
-                                        .substring(0, 1)
-                                        .toUpperCase() +
-                                    activity.type
-                                        .toString()
-                                        .split('.')
-                                        .last
-                                        .substring(1)
-                                        .toLowerCase(),
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: _textSecondary,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    
-                    // ✅ AQUI MANTENEMOS TU BOTON DE CAMBIAR FRECUENCIA
-                    // ✅ BOTÓN DE CAMBIAR FRECUENCIA — UNIVERSAL (semanal + mensual)
-                    GestureDetector(
-                      onTap: _isEditing
-                          ? () => isWeeklyFreq
-                              ? _showFrequencyChangeDialog(devInstance, activity)
-                              : _showMonthlyFrequencyChangeDialog(devInstance, activity)
-                          : null,
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: _getFrequencyBadgeColor(activity.frequency).withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(
-                            color: _getFrequencyBadgeColor(activity.frequency).withOpacity(0.6),
-                            width: _isEditing ? 1.5 : 1,
-                          ),
-                          boxShadow: _isEditing
-                              ? [
-                                  BoxShadow(
-                                    color: _getFrequencyBadgeColor(activity.frequency).withOpacity(0.2),
-                                    blurRadius: 4,
-                                    offset: const Offset(0, 2),
-                                  ),
-                                ]
-                              : [],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
+                child: GestureDetector(
+                onLongPress: _isEditing
+                    ? () => _showExcludeActivityDialog(devInstance, activity, def)
+                    : null,
+                child: Container(
+                  padding: const EdgeInsets.only(
+                    left: 48,
+                    top: 8,
+                    bottom: 8,
+                    right: 12,
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(
-                              _getFrequencyIcon(activity.frequency),
-                              size: 11,
-                              color: _getFrequencyBadgeColor(activity.frequency),
-                            ),
-                            const SizedBox(width: 4),
                             Text(
-                              _getFrequencyLabel(activity.frequency),
+                              activity.name,
                               style: TextStyle(
-                                fontSize: 9,
-                                fontWeight: FontWeight.w900,
-                                color: _getFrequencyBadgeColor(activity.frequency),
-                                letterSpacing: 0.3,
+                                fontSize: 12,
+                                color: _textPrimary,
+                                fontWeight: FontWeight.w600,
                               ),
                             ),
-                            if (_isEditing) ...[
-                              const SizedBox(width: 4),
-                              Icon(
-                                Icons.swap_horiz_rounded,
-                                size: 11,
-                                color: _getFrequencyBadgeColor(activity.frequency).withOpacity(0.7),
+                            const SizedBox(height: 4),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 6,
+                                  height: 6,
+                                  decoration: BoxDecoration(
+                                    color: _getActivityColor(activity.type),
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  activity.type
+                                          .toString()
+                                          .split('.')
+                                          .last
+                                          .substring(0, 1)
+                                          .toUpperCase() +
+                                      activity.type
+                                          .toString()
+                                          .split('.')
+                                          .last
+                                          .substring(1)
+                                          .toLowerCase(),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: _textSecondary,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            if (_isEditing)
+                            Text(
+                              "Mantén presionado para excluir",
+                              style: TextStyle(
+                                fontSize: 8,
+                                color: Colors.red.shade300,
+                                fontStyle: FontStyle.italic,
                               ),
-                            ],
+                            ),
                           ],
                         ),
                       ),
-                    ),
-                  ],
+                      
+                      // ✅ AQUI MANTENEMOS TU BOTON DE CAMBIAR FRECUENCIA
+                      // ✅ BOTÓN DE CAMBIAR FRECUENCIA — UNIVERSAL (semanal + mensual)
+                      GestureDetector(
+                        onTap: _isEditing
+                            ? () => isWeeklyFreq
+                                ? _showFrequencyChangeDialog(devInstance, activity)
+                                : _showMonthlyFrequencyChangeDialog(devInstance, activity)
+                            : null,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: _getFrequencyBadgeColor(effectiveFreq).withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: _getFrequencyBadgeColor(effectiveFreq).withOpacity(0.6),
+                              width: _isEditing ? 1.5 : 1,
+                            ),
+                            boxShadow: _isEditing
+                                ? [
+                                    BoxShadow(
+                                      color: _getFrequencyBadgeColor(effectiveFreq).withOpacity(0.2),
+                                      blurRadius: 4,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ]
+                                : [],
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                _getFrequencyIcon(effectiveFreq),
+                                size: 11,
+                                color: _getFrequencyBadgeColor(effectiveFreq),
+                              ),
+                              const SizedBox(width: 4),
+                              Text(
+                                _getFrequencyLabel(effectiveFreq),
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w900,
+                                  color: _getFrequencyBadgeColor(effectiveFreq),
+                                  letterSpacing: 0.3,
+                                ),
+                              ),
+                              if (_isEditing) ...[
+                                const SizedBox(width: 4),
+                                Icon(
+                                  Icons.swap_horiz_rounded,
+                                  size: 11,
+                                  color: _getFrequencyBadgeColor(effectiveFreq).withOpacity(0.7),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -2502,6 +2559,134 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
   // ═══════════════════════════════════════════════════════════════════
   // HELPERS DE FRECUENCIA (Color, Icono, Label)
   // ═══════════════════════════════════════════════════════════════════
+
+  void _showExcludeActivityDialog(
+    PolicyDevice devInstance,
+    ActivityConfig activity,
+    DeviceModel def,
+  ) {
+    final isExcluded = devInstance.excludedActivities.contains(activity.id);
+    
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isExcluded ? 'Restaurar Actividad' : 'Excluir Actividad'),
+        content: Text(
+          isExcluded
+            ? '¿Deseas volver a incluir "${activity.name}" en esta póliza?'
+            : '¿Deseas excluir "${activity.name}" de esta póliza?\n\n'
+              'Se eliminará de todos los reportes existentes de esta póliza. '
+              'Esta acción se puede revertir.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('CANCELAR'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: isExcluded ? Colors.green : Colors.red,
+            ),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _toggleExcludeActivity(devInstance, activity, isExcluded);
+            },
+            child: Text(
+              isExcluded ? 'RESTAURAR' : 'EXCLUIR',
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _toggleExcludeActivity(
+    PolicyDevice devInstance,
+    ActivityConfig activity,
+    bool isCurrentlyExcluded,
+  ) async {
+    setState(() {
+      if (isCurrentlyExcluded) {
+        devInstance.excludedActivities.remove(activity.id);
+      } else {
+        devInstance.excludedActivities.add(activity.id);
+      }
+      _hasChanges = true;
+    });
+
+    // ★ Limpiar la actividad de los reportes existentes en Firebase
+    if (!isCurrentlyExcluded) {
+      await _removeActivityFromReports(devInstance, activity.id);
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(isCurrentlyExcluded
+            ? '✅ "${activity.name}" restaurada'
+            : '🗑️ "${activity.name}" excluida de esta póliza'),
+          backgroundColor: isCurrentlyExcluded ? Colors.green : Colors.orange,
+        ),
+      );
+    }
+  }
+
+  Future<void> _removeActivityFromReports(
+    PolicyDevice devInstance,
+    String activityId,
+  ) async {
+    try {
+      final snapshot = await _db
+          .collection('reports')
+          .where('policyId', isEqualTo: _policy.id)
+          .get();
+
+      final batch = _db.batch();
+
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final entries = List<Map<String, dynamic>>.from(data['entries'] ?? []);
+        bool modified = false;
+
+        for (var entry in entries) {
+          final instanceId = entry['instanceId'] as String? ?? '';
+          // Verificar si este entry pertenece al dispositivo
+          if (instanceId == devInstance.instanceId ||
+              instanceId.startsWith('${devInstance.instanceId}_')) {
+            final results = Map<String, dynamic>.from(entry['results'] ?? {});
+            if (results.containsKey(activityId)) {
+              results.remove(activityId);
+              entry['results'] = results;
+              modified = true;
+            }
+          }
+        }
+
+        if (modified) {
+          batch.update(doc.reference, {'entries': entries});
+        }
+      }
+
+      await batch.commit();
+      debugPrint('✅ Actividad $activityId limpiada de reportes existentes');
+    } catch (e) {
+      debugPrint('❌ Error limpiando actividad de reportes: $e');
+    }
+  }
+
+  /// Retorna la frecuencia efectiva de una actividad para un PolicyDevice específico.
+  /// Primero busca en el override de la póliza; si no existe, usa la global del dispositivo.
+  Frequency _getEffectiveFrequency(PolicyDevice devInstance, ActivityConfig activity) {
+    final override = devInstance.frequencyOverrides[activity.id];
+    if (override != null) {
+      return Frequency.values.firstWhere(
+        (f) => f.toString().split('.').last == override,
+        orElse: () => activity.frequency,
+      );
+    }
+    return activity.frequency;
+  }
 
   Color _getFrequencyBadgeColor(Frequency freq) {
     switch (freq) {
@@ -2757,52 +2942,21 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     Frequency newFrequency,
   ) async {
     try {
-      // 1. Encontrar el DeviceModel en la lista local
-      final defIndex = _deviceDefinitions.indexWhere(
-        (d) => d.id == devInstance.definitionId,
-      );
-      if (defIndex == -1) return;
-
-      // 2. Encontrar el ActivityConfig dentro del dispositivo
-      final actIndex = _deviceDefinitions[defIndex].activities.indexWhere(
-        (a) => a.id == activity.id,
-      );
-      if (actIndex == -1) return;
-
-      // 3. Crear copia actualizada de la actividad
-      final updatedActivity = ActivityConfig(
-        id: activity.id,
-        name: activity.name,
-        type: activity.type,
-        frequency: newFrequency,   // ← El cambio real
-      );
-
-      // 4. Actualizar la lista local (para que la UI se refresque inmediatamente)
       setState(() {
-        _deviceDefinitions[defIndex].activities[actIndex] = updatedActivity;
+        // ★ Solo guardamos el override en la póliza, NO tocamos el dispositivo global
+        devInstance.frequencyOverrides[activity.id] =
+            newFrequency.toString().split('.').last;
+        _hasChanges = true; // Para que el botón de guardar aparezca
       });
 
-      // 5. Guardar en Firebase (colección 'devices', doc = devInstance.definitionId)
-      final activitiesData = _deviceDefinitions[defIndex]
-          .activities
-          .map((a) => {
-                'id': a.id,
-                'name': a.name,
-                'type': a.type.toString().split('.').last,
-                'frequency': a.frequency.toString().split('.').last,
-              })
-          .toList();
-
-      await FirebaseFirestore.instance
-          .collection('devices')
-          .doc(devInstance.definitionId)
-          .update({'activities': activitiesData});
+      // ★ Se guardará cuando el usuario presione "Guardar" (savePolicy)
+      // ya que frequencyOverrides viaja dentro de PolicyDevice.toMap()
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              '✅ Frecuencia cambiada a ${newFrequency.toString().split('.').last}',
+              '✅ Frecuencia cambiada a ${_getFrequencyLabel(newFrequency)} (solo esta póliza)',
             ),
             backgroundColor: const Color(0xFF10B981),
             behavior: SnackBarBehavior.floating,
@@ -2861,7 +3015,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: options.map((freq) {
-            final isCurrentFreq = activity.frequency == freq;
+            final isCurrentFreq = _getEffectiveFrequency(devInstance, activity) == freq;
             final label = freq == Frequency.SEMANAL ? 'SEMANAL' : 'QUINCENAL';
             final sublabel = freq == Frequency.SEMANAL
                 ? 'Cada semana (actual: cada 7 días)'
@@ -3026,7 +3180,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: options.map((freq) {
-              final isCurrentFreq = activity.frequency == freq;
+              final isCurrentFreq = _getEffectiveFrequency(devInstance, activity) == freq;
               final label = _getFrequencyLabel(freq);
               final color = _getFrequencyBadgeColor(freq);
               final icon = _getFrequencyIcon(freq);

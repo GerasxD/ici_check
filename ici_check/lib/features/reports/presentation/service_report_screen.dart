@@ -697,6 +697,27 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       if (deviceInstance == null) continue;
 
       final defId = deviceInstance.definitionId;
+
+      final excludedIds = deviceInstance.excludedActivities;
+      if (excludedIds.isNotEmpty) {
+        final filteredResults = Map<String, String?>.from(entry.results)
+          ..removeWhere((key, _) => excludedIds.contains(key));
+        // Reemplazar la entry con results filtrados
+        final filteredEntry = ReportEntry(
+          instanceId: entry.instanceId,
+          deviceIndex: entry.deviceIndex,
+          customId: entry.customId,
+          area: entry.area,
+          results: filteredResults,
+          observations: entry.observations,
+          photoUrls: entry.photoUrls,
+          activityData: Map<String, ActivityData>.from(entry.activityData)
+            ..removeWhere((key, _) => excludedIds.contains(key)),
+          assignedUserId: entry.assignedUserId,
+        );
+        (grouped[defId] ??= []).add(filteredEntry);
+        continue;
+      }
       // ★ NUEVO: Saltar dispositivos acumulativos en reportes normales
       if (!_isCumulative) {
         final def = _devicesEffective.firstWhere(
@@ -822,6 +843,27 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     return state.report.startTime != null && state.report.endTime == null;
   }
 
+  /// ★ NUEVO: Verifica si el reporte está en progreso (iniciado y no finalizado)
+  bool _isReportInProgress(ReportState state) {
+    return state.report.startTime != null && state.report.endTime == null;
+  }
+
+  /// ★ NUEVO: Obtiene los nombres de los técnicos asignados que están trabajando
+  String _getActiveTechnicianNames(ReportState state) {
+    final techIds = state.report.assignedTechnicianIds;
+    if (techIds.isEmpty) return '';
+
+    final names = <String>[];
+    for (final uid in techIds) {
+      final user = widget.users.firstWhere(
+        (u) => u.id == uid,
+        orElse: () => UserModel(id: uid, name: 'Usuario', email: ''),
+      );
+      names.add(user.name);
+    }
+    return names.join(', ');
+  }
+
   bool _isUserCoordinator() {
     if (_currentUser == null) return false;
     if (_currentUser!.role == UserRole.SUPER_USER ||
@@ -873,6 +915,10 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     final now = DateTime.now();
     final timeStr = DateFormat('HH:mm').format(now);
     _notifier.startService(timeStr, now);
+    // ★ NUEVO: Desactivar modo admin automáticamente al iniciar servicio
+    if (_adminOverride) {
+      setState(() => _adminOverride = false);
+    }
   }
 
   void _handleEndService() {
@@ -899,6 +945,10 @@ void _handleNotifierUpdate(ServiceReportModel report) {
 
   void _handleResumeService() {
     _notifier.resumeService();
+    // ★ NUEVO: Desactivar modo admin automáticamente al reanudar
+    if (_adminOverride) {
+      setState(() => _adminOverride = false);
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -1360,9 +1410,14 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       final isHighRole =
           role == UserRole.SUPER_USER || role == UserRole.ADMIN;
       final label = isHighRole ? '$role' : 'Responsable de Póliza';
-      adminTooltip = _adminOverride
-          ? 'Modo Admin Activo ($label)'
-          : 'Activar Modo Admin ($label)';
+
+      if (_isReportInProgress(reportState)) {
+        adminTooltip = 'No disponible mientras el servicio está en curso';
+      } else {
+        adminTooltip = _adminOverride
+            ? 'Modo Admin Activo ($label)'
+            : 'Activar Modo Admin ($label)';
+      }
     }
 
     // ★ Construir lista plana de widgets con scroll sincronizado
@@ -1392,9 +1447,16 @@ void _handleNotifierUpdate(ServiceReportModel report) {
         ),
       );
 
+      // ★ Obtener las actividades excluidas para este dispositivo
+      final policyToUse = _currentPolicy ?? widget.policy;
+      final excludedForDef = policyToUse.devices
+          .where((d) => d.definitionId == defId)
+          .expand((d) => d.excludedActivities)
+          .toSet();
+
       final scheduledActivityIds = entries.expand((e) => e.results.keys).toSet();
       final relevantActivities = deviceDef.activities
-          .where((a) => scheduledActivityIds.contains(a.id))
+          .where((a) => scheduledActivityIds.contains(a.id) && !excludedForDef.contains(a.id))
           .toList();
 
       if (relevantActivities.isEmpty) continue;
@@ -1588,6 +1650,7 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     String adminTooltip,
     ReportState reportState,
   ) {
+    final bool inProgress = _isReportInProgress(reportState);
     return AppBar(
       backgroundColor: Colors.white,
       elevation: 0,
@@ -1633,7 +1696,7 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       ),
         actions: [
         // ★ NUEVO: Botón "Llenar Todo OK" solo para coordinadores con admin override
-        if (_isUserCoordinator() && _adminOverride && _isEditable(reportState))
+        if (_isUserCoordinator() && _adminOverride && _isEditable(reportState) && !inProgress)
           IconButton(
             icon: const Icon(
               Icons.done_all_rounded,
@@ -1646,16 +1709,164 @@ void _handleNotifierUpdate(ServiceReportModel report) {
         if (_isUserCoordinator())
           IconButton(
             icon: Icon(
-              _adminOverride
-                  ? Icons.admin_panel_settings
-                  : Icons.admin_panel_settings_outlined,
-              color: _adminOverride
-                  ? const Color(0xFFF59E0B)
-                  : const Color(0xFF94A3B8),
+              inProgress
+                  ? Icons.admin_panel_settings_outlined
+                  : (_adminOverride
+                      ? Icons.admin_panel_settings
+                      : Icons.admin_panel_settings_outlined),
+              color: inProgress
+                  ? const Color(0xFFCBD5E1)
+                  : (_adminOverride
+                      ? const Color(0xFFF59E0B)
+                      : const Color(0xFF94A3B8)),
               size: 22,
             ),
-            onPressed: () =>
-                setState(() => _adminOverride = !_adminOverride),
+            onPressed: () {
+              if (inProgress) {
+                // ★ Mostrar diálogo informativo
+                final techNames = _getActiveTechnicianNames(reportState);
+                showDialog(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    title: const Row(
+                      children: [
+                        Icon(Icons.info_outline_rounded,
+                            color: Color(0xFF3B82F6), size: 22),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text('Servicio en curso',
+                              style: TextStyle(
+                                  fontSize: 15, fontWeight: FontWeight.w800)),
+                        ),
+                      ],
+                    ),
+                    content: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFF7ED),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFFFED7AA)),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.warning_amber_rounded,
+                                  color: Color(0xFFF59E0B), size: 18),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  'Para evitar pérdida de respuestas, el modo Admin se bloquea mientras un técnico está trabajando en planta.',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.orange.shade900,
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (techNames.isNotEmpty) ...[
+                          const SizedBox(height: 16),
+                          const Text(
+                            'TÉCNICO(S) EN PLANTA:',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF94A3B8),
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF1F5F9),
+                              borderRadius: BorderRadius.circular(8),
+                              border:
+                                  Border.all(color: const Color(0xFFE2E8F0)),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(6),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF10B981)
+                                        .withOpacity(0.1),
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Icon(Icons.person,
+                                      size: 16, color: Color(0xFF10B981)),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    techNames,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFF1E293B),
+                                    ),
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF10B981)
+                                        .withOpacity(0.1),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.circle,
+                                          size: 6, color: Color(0xFF10B981)),
+                                      SizedBox(width: 4),
+                                      Text('Activo',
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFF10B981),
+                                          )),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    actions: [
+                      ElevatedButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF3B82F6),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8)),
+                          elevation: 0,
+                        ),
+                        child: const Text('Entendido',
+                            style: TextStyle(fontWeight: FontWeight.w700)),
+                      ),
+                    ],
+                  ),
+                );
+              } else {
+                setState(() => _adminOverride = !_adminOverride);
+              }
+            },
             tooltip: adminTooltip,
           ),
         const SizedBox(width: 8),

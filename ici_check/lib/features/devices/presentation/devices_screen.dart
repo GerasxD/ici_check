@@ -397,11 +397,17 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 
   List<DeviceModel> _filterDevices(List<DeviceModel> allDevices) {
-    if (_searchQuery.isEmpty) return allDevices;
-    return allDevices.where((d) => 
-      d.name.toLowerCase().contains(_searchQuery.toLowerCase()) || 
-      d.description.toLowerCase().contains(_searchQuery.toLowerCase())
-    ).toList();
+    List<DeviceModel> filtered;
+    if (_searchQuery.isEmpty) {
+      filtered = List.from(allDevices);
+    } else {
+      filtered = allDevices.where((d) =>
+        d.name.toLowerCase().contains(_searchQuery.toLowerCase()) ||
+        d.description.toLowerCase().contains(_searchQuery.toLowerCase())
+      ).toList();
+    }
+    filtered.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return filtered;
   }
 
   @override

@@ -61,6 +61,7 @@ interface PolicyDevice {
   definitionId: string;
   quantity: number;
   scheduleOffsets: Record<string, number>;
+  excludedActivities?: string[];
 }
 
 interface DeviceDefinition {
@@ -685,8 +686,20 @@ async function buildPdf(p: {
         const def = devices.find((d) => d.id === defId);
         if (!def) continue;
 
-        const scheduledIds = new Set(entries.flatMap((e) => Object.keys(e.results)));
-        const relevantActivities = def.activities.filter((a) => scheduledIds.has(a.id));
+       // ★ Recolectar actividades excluidas de TODOS los PolicyDevices de este defId
+      const excludedIds = new Set<string>();
+      for (const pd of policy.devices) {
+        if (pd.definitionId === defId && pd.excludedActivities) {
+          for (const exId of pd.excludedActivities) {
+            excludedIds.add(exId);
+          }
+        }
+      }
+
+      const scheduledIds = new Set(entries.flatMap((e) => Object.keys(e.results)));
+      const relevantActivities = def.activities.filter(
+        (a) => scheduledIds.has(a.id) && !excludedIds.has(a.id)
+      );
 
         if (relevantActivities.length === 0) continue;
 
