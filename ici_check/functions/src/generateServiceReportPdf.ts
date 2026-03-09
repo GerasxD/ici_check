@@ -62,6 +62,7 @@ interface PolicyDevice {
   quantity: number;
   scheduleOffsets: Record<string, number>;
   excludedActivities?: string[];
+  cumulativeActivities?: string[];
 }
 
 interface DeviceDefinition {
@@ -490,18 +491,18 @@ async function buildPdf(p: {
         const info3Y = startY + 5;
 
         doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-          .text(client.name, info3X, info3Y, { width: info3W, ellipsis: true });
+          .text(client.name, info3X, info3Y, { width: info3W, align: "right", ellipsis: true });
         if (client.razonSocial) {
           doc.fontSize(4.5).font("Helvetica").fillColor(PDF_COLORS.grey700)
-            .text(client.razonSocial, info3X, info3Y + 8, { width: info3W, ellipsis: true });
+            .text(client.razonSocial, info3X, info3Y + 8, { width: info3W, align: "right", ellipsis: true });
         }
         doc.fontSize(4).fillColor(PDF_COLORS.grey700)
-          .text(client.address, info3X, info3Y + 14, { width: info3W, height: 8, ellipsis: true });
+          .text(client.address, info3X, info3Y + 14, { width: info3W, height: 8, align: "right", ellipsis: true });
         doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
           .text(
             `Tel: ${client.contact}${client.nombreContacto ? "  " + client.nombreContacto : ""}`,
             info3X, info3Y + 22,
-            { width: info3W, ellipsis: true }
+            { width: info3W, align: "right", ellipsis: true }
           );
 
         return MARGIN + HEADER_HEIGHT + 8;
@@ -687,19 +688,30 @@ async function buildPdf(p: {
         if (!def) continue;
 
        // ★ Recolectar actividades excluidas de TODOS los PolicyDevices de este defId
+      // Recolectar actividades excluidas Y acumulativas de todos los PolicyDevices de este defId
       const excludedIds = new Set<string>();
+      const cumulativeIds = new Set<string>();
       for (const pd of policy.devices) {
-        if (pd.definitionId === defId && pd.excludedActivities) {
-          for (const exId of pd.excludedActivities) {
-            excludedIds.add(exId);
-          }
+        if (pd.definitionId !== defId) continue;
+        if (pd.excludedActivities) {
+          for (const exId of pd.excludedActivities) excludedIds.add(exId);
+        }
+        if (pd.cumulativeActivities) {
+          for (const cumId of pd.cumulativeActivities) cumulativeIds.add(cumId);
         }
       }
 
+      const isCumulativeReport = report.dateStr === "CUMULATIVE";
       const scheduledIds = new Set(entries.flatMap((e) => Object.keys(e.results)));
-      const relevantActivities = def.activities.filter(
-        (a) => scheduledIds.has(a.id) && !excludedIds.has(a.id)
-      );
+
+      const relevantActivities = def.activities.filter((a) => {
+        if (!scheduledIds.has(a.id)) return false;
+        if (excludedIds.has(a.id)) return false;
+        // En reporte acumulativo: solo mostrar las acumulativas
+        // En reporte normal: ocultar las acumulativas
+        if (isCumulativeReport) return cumulativeIds.has(a.id);
+        return !cumulativeIds.has(a.id);
+      });
 
         if (relevantActivities.length === 0) continue;
 
