@@ -648,6 +648,38 @@ class ReportNotifier extends Notifier<ReportState?> {
     _saveImmediateAsync(newReport); // ★ era _saveImmediate
   }
 
+  List<String> getNokWithoutPhotos(List<DeviceModel> deviceDefs) {
+    if (state == null) return [];
+    final missing = <String>[];
+
+    // Construir mapa de activityId → nombre legible
+    final actNameMap = <String, String>{};
+    for (final dev in deviceDefs) {
+      for (final act in dev.activities) {
+        actNameMap[act.id] = act.name;
+      }
+    }
+
+    for (final entry in state!.report.entries) {
+      final label = entry.customId.isNotEmpty
+          ? entry.customId
+          : 'Dispositivo #${entry.deviceIndex}';
+
+      for (final actId in entry.results.keys) {
+        if (entry.results[actId] == 'NOK') {
+          final actPhotos = entry.activityData[actId]?.photoUrls ?? [];
+          final entryPhotos = entry.photoUrls;
+
+          if (actPhotos.isEmpty && entryPhotos.isEmpty) {
+            final actName = actNameMap[actId] ?? actId;
+            missing.add('$label → $actName');
+          }
+        }
+      }
+    }
+    return missing;
+  }
+
   // ═══════════════════════════════════════════════════════
   // SECTION ASSIGNMENTS
   // ═══════════════════════════════════════════════════════

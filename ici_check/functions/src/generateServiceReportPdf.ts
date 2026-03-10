@@ -230,6 +230,166 @@ function calcStats(entries: ReportEntry[]) {
   return { ok, nok, na, nr };
 }
 
+// ─── HELPERS DE CLASIFICACIÓN (CORREGIDOS) ─────────────────────────────────
+
+/**
+ * Determina si un entry tiene hallazgo (al menos un resultado NOK).
+ * ★ CORREGIDO: Solo evalúa actividades relevantes (filtra excluidas y acumulativas).
+ *   Si no se pasan relevantActivityIds, revisa todas (backward-compatible).
+ */
+function hasFinding(entry: ReportEntry, relevantActivityIds?: Set<string>): boolean {
+  for (const [actId, status] of Object.entries(entry.results)) {
+    if (status !== "NOK") continue;
+    // Si no hay filtro, cualquier NOK cuenta
+    if (!relevantActivityIds) return true;
+    // Si hay filtro, solo cuenta si la actividad es relevante
+    if (relevantActivityIds.has(actId)) return true;
+  }
+  return false;
+}
+
+/**
+ * ★ Verifica si un entry tiene contenido visible SOLO en actividades
+ * que coinciden con el filtro (NOK o no-NOK).
+ *   - onlyNok = true  → solo datos de actividades con NOK
+ *   - onlyNok = false → solo datos de actividades SIN NOK
+ * Revisa entry-level (observations/photoUrls) + activityData-level.
+ */
+function hasVisibleContentFiltered(
+  entry: ReportEntry,
+  onlyNok: boolean,
+  relevantActivityIds?: Set<string>
+): boolean {
+  // Nivel activityData — filtrado por NOK o no-NOK
+  if (entry.activityData) {
+    for (const [actId, ad] of Object.entries(entry.activityData)) {
+      if (relevantActivityIds && !relevantActivityIds.has(actId)) continue;
+
+      const isNok = entry.results[actId] === "NOK";
+      if (onlyNok && !isNok) continue;
+      if (!onlyNok && isNok) continue;
+
+      // Para comentarios: solo cuenta si hay observación (foto sola no basta)
+      // Para hallazgos: cuenta con observación O foto
+      if (onlyNok) {
+        if (ad.observations?.trim()) return true;
+        if (ad.photoUrls?.length > 0) return true;
+      } else {
+        if (ad.observations?.trim()) return true;
+        // Fotos solas sin comentario NO cuentan para la sección de comentarios
+      }
+    }
+  }
+
+  // Entry-level
+  if (onlyNok) {
+    if (hasFinding(entry, relevantActivityIds)) {
+      if (entry.observations?.trim()) return true;
+      if (entry.photoUrls?.length > 0) return true;
+    }
+  } else {
+    if (!hasFinding(entry, relevantActivityIds)) {
+      // Para comentarios: observación requerida (foto sola no basta)
+      if (entry.observations?.trim()) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * ★ Recolecta observaciones filtradas por actividades NOK o no-NOK.
+ *   - onlyNok = true  → solo observaciones de actividades con NOK
+ *   - onlyNok = false → solo observaciones de actividades SIN NOK
+ */
+function collectFilteredObservations(
+  entry: ReportEntry,
+  onlyNok: boolean,
+  relevantActivityIds?: Set<string>
+): string {
+  const parts: string[] = [];
+
+  // Entry-level observations: asignar según si el entry tiene NOK o no
+  const entryHasNok = hasFinding(entry, relevantActivityIds);
+  if (onlyNok && entryHasNok && entry.observations?.trim()) {
+    parts.push(entry.observations.trim());
+  }
+  if (!onlyNok && !entryHasNok && entry.observations?.trim()) {
+    parts.push(entry.observations.trim());
+  }
+
+  // ActivityData-level: filtrar por actividad
+  if (entry.activityData) {
+    for (const [actId, ad] of Object.entries(entry.activityData)) {
+      if (relevantActivityIds && !relevantActivityIds.has(actId)) continue;
+
+      const isNok = entry.results[actId] === "NOK";
+      if (onlyNok && !isNok) continue;
+      if (!onlyNok && isNok) continue;
+
+      if (ad.observations?.trim()) {
+        parts.push(ad.observations.trim());
+      }
+    }
+  }
+
+  return parts.join(" | ");
+}
+
+/**
+ * ★ Recolecta fotos filtradas por actividades NOK o no-NOK.
+ *   - onlyNok = true  → solo fotos de actividades con NOK (siempre incluir)
+ *   - onlyNok = false → solo fotos de actividades SIN NOK,
+ *     PERO solo si la actividad también tiene un comentario/observación
+ */
+function collectFilteredPhotoUrls(
+  entry: ReportEntry,
+  onlyNok: boolean,
+  relevantActivityIds?: Set<string>
+): string[] {
+  const urls = new Set<string>();
+
+  // Entry-level photos
+  const entryHasNok = hasFinding(entry, relevantActivityIds);
+  if (onlyNok && entryHasNok && entry.photoUrls) {
+    // Hallazgos: siempre incluir fotos entry-level
+    for (const url of entry.photoUrls) { if (url) urls.add(url); }
+  }
+  if (!onlyNok && !entryHasNok && entry.photoUrls) {
+    // Comentarios: solo incluir fotos entry-level si hay observación entry-level
+    if (entry.observations?.trim()) {
+      for (const url of entry.photoUrls) { if (url) urls.add(url); }
+    }
+  }
+
+  // ActivityData-level: filtrar por actividad
+  if (entry.activityData) {
+    for (const [actId, ad] of Object.entries(entry.activityData)) {
+      if (relevantActivityIds && !relevantActivityIds.has(actId)) continue;
+
+      const isNok = entry.results[actId] === "NOK";
+      if (onlyNok && !isNok) continue;
+      if (!onlyNok && isNok) continue;
+
+      if (ad.photoUrls) {
+        if (onlyNok) {
+          // Hallazgos: siempre incluir fotos
+          for (const url of ad.photoUrls) { if (url) urls.add(url); }
+        } else {
+          // Comentarios: solo incluir fotos si la actividad tiene observación
+          if (ad.observations?.trim()) {
+            for (const url of ad.photoUrls) { if (url) urls.add(url); }
+          }
+        }
+      }
+    }
+  }
+
+  return Array.from(urls);
+}
+
+// ─── OTROS HELPERS ─────────────────────────────────────────────────────────
+
 function drawClippedImage(
   doc: PDFKit.PDFDocument,
   buffer: Buffer,
@@ -409,7 +569,6 @@ async function buildPdf(p: {
         const LOGO_H = 40;
         const LOGO_PAD = 4;
 
-        // ── Calcular ancho de columna central según el contenido más ancho ──
         const isCumulative = report.dateStr === "CUMULATIVE";
         const reportTitle = isCumulative ? "REPORTE ACUMULATIVO" : "REPORTE DE SERVICIO";
         const executionDate = new Intl.DateTimeFormat("es", {
@@ -424,21 +583,17 @@ async function buildPdf(p: {
         const subtitleW = doc.widthOfString("SISTEMA DE DETECCIÓN DE INCENDIOS");
         const boxContentW = doc.widthOfString(
           `EJECUCIÓN: ${executionDate}  |  PERIODO: ${periodLabelText.toUpperCase()}`
-        ) + 16; // padding interno de la caja
+        ) + 16;
 
-        const CENTER_COL_W = Math.max(titleW, subtitleW, boxContentW) + 16; // margen cómodo
+        const CENTER_COL_W = Math.max(titleW, subtitleW, boxContentW) + 16;
         const SIDE_COL_W = (W - CENTER_COL_W) / 2;
 
         doc.rect(MARGIN, startY, W, HEADER_HEIGHT).stroke(PDF_COLORS.black);
 
-        // ── Separadores pegados al centro ──
         const col2X = MARGIN + SIDE_COL_W;
         doc.moveTo(col2X, startY).lineTo(col2X, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
         doc.moveTo(col2X + CENTER_COL_W, startY).lineTo(col2X + CENTER_COL_W, startY + HEADER_HEIGHT).stroke(PDF_COLORS.grey400);
 
-        // ════════════════════════════════════════
-        // COLUMNA 1: Logo IZQUIERDA + texto derecha
-        // ════════════════════════════════════════
         const logo1X = MARGIN + LOGO_PAD;
         const logo1Y = startY + (HEADER_HEIGHT - LOGO_H) / 2;
         renderImage(doc, imgCache, company.logoUrl, logo1X, logo1Y, LOGO_W, LOGO_H);
@@ -456,9 +611,6 @@ async function buildPdf(p: {
         doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
           .text(`${company.phone}  ${company.email || ""}`, info1X, info1Y + 22, { width: info1W, ellipsis: true });
 
-        // ════════════════════════════════════════
-        // COLUMNA 2: Centro — título + fecha + frecuencias
-        // ════════════════════════════════════════
         doc.fontSize(8).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
           .text(reportTitle, col2X, startY + 4, { width: CENTER_COL_W, align: "center" });
 
@@ -478,9 +630,6 @@ async function buildPdf(p: {
         doc.fontSize(4.5).font("Helvetica").fillColor(PDF_COLORS.grey600)
           .text(`Frecuencias: ${frequencies}`, col2X, startY + 36, { width: CENTER_COL_W, align: "center", ellipsis: true });
 
-        // ════════════════════════════════════════
-        // COLUMNA 3: texto izquierda + Logo DERECHA
-        // ════════════════════════════════════════
         const col3X = col2X + CENTER_COL_W;
         const logo3X = col3X + SIDE_COL_W - LOGO_W - LOGO_PAD;
         const logo3Y = startY + (HEADER_HEIGHT - LOGO_H) / 2;
@@ -526,7 +675,6 @@ async function buildPdf(p: {
       const INFO_BAR_HEIGHT = 12;
 
       if (!hasMultipleSessions) {
-        // ── CASO A: Bar simple ──
         doc.rect(MARGIN, Y, W, INFO_BAR_HEIGHT).fillAndStroke(PDF_COLORS.grey100, PDF_COLORS.grey400);
 
         doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.grey600)
@@ -553,7 +701,6 @@ async function buildPdf(p: {
         Y += NFPA_BAR_HEIGHT + 8;
 
       } else {
-        // ── CASO B: Tabla de sesiones ──
         const SESSION_TITLE_H = 11;
         const SESSION_ROW_H   = 10;
 
@@ -687,31 +834,27 @@ async function buildPdf(p: {
         const def = devices.find((d) => d.id === defId);
         if (!def) continue;
 
-       // ★ Recolectar actividades excluidas de TODOS los PolicyDevices de este defId
-      // Recolectar actividades excluidas Y acumulativas de todos los PolicyDevices de este defId
-      const excludedIds = new Set<string>();
-      const cumulativeIds = new Set<string>();
-      for (const pd of policy.devices) {
-        if (pd.definitionId !== defId) continue;
-        if (pd.excludedActivities) {
-          for (const exId of pd.excludedActivities) excludedIds.add(exId);
+        const excludedIds = new Set<string>();
+        const cumulativeIds = new Set<string>();
+        for (const pd of policy.devices) {
+          if (pd.definitionId !== defId) continue;
+          if (pd.excludedActivities) {
+            for (const exId of pd.excludedActivities) excludedIds.add(exId);
+          }
+          if (pd.cumulativeActivities) {
+            for (const cumId of pd.cumulativeActivities) cumulativeIds.add(cumId);
+          }
         }
-        if (pd.cumulativeActivities) {
-          for (const cumId of pd.cumulativeActivities) cumulativeIds.add(cumId);
-        }
-      }
 
-      const isCumulativeReport = report.dateStr === "CUMULATIVE";
-      const scheduledIds = new Set(entries.flatMap((e) => Object.keys(e.results)));
+        const isCumulativeReport = report.dateStr === "CUMULATIVE";
+        const scheduledIds = new Set(entries.flatMap((e) => Object.keys(e.results)));
 
-      const relevantActivities = def.activities.filter((a) => {
-        if (!scheduledIds.has(a.id)) return false;
-        if (excludedIds.has(a.id)) return false;
-        // En reporte acumulativo: solo mostrar las acumulativas
-        // En reporte normal: ocultar las acumulativas
-        if (isCumulativeReport) return cumulativeIds.has(a.id);
-        return !cumulativeIds.has(a.id);
-      });
+        const relevantActivities = def.activities.filter((a) => {
+          if (!scheduledIds.has(a.id)) return false;
+          if (excludedIds.has(a.id)) return false;
+          if (isCumulativeReport) return cumulativeIds.has(a.id);
+          return !cumulativeIds.has(a.id);
+        });
 
         if (relevantActivities.length === 0) continue;
 
@@ -741,7 +884,7 @@ async function buildPdf(p: {
         const isListView = def.viewMode === "list";
 
         if (!isListView) {
-          // ══════ VISTA TABLA (sin cambios) ══════
+          // ══════ VISTA TABLA ══════
           const MAX_ACTIVITIES_PER_TABLE = 12;
           const activityGroups: ActivityConfig[][] = [];
 
@@ -754,12 +897,10 @@ async function buildPdf(p: {
             const activityColWidth = activityGroup.length > 8 ? 25.0 : 38.0;
             const idColWidth = 50;
             const locationColWidth = W - idColWidth - (activityGroup.length * activityColWidth);
-            // ★ Calcular altura dinámica del header según el texto más largo
-            const FREQ_LINE_HEIGHT = 8; // espacio para la frecuencia
-            const HEADER_PADDING = 4;   // padding arriba y abajo
+            const FREQ_LINE_HEIGHT = 8;
+            const HEADER_PADDING = 4;
 
-            // Medir la altura que necesita cada nombre de actividad
-            let maxNameHeight = 10; // mínimo
+            let maxNameHeight = 10;
             for (const act of activityGroup) {
               doc.fontSize(4.5).font("Helvetica-Bold");
               const nameH = doc.heightOfString(act.name, { width: activityColWidth - 4 });
@@ -781,7 +922,6 @@ async function buildPdf(p: {
               doc.rect(MARGIN, currentY, W, TABLE_HEADER_HEIGHT).fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.black);
               let cx = MARGIN;
 
-              // ID y UBICACIÓN centrados verticalmente
               const labelY = currentY + TABLE_HEADER_HEIGHT / 2 - 3;
               doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
                 .text("ID", cx + 2, labelY, { width: idColWidth - 4, align: "center" });
@@ -793,7 +933,6 @@ async function buildPdf(p: {
               cx += locationColWidth;
 
               for (const act of activityGroup) {
-                // Nombre completo — sin límite de height, usa todo el espacio disponible
                 const nameAreaHeight = TABLE_HEADER_HEIGHT - FREQ_LINE_HEIGHT - HEADER_PADDING * 2;
                 doc.fontSize(4.5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
                   .text(act.name, cx + 2, currentY + HEADER_PADDING, {
@@ -802,7 +941,6 @@ async function buildPdf(p: {
                     align: "center",
                   });
 
-                // Frecuencia completa debajo del nombre
                 const freqFull = act.frequency.split(".").pop() || act.frequency;
                 doc.fontSize(3.5).font("Helvetica").fillColor(PDF_COLORS.grey600)
                   .text(freqFull, cx + 2, currentY + TABLE_HEADER_HEIGHT - FREQ_LINE_HEIGHT - HEADER_PADDING + 2, {
@@ -881,7 +1019,6 @@ async function buildPdf(p: {
                 } else if (status === "NR") {
                   doc.circle(cellCx, cellCy, 2.5).fill(PDF_COLORS.orange);
                 } else if (status && status.trim() !== "") {
-                  // ★ VALOR MEDIDO — mostrar el texto en azul
                   doc.fontSize(5).font("Helvetica-Bold").fillColor("#2563EB")
                     .text(status, cx + 1, cellCy - 3, {
                       width: activityColWidth - 2,
@@ -903,29 +1040,20 @@ async function buildPdf(p: {
           // ══════════════════════════════════════════════════════════════
           // VISTA LISTA — LAYOUT DOS COLUMNAS
           // ══════════════════════════════════════════════════════════════
-          //
-          // Estrategia: cada entry tiene un header (ID + ubicación) que
-          // ocupa todo el ancho W, y debajo sus actividades se reparten
-          // en dos columnas lado a lado. Cada fila de la grilla toma
-          // la altura máxima entre la celda izquierda y la derecha para
-          // mantener alineación visual.
-          // ══════════════════════════════════════════════════════════════
 
           const COL_GAP = 4;
           const COL_W = (W - COL_GAP) / 2;
           const ENTRY_HEADER_HEIGHT = 12;
-          const PHOTO_SIZE = 48; // más compacto para caber en columna
+          const PHOTO_SIZE = 48;
 
           for (let entryIdx = 0; entryIdx < entries.length; entryIdx++) {
             const entry = entries[entryIdx];
 
-            // Actividades relevantes para este entry
             const entryActivities = relevantActivities.filter((a) =>
               Object.prototype.hasOwnProperty.call(entry.results, a.id)
             );
             if (entryActivities.length === 0) continue;
 
-            // Construir celdas
             const cells: ListActivityCell[] = entryActivities.map((activity, actIdx) => ({
               entry,
               entryIndex: entryIdx,
@@ -935,7 +1063,6 @@ async function buildPdf(p: {
               activityNumber: actIdx + 1,
             }));
 
-            // ── Emparejar en filas de 2 ──
             interface CellPair {
               left: ListActivityCell;
               right: ListActivityCell | null;
@@ -959,7 +1086,6 @@ async function buildPdf(p: {
               });
             }
 
-            // Altura total estimada del entry header + primera fila
             const firstRowH = pairs.length > 0 ? pairs[0].rowH : 14;
 
             if (needsNewPage(doc, Y, ENTRY_HEADER_HEIGHT + firstRowH + 4)) {
@@ -967,7 +1093,6 @@ async function buildPdf(p: {
               Y = drawHeader(doc);
             }
 
-            // ── Entry header: ID + ubicación ──
             doc.rect(MARGIN, Y, W, ENTRY_HEADER_HEIGHT)
               .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey300);
 
@@ -981,16 +1106,13 @@ async function buildPdf(p: {
 
             Y += ENTRY_HEADER_HEIGHT;
 
-            // ── Dibujar pares de actividades ──
             for (let pairIdx = 0; pairIdx < pairs.length; pairIdx++) {
               const pair = pairs[pairIdx];
 
-              // ¿Necesita nueva página para esta fila?
               if (needsNewPage(doc, Y, pair.rowH + 2)) {
                 doc.addPage();
                 Y = drawHeader(doc);
 
-                // Re-dibujar mini-header del entry para contexto
                 doc.rect(MARGIN, Y, W, ENTRY_HEADER_HEIGHT)
                   .fillAndStroke(PDF_COLORS.grey200, PDF_COLORS.grey300);
                 doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
@@ -1002,15 +1124,12 @@ async function buildPdf(p: {
 
               const rowY = Y;
 
-              // Fondo zebra alternado por par
               if (pairIdx % 2 === 0) {
                 doc.rect(MARGIN, rowY, W, pair.rowH).fill(PDF_COLORS.grey50);
               }
 
-              // Dibujar celda izquierda
               drawListCell(doc, imgCache, pair.left, MARGIN, rowY, COL_W, pair.rowH, PHOTO_SIZE);
 
-              // Separador central vertical
               doc.save();
               doc.moveTo(MARGIN + COL_W + COL_GAP / 2, rowY)
                 .lineTo(MARGIN + COL_W + COL_GAP / 2, rowY + pair.rowH)
@@ -1018,12 +1137,10 @@ async function buildPdf(p: {
                 .stroke(PDF_COLORS.grey300);
               doc.restore();
 
-              // Dibujar celda derecha
               if (pair.right) {
                 drawListCell(doc, imgCache, pair.right, MARGIN + COL_W + COL_GAP, rowY, COL_W, pair.rowH, PHOTO_SIZE);
               }
 
-              // Borde inferior de la fila
               doc.rect(MARGIN, rowY, W, pair.rowH).stroke(PDF_COLORS.grey300);
 
               Y = rowY + pair.rowH;
@@ -1038,59 +1155,210 @@ async function buildPdf(p: {
         Y += 8;
       }
 
-      // ═══════════════════════════════════════════════════════════════════
-      // HALLAZGOS GENERALES
-      // ═══════════════════════════════════════════════════════════════════
 
-      const entriesWithObs = report.entries.filter((e) => e.observations.trim() !== "");
-      if (entriesWithObs.length > 0) {
+      // ═══════════════════════════════════════════════════════════════════════
+      // ★ CLASIFICACIÓN DE ENTRIES: Comentarios vs Hallazgos
+      // ★ CORREGIDO: Filtra a NIVEL DE ACTIVIDAD, no de entry completo.
+      // ★ Un mismo entry puede aparecer en ambas secciones si tiene
+      // ★ actividades OK con comentario Y actividades NOK con comentario.
+      // ═══════════════════════════════════════════════════════════════════════
+
+      // ── Construir set global de IDs de actividades relevantes para este reporte ──
+      const allRelevantActivityIds = new Set<string>();
+      const isCumulativeForClassification = report.dateStr === "CUMULATIVE";
+
+      for (const pd of policy.devices) {
+        const def = devices.find((d) => d.id === pd.definitionId);
+        if (!def) continue;
+
+        const pdExcluded = new Set(pd.excludedActivities ?? []);
+        const pdCumulative = new Set(pd.cumulativeActivities ?? []);
+
+        for (const act of def.activities) {
+          if (pdExcluded.has(act.id)) continue;
+          if (isCumulativeForClassification) {
+            if (pdCumulative.has(act.id)) allRelevantActivityIds.add(act.id);
+          } else {
+            if (!pdCumulative.has(act.id)) allRelevantActivityIds.add(act.id);
+          }
+        }
+      }
+
+      // Entries que tienen contenido de comentarios (actividades sin NOK)
+      const entriesWithComments = report.entries.filter(
+        (e) => hasVisibleContentFiltered(e, false, allRelevantActivityIds)
+      );
+      // Entries que tienen contenido de hallazgos (actividades con NOK)
+      const entriesWithFindings = report.entries.filter(
+        (e) => hasVisibleContentFiltered(e, true, allRelevantActivityIds)
+      );
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // SECCIÓN 1: COMENTARIOS Y FOTOS (solo de actividades sin NOK)
+      // ═══════════════════════════════════════════════════════════════════════
+
+      if (entriesWithComments.length > 0) {
         Y = addPageIfNeeded(doc, Y, 60);
 
         doc.rect(MARGIN, Y, W, 10).fill(PDF_COLORS.grey800);
         doc.rect(MARGIN, Y, W, 10).stroke(PDF_COLORS.black);
         doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.white)
-          .text("Hallazgos / Mejoras / Comentarios generales", MARGIN + 5, Y + 2);
+          .text("Comentarios y Observaciones de los Dispositivos", MARGIN + 5, Y + 2);
         Y += 10;
 
-        const FINDING_PHOTO_SIZE = 60;
-        const FINDING_PHOTO_GAP  = 4;
+        const COMMENT_PHOTO_SIZE = 60;
+        const COMMENT_PHOTO_GAP  = 4;
         const ID_COL_W           = 60;
-        const photosPerRow = Math.max(1, Math.floor((W - ID_COL_W - 8) / (FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP)));
+        const commentPhotosPerRow = Math.max(
+          1,
+          Math.floor((W - ID_COL_W - 8) / (COMMENT_PHOTO_SIZE + COMMENT_PHOTO_GAP))
+        );
 
-        for (const e of entriesWithObs) {
-          // ── Fotos adjuntas al hallazgo (solo e.photoUrls) ──
-          const photos = (e.photoUrls ?? []).filter((u) => !!imgCache.get(u));
-          const photoRows = photos.length > 0 ? Math.ceil(photos.length / photosPerRow) : 0;
-          const photoBlockH = photoRows * (FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP + 8);
-          const ROW_H = Math.max(16, 18 + photoBlockH + 6);
+        for (const e of entriesWithComments) {
+          // ★ Solo observaciones y fotos de actividades SIN NOK
+          const obs = collectFilteredObservations(e, false, allRelevantActivityIds);
+          // ★ FIX: Validar que el buffer sea un Buffer real con contenido
+          const photos = collectFilteredPhotoUrls(e, false, allRelevantActivityIds)
+            .filter((u) => {
+              const buf = imgCache.get(u);
+              return buf && Buffer.isBuffer(buf) && buf.length > 100;
+            });
+
+          if (!obs && photos.length === 0) continue;
+
+          const photoRows = photos.length > 0
+            ? Math.ceil(photos.length / commentPhotosPerRow)
+            : 0;
+          const photoBlockH = photoRows * (COMMENT_PHOTO_SIZE + COMMENT_PHOTO_GAP + 4);
+          // ★ FIX: No reservar espacio de foto si no hay fotos válidas
+          const ROW_H = photos.length > 0
+            ? Math.max(16, 18 + photoBlockH + 6)
+            : Math.max(16, 24);
 
           Y = addPageIfNeeded(doc, Y, ROW_H + 4, drawHeader);
 
-          // Columna ID
           doc.rect(MARGIN, Y, ID_COL_W, ROW_H).stroke(PDF_COLORS.grey300);
           doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
             .text(e.customId, MARGIN + 2, Y + 5, { width: ID_COL_W - 4 });
 
-          // Columna contenido
           doc.rect(MARGIN + ID_COL_W, Y, W - ID_COL_W, ROW_H).stroke(PDF_COLORS.grey300);
 
           const contentX = MARGIN + ID_COL_W + 4;
           const contentW = W - ID_COL_W - 8;
-          let contentY  = Y + 5;
+          let contentY   = Y + 5;
 
-          // Texto de observación
-          doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
-            .text(e.observations, contentX, contentY, { width: contentW, ellipsis: true });
+          if (obs) {
+            doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
+              .text(obs, contentX, contentY, { width: contentW, ellipsis: true });
+          }
           contentY += 13;
 
-          // Fotos en grilla
           if (photos.length > 0) {
             let photoX    = contentX;
             let inRow     = 0;
             let photoRowY = contentY;
 
             for (const url of photos) {
-              if (inRow >= photosPerRow) {
+              if (inRow >= commentPhotosPerRow) {
+                inRow     = 0;
+                photoX    = contentX;
+                photoRowY += COMMENT_PHOTO_SIZE + COMMENT_PHOTO_GAP + 4;
+              }
+              const buf = imgCache.get(url);
+              if (buf) {
+                try {
+                  drawClippedImage(doc, buf, photoX, photoRowY, COMMENT_PHOTO_SIZE, COMMENT_PHOTO_SIZE);
+                } catch (imgErr) {
+                  logger.warn(`Error renderizando foto en comentarios: ${imgErr}`);
+                }
+              }
+              photoX += COMMENT_PHOTO_SIZE + COMMENT_PHOTO_GAP;
+              inRow++;
+            }
+          }
+
+          Y += ROW_H;
+        }
+
+        Y += 8;
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // SECCIÓN 2: HALLAZGOS (solo de actividades con NOK)
+      // ═══════════════════════════════════════════════════════════════════════
+
+      if (entriesWithFindings.length > 0) {
+        Y = addPageIfNeeded(doc, Y, 60);
+
+        doc.rect(MARGIN, Y, W, 10).fill(PDF_COLORS.red);
+        doc.rect(MARGIN, Y, W, 10).stroke(PDF_COLORS.black);
+        doc.fontSize(7).font("Helvetica-Bold").fillColor(PDF_COLORS.white)
+          .text("Resumen de Hallazgos", MARGIN + 5, Y + 2);
+        Y += 10;
+
+        const FINDING_PHOTO_SIZE = 60;
+        const FINDING_PHOTO_GAP  = 4;
+        const ID_COL_W           = 60;
+        const findingPhotosPerRow = Math.max(
+          1,
+          Math.floor((W - ID_COL_W - 8) / (FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP))
+        );
+
+        for (const e of entriesWithFindings) {
+          // ★ Solo observaciones y fotos de actividades CON NOK
+          const obs = collectFilteredObservations(e, true, allRelevantActivityIds);
+          const photos = collectFilteredPhotoUrls(e, true, allRelevantActivityIds)
+            .filter((u) => {
+              const buf = imgCache.get(u);
+              return buf && Buffer.isBuffer(buf) && buf.length > 100;
+            });
+
+          if (!obs && photos.length === 0) continue;
+
+          const nokActivities = Object.entries(e.results)
+            .filter(([actId, status]) => status === "NOK" && allRelevantActivityIds.has(actId))
+            .map(([actId]) => actId);
+
+          const photoRows = photos.length > 0
+            ? Math.ceil(photos.length / findingPhotosPerRow)
+            : 0;
+          const photoBlockH = photoRows * (FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP + 8);
+
+          const NOK_LINE_H = 10;
+          const ROW_H = Math.max(16, 18 + NOK_LINE_H + photoBlockH + 6);
+
+          Y = addPageIfNeeded(doc, Y, ROW_H + 4, drawHeader);
+
+          doc.rect(MARGIN, Y, ID_COL_W, ROW_H).stroke(PDF_COLORS.grey300);
+          doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
+            .text(e.customId, MARGIN + 2, Y + 5, { width: ID_COL_W - 4 });
+
+          doc.fontSize(4).font("Helvetica-Bold").fillColor(PDF_COLORS.red)
+            .text(`${nokActivities.length} FALLA${nokActivities.length > 1 ? "S" : ""}`,
+              MARGIN + 2, Y + 14, { width: ID_COL_W - 4 });
+
+          doc.rect(MARGIN + ID_COL_W, Y, W - ID_COL_W, ROW_H).stroke(PDF_COLORS.grey300);
+
+          const contentX = MARGIN + ID_COL_W + 4;
+          const contentW = W - ID_COL_W - 8;
+          let contentY   = Y + 5;
+
+          if (obs) {
+            doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
+              .text(obs, contentX, contentY, { width: contentW, ellipsis: true });
+          } else {
+            doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.grey600)
+              .text("Sin comentarios adicionales.", contentX, contentY, { width: contentW });
+          }
+          contentY += 13;
+
+          if (photos.length > 0) {
+            let photoX    = contentX;
+            let inRow     = 0;
+            let photoRowY = contentY;
+
+            for (const url of photos) {
+              if (inRow >= findingPhotosPerRow) {
                 inRow     = 0;
                 photoX    = contentX;
                 photoRowY += FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP + 8;
@@ -1107,6 +1375,8 @@ async function buildPdf(p: {
 
         Y += 8;
       }
+
+
       // ═══════════════════════════════════════════════════════════════════
       // OBSERVACIONES Y RESUMEN
       // ═══════════════════════════════════════════════════════════════════
@@ -1216,21 +1486,17 @@ function drawListCell(
   const innerW = colW - 6;
   let cursorY = y + 2;
 
-  // ── Línea 1: Nombre actividad + Frecuencia + Status ──
   const nameW = innerW * 0.50;
   const freqW = 30;
   const statusZoneX = innerX + nameW + freqW + 4;
 
-  // Nombre de actividad con número
   doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
     .text(`${cell.activityNumber}. ${cell.activity.name}`, innerX, cursorY, { width: nameW, ellipsis: true });
 
-  // Frecuencia
   const freqText = cell.activity.frequency.split(".").pop() || "";
   doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)
     .text(freqText, innerX + nameW + 2, cursorY + 0.5, { width: freqW, ellipsis: true });
 
-  // Status indicator
   const status = cell.entry.results[cell.activity.id];
   const statusCenterX = statusZoneX + 4;
   const statusCenterY = cursorY + 3;
@@ -1246,7 +1512,6 @@ function drawListCell(
   } else if (status === "NR") {
     doc.circle(statusCenterX, statusCenterY, 3).fill(PDF_COLORS.orange);
   } else if (status && status.trim() !== "") {
-    // ★ VALOR MEDIDO — mostrar el texto en azul dentro de una cajita
     const valueW = innerW - nameW - freqW - 10;
     doc.rect(statusZoneX - 1, cursorY - 1, valueW + 2, 8)
       .fillAndStroke("#EFF6FF", "#BFDBFE");
@@ -1263,7 +1528,6 @@ function drawListCell(
 
   cursorY += 12;
 
-  // ── Fotos ──
   const hasPhotos = cell.actData?.photoUrls && cell.actData.photoUrls.length > 0;
   if (hasPhotos) {
     let photoX = innerX;
@@ -1288,7 +1552,6 @@ function drawListCell(
     cursorY += photoSize + 3;
   }
 
-  // ── Observaciones de actividad ──
   if (cell.actData?.observations?.trim()) {
     const obsW = innerW;
     doc.fontSize(4).font("Helvetica").fillColor(PDF_COLORS.grey600)

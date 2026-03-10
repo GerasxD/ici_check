@@ -948,6 +948,12 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       return;
     }
 
+    final nokSinFoto = _notifier.getNokWithoutPhotos(_devicesEffective);
+    if (nokSinFoto.isNotEmpty) {
+      _showNokPhotoDialog(nokSinFoto);
+      return;
+    }
+
     final timeStr = DateFormat('HH:mm').format(DateTime.now());
     _notifier.endService(timeStr);
   }
@@ -958,6 +964,87 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     if (_adminOverride) {
       setState(() => _adminOverride = false);
     }
+  }
+
+
+  void _showNokPhotoDialog(List<String> missing) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.photo_camera_outlined, color: Color(0xFFEF4444), size: 24),
+            SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Fotos requeridas',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+              ),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Las siguientes actividades marcadas como NOK requieren evidencia fotográfica:',
+                style: TextStyle(fontSize: 13, color: Color(0xFF64748B)),
+              ),
+              const SizedBox(height: 12),
+              // ★ FIX: Usar ConstrainedBox + SingleChildScrollView en vez de ListView.builder
+              ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.3,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: missing.map((item) => Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.warning_amber_rounded,
+                              size: 16, color: Color(0xFFF59E0B)),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              item,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF1E293B),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )).toList(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF3B82F6),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
+            ),
+            child: const Text('Entendido',
+                style: TextStyle(fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
   }
 
   // ══════════════════════════════════════════════════════════════════════
