@@ -8,6 +8,8 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:ici_check/features/auth/data/models/user_model.dart';
 import 'package:ici_check/features/auth/data/users_repository.dart';
+import 'package:ici_check/features/corrective_log/data/corrective_log_repository.dart';
+import 'package:ici_check/features/corrective_log/presentation/corrective_log_screen.dart';
 import 'package:ici_check/features/notifications/data/notification_model.dart';
 import 'package:ici_check/features/notifications/data/notification_service.dart';
 import 'package:ici_check/features/reports/presentation/service_report_screen.dart';
@@ -40,6 +42,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
 
   final ScrollController _headerScrollCtrl = ScrollController();
   final ScrollController _bodyScrollCtrl = ScrollController();
+
+  int _correctivePendingCount = 0;
 
   bool _isLoading = true;
   bool _isEditing = false;
@@ -100,6 +104,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     });
 
     _loadAllData();
+    _loadCorrectiveStats();
   }
 
   @override
@@ -1464,6 +1469,32 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
     );
   }
 
+  void _openCorrectiveLog() {
+    if (_client == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CorrectiveLogScreen(
+          policy: _policy,
+          client: _client!,
+          devices: _deviceDefinitions,
+        ),
+      ),
+    ).then((_) {
+      // Al volver, actualizar el conteo de pendientes
+      _loadCorrectiveStats();
+    });
+  }
+
+  Future<void> _loadCorrectiveStats() async {
+    try {
+      final stats = await CorrectiveLogRepository().getStats(_policy.id);
+      if (mounted) {
+        setState(() => _correctivePendingCount = stats.pending);
+      }
+    } catch (_) {}
+  }
+
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
       backgroundColor: _cardWhite,
@@ -1503,6 +1534,24 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
         ],
       ),
       actions: [
+        // ★ NUEVO: Botón de Bitácora de Correctivos
+        Padding(
+          padding: const EdgeInsets.only(right: 4),
+          child: IconButton(
+            icon: Badge(
+              // Muestra el conteo de pendientes
+              isLabelVisible: _correctivePendingCount > 0,
+              label: Text(
+                '$_correctivePendingCount',
+                style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
+              ),
+              backgroundColor: const Color(0xFFEF4444),
+              child: Icon(Icons.build_circle_outlined, color: _primaryDark),
+            ),
+            tooltip: "Bitácora de Correctivos",
+            onPressed: _openCorrectiveLog,
+          ),
+        ),
         // --- NUEVO BOTÓN DE DESCARGAR CRONOGRAMA ---
         Padding(
           padding: const EdgeInsets.only(right: 8),
