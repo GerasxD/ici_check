@@ -184,17 +184,23 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
             .listen((snapshot) {
           if (!mounted) return;
 
-          // ★ Calcular el TOTAL esperado directamente desde la póliza actual,
-          // no desde el reporte guardado (que puede estar desactualizado)
           int expectedTotal = 0;
           for (final devInstance in _policy.devices) {
+            if (devInstance.cumulativeActivities.isEmpty) continue;
+            
             final def = _deviceDefinitions.firstWhere(
               (d) => d.id == devInstance.definitionId,
               orElse: () => DeviceModel(id: 'err', name: '', description: '', activities: []),
             );
-            if (def.id == 'err' || !def.isCumulative) continue;
-            // Total = actividades × unidades
-            expectedTotal += def.activities.length * devInstance.quantity;
+            if (def.id == 'err') continue;
+            
+            // Contar solo las actividades que son acumulativas
+            final cumulativeActCount = def.activities
+                .where((a) => devInstance.cumulativeActivities.contains(a.id))
+                .where((a) => !devInstance.excludedActivities.contains(a.id))
+                .length;
+            
+            expectedTotal += cumulativeActCount * devInstance.quantity;
           }
 
           if (snapshot.docs.isEmpty) {
@@ -2038,10 +2044,11 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       ...def.activities
+                        .where((act) => devInstance.cumulativeActivities.contains(act.id))
                         .where((act) => !devInstance.excludedActivities.contains(act.id))
                         .map((act) => GestureDetector(
                         onLongPress: _isEditing
-                            ? () => _showExcludeActivityDialog(devInstance, act, def)
+                            ? () => _showActivityOptionsDialog(devInstance, act, def)
                             : null,
                         child: Padding(
                           padding: const EdgeInsets.only(bottom: 4),
@@ -2248,10 +2255,6 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
           id: 'err', name: 'Unknown', description: '', activities: []),
     );
 
-     if (def.isCumulative) {
-      return _buildCumulativeDeviceRow(dIdx, devInstance, def, colCount);
-    }
-
     // 1. HEADER PEGAJOSO (El renglón gris del dispositivo)
     Widget stickyHeader = Container(
       // Usamos un color sólido (no transparente) para tapar lo que pasa por debajo al scrollear
@@ -2346,6 +2349,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
 
     for (var activity in def.activities) {
       if (devInstance.excludedActivities.contains(activity.id)) continue;
+      if (devInstance.cumulativeActivities.contains(activity.id)) continue;
       Frequency effectiveFreq = _getEffectiveFrequency(devInstance, activity);
       bool isWeeklyFreq = effectiveFreq == Frequency.SEMANAL ||
           effectiveFreq == Frequency.QUINCENAL; 
@@ -2365,8 +2369,8 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
             TableCell(
                 child: GestureDetector(
                 onLongPress: _isEditing
-                    ? () => _showExcludeActivityDialog(devInstance, activity, def)
-                    : null,
+                  ? () => _showActivityOptionsDialog(devInstance, activity, def)
+                  : null,
                 child: Container(
                   padding: const EdgeInsets.only(
                     left: 48,
@@ -2425,7 +2429,7 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
                             ),
                             if (_isEditing)
                             Text(
-                              "Mantén presionado para excluir",
+                              "Mantén presionado para excluir o Hacer Actividad Acumulativa",
                               style: TextStyle(
                                 fontSize: 8,
                                 color: Colors.red.shade300,
@@ -2546,13 +2550,37 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
       );
     }
 
-    return StickyHeader(
-      header: stickyHeader,
-      content: Table(
-        defaultColumnWidth: const FixedColumnWidth(100),
-        columnWidths: const {0: FixedColumnWidth(280)},
-        children: activityRows,
-      ),
+     //Al final de _buildDeviceSection, DESPUÉS del StickyHeader de actividades normales
+    // Verificar si este dispositivo tiene actividades acumulativas
+    final hasCumulativeActs = devInstance.cumulativeActivities.isNotEmpty;
+
+    if (!hasCumulativeActs) {
+      return StickyHeader(
+        header: stickyHeader,
+        content: Table(
+          defaultColumnWidth: const FixedColumnWidth(100),
+          columnWidths: const {0: FixedColumnWidth(280)},
+          children: activityRows,
+        ),
+      );
+    }
+
+    // Si tiene ambas, retornar Column con ambas secciones
+    return Column(
+      children: [
+        // Actividades normales
+        if (activityRows.isNotEmpty)
+          StickyHeader(
+            header: stickyHeader,
+            content: Table(
+              defaultColumnWidth: const FixedColumnWidth(100),
+              columnWidths: const {0: FixedColumnWidth(280)},
+              children: activityRows,
+            ),
+          ),
+        // Sección acumulativa
+        _buildCumulativeDeviceRow(dIdx, devInstance, def, colCount),
+      ],
     );
   }
 
@@ -2598,6 +2626,145 @@ class _SchedulerScreenState extends State<SchedulerScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  void _showCumulativeActivityDialog(
+    PolicyDevice devInstance,
+    ActivityConfig activity,
+    DeviceModel def,
+  ) {
+    final isCumulative = devInstance.cumulativeActivities.contains(activity.id);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(isCumulative ? 'Quitar Acumulativo' : 'Marcar como Acumulativo'),
+        content: Text(
+          isCumulative
+              ? '¿Deseas quitar "${activity.name}" del reporte acumulativo?\n\n'
+                'Volverá a aparecer en los reportes periódicos normales.'
+              : '¿Deseas marcar "${activity.name}" como acumulativa?\n\n'
+                'Se moverá al reporte acumulativo donde se llena gradualmente '
+                'durante toda la póliza, y dejará de aparecer en los reportes periódicos.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('CANCELAR'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: isCumulative ? Colors.grey : const Color(0xFFF59E0B),
+            ),
+            onPressed: () {
+              Navigator.pop(ctx);
+              setState(() {
+                if (isCumulative) {
+                  devInstance.cumulativeActivities.remove(activity.id);
+                } else {
+                  devInstance.cumulativeActivities.add(activity.id);
+                }
+                _hasChanges = true;
+              });
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(isCumulative
+                        ? '✅ "${activity.name}" regresó a reportes normales'
+                        : '📦 "${activity.name}" movida a reporte acumulativo'),
+                    backgroundColor: isCumulative ? Colors.blue : const Color(0xFFF59E0B),
+                  ),
+                );
+              }
+            },
+            child: Text(
+              isCumulative ? 'QUITAR' : 'HACER ACUMULATIVO',
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showActivityOptionsDialog(
+    PolicyDevice devInstance,
+    ActivityConfig activity,
+    DeviceModel def,
+  ) {
+    final isExcluded = devInstance.excludedActivities.contains(activity.id);
+    final isCumulative = devInstance.cumulativeActivities.contains(activity.id);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+            top: 8,
+            left: 20,
+            right: 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 20),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              // Título
+              Text(
+                activity.name,
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: _textPrimary,
+                ),
+              ),
+              const SizedBox(height: 16),
+              // Opción 1: Excluir/Restaurar
+              _BottomSheetAction(
+                icon: isExcluded ? Icons.restore : Icons.remove_circle_outline,
+                color: isExcluded ? Colors.green : Colors.red,
+                title: isExcluded ? 'Restaurar Actividad' : 'Excluir Actividad',
+                subtitle: isExcluded
+                    ? 'Volver a incluir en esta póliza'
+                    : 'Eliminar de esta póliza',
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showExcludeActivityDialog(devInstance, activity, def);
+                },
+              ),
+              const SizedBox(height: 12),
+              // Opción 2: Acumulativo
+              _BottomSheetAction(
+                icon: isCumulative ? Icons.undo : Icons.inventory_2_outlined,
+                color: isCumulative ? Colors.grey : const Color(0xFFF59E0B),
+                title: isCumulative ? 'Quitar de Acumulativo' : 'Marcar Acumulativo',
+                subtitle: isCumulative
+                    ? 'Devolver a reportes periódicos'
+                    : 'Mover al reporte acumulativo de la póliza',
+                badge: isCumulative ? 'ACUM.' : null,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _showCumulativeActivityDialog(devInstance, activity, def);
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
     );
   }
 

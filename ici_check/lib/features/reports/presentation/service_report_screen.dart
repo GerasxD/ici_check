@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:gal/gal.dart';
@@ -411,8 +412,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     ServiceReportModel existingReport,
   ) async {
     final policyToUse = _currentPolicy ?? widget.policy;
-    final cumulativeDefs =
-        _devicesEffective.where((d) => d.isCumulative).toList();
+    final cumulativeDefs = _devicesEffective; // Pasar todos, el repo filtra
 
     if (cumulativeDefs.isEmpty) {
       _handleNotifierUpdate(existingReport);
@@ -699,10 +699,27 @@ void _handleNotifierUpdate(ServiceReportModel report) {
       final defId = deviceInstance.definitionId;
 
       final excludedIds = deviceInstance.excludedActivities;
-      if (excludedIds.isNotEmpty) {
+      final cumulativeIds = deviceInstance.cumulativeActivities;
+
+      // En reporte normal: ocultar excluidas + ocultar acumulativas
+      // En reporte acumulativo: ocultar excluidas + ocultar las NO acumulativas
+      final Set<String> idsToRemove;
+      if (_isCumulative) {
+        final allResultKeys = entry.results.keys.toSet();
+        idsToRemove = {
+          ...excludedIds,
+          ...allResultKeys.where((k) => !cumulativeIds.contains(k)),
+        };
+      } else {
+        idsToRemove = {...excludedIds, ...cumulativeIds};
+      }
+
+      if (idsToRemove.isNotEmpty) {
         final filteredResults = Map<String, String?>.from(entry.results)
-          ..removeWhere((key, _) => excludedIds.contains(key));
-        // Reemplazar la entry con results filtrados
+          ..removeWhere((key, _) => idsToRemove.contains(key));
+
+        if (filteredResults.isEmpty) continue;
+
         final filteredEntry = ReportEntry(
           instanceId: entry.instanceId,
           deviceIndex: entry.deviceIndex,
@@ -712,19 +729,11 @@ void _handleNotifierUpdate(ServiceReportModel report) {
           observations: entry.observations,
           photoUrls: entry.photoUrls,
           activityData: Map<String, ActivityData>.from(entry.activityData)
-            ..removeWhere((key, _) => excludedIds.contains(key)),
+            ..removeWhere((key, _) => idsToRemove.contains(key)),
           assignedUserId: entry.assignedUserId,
         );
         (grouped[defId] ??= []).add(filteredEntry);
         continue;
-      }
-      // ★ NUEVO: Saltar dispositivos acumulativos en reportes normales
-      if (!_isCumulative) {
-        final def = _devicesEffective.firstWhere(
-          (d) => d.id == defId,
-          orElse: () => DeviceModel(id: 'err', name: '', description: '', activities: []),
-        );
-        if (def.id != 'err' && def.isCumulative) continue;
       }
       (grouped[defId] ??= []).add(entry);
     }
@@ -1161,6 +1170,7 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     );
   }
 
+  // En _pickFromCamera():
   Future<void> _pickFromCamera() async {
     try {
       final XFile? image = await _picker.pickImage(
@@ -1169,10 +1179,12 @@ void _handleNotifierUpdate(ServiceReportModel report) {
         imageQuality: 85,
       );
       if (image != null) {
-        try {
-          await Gal.putImage(image.path, album: "ICI Check");
-        } catch (e) {
-          debugPrint("⚠️ Error guardando en galería local: $e");
+        if (!kIsWeb) { // ← Solo guardar en galería en móvil
+          try {
+            await Gal.putImage(image.path, album: "ICI Check");
+          } catch (e) {
+            debugPrint("⚠️ Error guardando en galería local: $e");
+          }
         }
         await _processAndUploadImages([image]);
       }
@@ -1205,8 +1217,11 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     int successCount = 0;
 
     // ★ OFFLINE: Verificar conectividad
-    final connectivity = await Connectivity().checkConnectivity();
-    final bool isOffline = connectivity.contains(ConnectivityResult.none);
+    bool isOffline = false;
+    if (!kIsWeb) {
+      final connectivity = await Connectivity().checkConnectivity();
+      isOffline = connectivity.contains(ConnectivityResult.none);
+    }
 
     try {
       for (int i = 0; i < images.length; i++) {
@@ -1455,9 +1470,17 @@ void _handleNotifierUpdate(ServiceReportModel report) {
           .toSet();
 
       final scheduledActivityIds = entries.expand((e) => e.results.keys).toSet();
-      final relevantActivities = deviceDef.activities
-          .where((a) => scheduledActivityIds.contains(a.id) && !excludedForDef.contains(a.id))
-          .toList();
+      final cumulativeForDef = policyToUse.devices
+          .where((d) => d.definitionId == defId)
+          .expand((d) => d.cumulativeActivities)
+          .toSet();
+
+      final relevantActivities = deviceDef.activities.where((a) {
+        if (!scheduledActivityIds.contains(a.id)) return false;
+        if (excludedForDef.contains(a.id)) return false;
+        if (_isCumulative) return cumulativeForDef.contains(a.id);
+        return !cumulativeForDef.contains(a.id);
+      }).toList();
 
       if (relevantActivities.isEmpty) continue;
 

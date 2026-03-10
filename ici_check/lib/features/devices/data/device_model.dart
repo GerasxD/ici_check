@@ -76,7 +76,6 @@ class DeviceModel {
   String name;
   String description;
   String viewMode;
-  bool isCumulative;    
   List<ActivityConfig> activities;
 
   DeviceModel({
@@ -84,7 +83,6 @@ class DeviceModel {
     required this.name,
     required this.description,
     this.viewMode = 'table',
-    this.isCumulative = false,
     required this.activities,
   });
 
@@ -93,7 +91,6 @@ class DeviceModel {
       'name': name,
       'description': description,
       'viewMode': viewMode,
-      'isCumulative': isCumulative,
       'activities': activities.map((x) => x.toMap()).toList(),
     };
   }
@@ -104,7 +101,6 @@ class DeviceModel {
       name: map['name'] ?? '',
       description: map['description'] ?? '',
       viewMode: map['viewMode'] ?? 'table',
-      isCumulative: map['isCumulative'] ?? false,
       activities: List<ActivityConfig>.from(
         (map['activities'] ?? []).map((x) => ActivityConfig.fromMap(x)),
       ),

@@ -13,6 +13,22 @@ class ReportsRepository {
   final _uuid = const Uuid();
   final Set<String> _savedReportIds = {};
 
+  /// Determina si una actividad es acumulativa según la póliza.
+  /// Ya NO depende de DeviceModel.isCumulative.
+  static bool isActivityCumulative(PolicyModel policy, String definitionId, String activityId) {
+    for (final dev in policy.devices) {
+      if (dev.definitionId == definitionId) {
+        return dev.cumulativeActivities.contains(activityId);
+      }
+    }
+    return false;
+  }
+
+  /// Retorna true si este PolicyDevice tiene AL MENOS una actividad acumulativa.
+  static bool hasAnyCumulativeActivity(PolicyDevice devInstance) {
+    return devInstance.cumulativeActivities.isNotEmpty;
+  }
+
   static String unitInstanceId(String baseInstanceId, int unitIndex) {
     if (unitIndex == 1) return baseInstanceId;
     // ✅ Optimizado: Interpolación simple sin instanciar RegExp
@@ -175,7 +191,6 @@ class ReportsRepository {
     for (final devInstance in policy.devices) {
       final def = definitionsMap[devInstance.definitionId] ?? dummyDevice;
       if (def.id == 'err') continue;
-      if (def.isCumulative) continue;
       final namePrefix = def.name.substring(0, min(3, def.name.length)).toUpperCase();
 
       for (int i = 1; i <= devInstance.quantity; i++) {
@@ -193,6 +208,7 @@ class ReportsRepository {
 
         // (Lógica de frecuencias intacta)
         for (final act in def.activities) {
+          if (devInstance.cumulativeActivities.contains(act.id)) continue;
           bool isDue = false;
           const double epsilon = 0.05;
 
@@ -257,8 +273,6 @@ class ReportsRepository {
     return entries;
   }
 
-  /// Genera o recupera el reporte acumulativo de una póliza.
-  /// dateStr = "CUMULATIVE" lo diferencia de los mensuales/semanales.
   Future<ServiceReportModel?> getOrCreateCumulativeReport({
     required PolicyModel policy,
     required List<DeviceModel> definitions,
@@ -266,28 +280,24 @@ class ReportsRepository {
   }) async {
     const String dateStr = 'CUMULATIVE';
 
-    // 1. Buscar si ya existe
     final existing = await getReportOnce(policy.id, dateStr);
     if (existing != null) return existing;
 
-    // 2. Filtrar solo definiciones acumulativas
-    final cumulativeDefs = definitions.where((d) => d.isCumulative).toList();
-    if (cumulativeDefs.isEmpty) return null;
+    // ★ CAMBIO: Verificar por póliza
+    final bool hasCumulativeActivities = policy.devices.any(
+      (d) => d.cumulativeActivities.isNotEmpty,
+    );
+    if (!hasCumulativeActivities) return null;
 
-    final cumulativeDefIds = cumulativeDefs.map((d) => d.id).toSet();
-
-    // 3. Generar entries para TODOS los dispositivos acumulativos
     final entries = _generateCumulativeEntriesPublic(
       policy: policy,
-      definitions: cumulativeDefs,
-      cumulativeDefIds: cumulativeDefIds,
+      definitions: definitions,
       savedLocations: savedLocations,
     );
 
     if (entries.isEmpty) return null;
 
     final reportId = '${policy.id}_$dateStr';
-
     final report = ServiceReportModel(
       id: reportId,
       policyId: policy.id,
@@ -298,17 +308,12 @@ class ReportsRepository {
     );
 
     await saveReport(report);
-    debugPrint('✅ Reporte acumulativo creado: ${entries.length} entradas');
     return report;
   }
 
-  /// Genera entries para TODOS los dispositivos acumulativos.
-  /// A diferencia de generateEntriesForDate(), NO filtra por frecuencia/tiempo:
-  /// incluye todas las actividades porque el técnico las irá llenando gradualmente.
   List<ReportEntry> _generateCumulativeEntriesPublic({
     required PolicyModel policy,
     required List<DeviceModel> definitions,
-    required Set<String> cumulativeDefIds,
     required Map<String, Map<String, String>> savedLocations,
   }) {
     final List<ReportEntry> entries = [];
@@ -319,7 +324,8 @@ class ReportsRepository {
     final Set<String> usedUids = {};
 
     for (final devInstance in policy.devices) {
-      if (!cumulativeDefIds.contains(devInstance.definitionId)) continue;
+      // ★ CAMBIO CLAVE: Solo procesar si tiene actividades acumulativas
+      if (devInstance.cumulativeActivities.isEmpty) continue;
 
       final def = definitionsMap[devInstance.definitionId];
       if (def == null) continue;
@@ -331,7 +337,6 @@ class ReportsRepository {
       for (int i = 1; i <= devInstance.quantity; i++) {
         String uid = unitInstanceId(devInstance.instanceId, i);
 
-        // Evitar colisiones de UID
         int collisionCounter = 1;
         String baseUid = uid;
         while (usedUids.contains(uid)) {
@@ -340,11 +345,19 @@ class ReportsRepository {
         }
         usedUids.add(uid);
 
-        // ★ CLAVE: Incluir TODAS las actividades, todas pendientes
+        // ★ CAMBIO CLAVE: Solo incluir actividades que están en cumulativeActivities
         final Map<String, String?> activityResults = {};
         for (final act in def.activities) {
-          activityResults[act.id] = null;
+          if (devInstance.cumulativeActivities.contains(act.id)) {
+            // También respetar excludedActivities
+            if (!devInstance.excludedActivities.contains(act.id)) {
+              activityResults[act.id] = null;
+            }
+          }
         }
+
+        // Si no quedaron actividades, saltar esta unidad
+        if (activityResults.isEmpty) continue;
 
         final int deviceIndex =
             (deviceCounters[devInstance.definitionId] ?? 0) + 1;
@@ -395,8 +408,6 @@ class ReportsRepository {
     return (total: total, completed: completed);
   }
 
-  /// Sincroniza el reporte acumulativo existente con los dispositivos
-  /// actuales de la póliza (agrega nuevos, elimina los removidos).
   Future<ServiceReportModel?> syncCumulativeReport({
     required PolicyModel policy,
     required List<DeviceModel> definitions,
@@ -404,27 +415,22 @@ class ReportsRepository {
   }) async {
     const String dateStr = 'CUMULATIVE';
 
-    final cumulativeDefs = definitions.where((d) => d.isCumulative).toList();
-    if (cumulativeDefs.isEmpty) {
-      // Si ya no hay dispositivos acumulativos, no hay nada que sincronizar
-      return null;
-    }
+    // ★ CAMBIO: Ya no filtramos por def.isCumulative, sino por póliza
+    final bool hasCumulativeActivities = policy.devices.any(
+      (d) => d.cumulativeActivities.isNotEmpty,
+    );
 
-    final cumulativeDefIds = cumulativeDefs.map((d) => d.id).toSet();
+    if (!hasCumulativeActivities) return null;
 
-    // Generar el set "ideal" de entries según la póliza actual
     final idealEntries = _generateCumulativeEntriesPublic(
       policy: policy,
-      definitions: cumulativeDefs,
-      cumulativeDefIds: cumulativeDefIds,
+      definitions: definitions,
       savedLocations: savedLocations,
     );
 
-    // Buscar el reporte existente
     final existing = await getReportOnce(policy.id, dateStr);
 
     if (existing == null) {
-      // No existe aún → crear desde cero
       if (idealEntries.isEmpty) return null;
 
       final reportId = '${policy.id}_$dateStr';
@@ -440,20 +446,12 @@ class ReportsRepository {
       return report;
     }
 
-    // Merge: preserva respuestas existentes, agrega nuevos, elimina removidos
-    final mergedEntries = mergeEntries(
-      existing.entries,
-      idealEntries,
-      savedLocations,
-    );
-
-    // Solo guardar si realmente hubo cambios estructurales
+    final mergedEntries = mergeEntries(existing.entries, idealEntries, savedLocations);
     final bool changed = _entriesStructureChanged(existing.entries, mergedEntries);
     if (!changed) return existing;
 
     final updatedReport = existing.copyWith(entries: mergedEntries);
     await saveReport(updatedReport);
-    debugPrint('✅ Reporte acumulativo sincronizado: ${mergedEntries.length} entradas');
     return updatedReport;
   }
 

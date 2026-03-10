@@ -1042,7 +1042,7 @@ async function buildPdf(p: {
       // HALLAZGOS GENERALES
       // ═══════════════════════════════════════════════════════════════════
 
-      const entriesWithObs = report.entries.filter((e) => e.observations.trim());
+      const entriesWithObs = report.entries.filter((e) => e.observations.trim() !== "");
       if (entriesWithObs.length > 0) {
         Y = addPageIfNeeded(doc, Y, 60);
 
@@ -1052,23 +1052,61 @@ async function buildPdf(p: {
           .text("Hallazgos / Mejoras / Comentarios generales", MARGIN + 5, Y + 2);
         Y += 10;
 
+        const FINDING_PHOTO_SIZE = 60;
+        const FINDING_PHOTO_GAP  = 4;
+        const ID_COL_W           = 60;
+        const photosPerRow = Math.max(1, Math.floor((W - ID_COL_W - 8) / (FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP)));
+
         for (const e of entriesWithObs) {
-          Y = addPageIfNeeded(doc, Y, 16);
+          // ── Fotos adjuntas al hallazgo (solo e.photoUrls) ──
+          const photos = (e.photoUrls ?? []).filter((u) => !!imgCache.get(u));
+          const photoRows = photos.length > 0 ? Math.ceil(photos.length / photosPerRow) : 0;
+          const photoBlockH = photoRows * (FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP + 8);
+          const ROW_H = Math.max(16, 18 + photoBlockH + 6);
 
-          doc.rect(MARGIN, Y, 60, 16).stroke(PDF_COLORS.grey300);
+          Y = addPageIfNeeded(doc, Y, ROW_H + 4, drawHeader);
+
+          // Columna ID
+          doc.rect(MARGIN, Y, ID_COL_W, ROW_H).stroke(PDF_COLORS.grey300);
           doc.fontSize(6).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
-            .text(e.customId, MARGIN + 2, Y + 5, { width: 56 });
+            .text(e.customId, MARGIN + 2, Y + 5, { width: ID_COL_W - 4 });
 
-          doc.rect(MARGIN + 60, Y, W - 60, 16).stroke(PDF_COLORS.grey300);
+          // Columna contenido
+          doc.rect(MARGIN + ID_COL_W, Y, W - ID_COL_W, ROW_H).stroke(PDF_COLORS.grey300);
+
+          const contentX = MARGIN + ID_COL_W + 4;
+          const contentW = W - ID_COL_W - 8;
+          let contentY  = Y + 5;
+
+          // Texto de observación
           doc.fontSize(6).font("Helvetica").fillColor(PDF_COLORS.black)
-            .text(e.observations, MARGIN + 62, Y + 5, { width: W - 64, ellipsis: true });
+            .text(e.observations, contentX, contentY, { width: contentW, ellipsis: true });
+          contentY += 13;
 
-          Y += 16;
+          // Fotos en grilla
+          if (photos.length > 0) {
+            let photoX    = contentX;
+            let inRow     = 0;
+            let photoRowY = contentY;
+
+            for (const url of photos) {
+              if (inRow >= photosPerRow) {
+                inRow     = 0;
+                photoX    = contentX;
+                photoRowY += FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP + 8;
+              }
+              const buf = imgCache.get(url);
+              if (buf) drawClippedImage(doc, buf, photoX, photoRowY, FINDING_PHOTO_SIZE, FINDING_PHOTO_SIZE);
+              photoX += FINDING_PHOTO_SIZE + FINDING_PHOTO_GAP;
+              inRow++;
+            }
+          }
+
+          Y += ROW_H;
         }
 
         Y += 8;
       }
-
       // ═══════════════════════════════════════════════════════════════════
       // OBSERVACIONES Y RESUMEN
       // ═══════════════════════════════════════════════════════════════════

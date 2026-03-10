@@ -361,21 +361,36 @@ class SchedulePdfService {
 
           List<pw.TableRow> rows = [];
 
-          if (def.isCumulative) {
-            // Buscar reporte CUMULATIVE
+          // ★ Si este dispositivo tiene actividades acumulativas en esta póliza,
+          // mostrar fila de progreso acumulativo
+          final hasCumulativeActs = devInstance.cumulativeActivities.isNotEmpty;
+
+          if (hasCumulativeActs) {
             Map<String, dynamic>? cumulativeReport;
             try {
               cumulativeReport =
                   reports.firstWhere((r) => r['dateStr'] == 'CUMULATIVE');
             } catch (_) {}
 
+            // Contar solo las actividades acumulativas de ESTE dispositivo
             int total = 0, completed = 0;
             if (cumulativeReport != null) {
               final entries = cumulativeReport['entries'] as List<dynamic>? ?? [];
               for (final entry in entries) {
+                final instanceId = entry['instanceId'] as String? ?? '';
+                // Verificar que pertenece a este devInstance
+                final bool matches = instanceId == devInstance.instanceId ||
+                    (instanceId.startsWith('${devInstance.instanceId}_') &&
+                        RegExp(r'^\d+$').hasMatch(
+                            instanceId.substring(devInstance.instanceId.length + 1)));
+                if (!matches) continue;
+
                 final results = entry['results'] as Map<String, dynamic>? ?? {};
-                for (final value in results.values) {
+                for (final actId in devInstance.cumulativeActivities) {
+                  if (devInstance.excludedActivities.contains(actId)) continue;
+                  if (!results.containsKey(actId)) continue;
                   total++;
+                  final value = results[actId];
                   if (value == 'OK' || value == 'NOK' || value == 'NA') {
                     completed++;
                   }
@@ -386,25 +401,23 @@ class SchedulePdfService {
             final pct = total > 0 ? (completed / total * 100) : 0.0;
 
             rows.add(pw.TableRow(children: [
-              // Nombre + badge
               pw.Container(
                 padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 child: pw.Column(
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   children: [
-                    pw.Text('ACUMULATIVO',
-                      style: pw.TextStyle(
-                          font: fontBold, fontSize: 6, color: PdfColors.amber)),
+                    pw.Text(
+                      '${def.name.toUpperCase()} · ACUMULATIVO',
+                      style: pw.TextStyle(font: fontBold, fontSize: 6, color: PdfColors.amber700),
+                    ),
                     pw.SizedBox(height: 2),
                     pw.Text(
                       '$completed/$total (${pct.toStringAsFixed(0)}%)',
-                      style: pw.TextStyle(
-                          font: fontBold, fontSize: 8, color: PdfColors.grey800),
+                      style: pw.TextStyle(font: fontBold, fontSize: 8, color: PdfColors.grey800),
                     ),
                   ],
                 ),
               ),
-              // Barra de progreso en cada columna
               ...List.generate(sliceColumns.length, (_) => pw.Container(
                 height: 22,
                 alignment: pw.Alignment.center,
@@ -429,20 +442,21 @@ class SchedulePdfService {
                 ),
               )),
             ]));
-
-            return rows; // No procesar actividades individuales
+            // ★ NO retornamos aquí — seguimos para mostrar las actividades NO acumulativas
           }
 
           final visibleActivities = def.activities.where((act) {
-            // ★ Filtrar actividades excluidas
+            // Filtrar excluidas
             if (devInstance.excludedActivities.contains(act.id)) return false;
-            
-            bool isWeeklyFreq = act.frequency == Frequency.SEMANAL || 
+            // Filtrar acumulativas — van en su propia fila de progreso
+            if (devInstance.cumulativeActivities.contains(act.id)) return false;
+
+            bool isWeeklyFreq = act.frequency == Frequency.SEMANAL ||
                                 act.frequency == Frequency.QUINCENAL;
             if (viewMode == 'monthly') return !isWeeklyFreq;
             return isWeeklyFreq;
           }).toList();
-          
+
           if (visibleActivities.isEmpty && viewMode == 'weekly') return <pw.TableRow>[];
 
           // Device Header Row

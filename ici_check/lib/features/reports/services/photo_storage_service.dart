@@ -80,6 +80,7 @@ class PhotoStorageService {
 
   /// Comprime una imagen para reducir su tamaño sin perder calidad perceptible
   Future<Uint8List> _compressImage(Uint8List imageBytes) async {
+    if (kIsWeb) return imageBytes; 
     try {
       final compressed = await FlutterImageCompress.compressWithList(
         imageBytes,
@@ -217,6 +218,7 @@ class PhotoStorageService {
 
   /// Obtiene el directorio de caché de la app
   Future<Directory> _getCacheDirectory() async {
+    if (kIsWeb) throw UnsupportedError('No cache en Web');
     final appDir = await getApplicationDocumentsDirectory();
     final cacheDir = Directory('${appDir.path}/photo_cache');
     
@@ -229,6 +231,7 @@ class PhotoStorageService {
 
   /// Guarda imagen en caché local
   Future<void> _saveToCache(String url, Uint8List bytes) async {
+    if (kIsWeb) return; 
     try {
       final cacheDir = await _getCacheDirectory();
       final filename = _urlToFilename(url);
@@ -264,6 +267,7 @@ class PhotoStorageService {
 
   /// Carga imagen desde caché local
   Future<Uint8List?> _loadFromCache(String url) async {
+    if (kIsWeb) return null;
     try {
       final cacheDir = await _getCacheDirectory();
       final filename = _urlToFilename(url);

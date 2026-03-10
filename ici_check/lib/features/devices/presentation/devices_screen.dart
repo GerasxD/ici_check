@@ -73,7 +73,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
         name: device.name,
         description: device.description,
         viewMode: device.viewMode,
-        isCumulative: device.isCumulative,  // ★ NUEVO: Preservar el valor
         activities: device.activities.map((a) => ActivityConfig(
           id: a.id, name: a.name, type: a.type, frequency: a.frequency, 
           expectedValue: a.expectedValue,
@@ -262,10 +261,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
               final existingDoc = await collection.doc(existingId).get();
               if (existingDoc.exists) {
                 final existingData = existingDoc.data();
-                
-                // Preservar isCumulative si ya estaba configurado
-                dev.isCumulative = existingData?['isCumulative'] ?? false;
-                
+                                
                 final existingActivitiesList = existingData?['activities'] as List<dynamic>? ?? [];
                 
                 final Map<String, String> existingActivityIds = {};
@@ -324,8 +320,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
       if (excel.sheets.containsKey('Sheet1')) excel.rename('Sheet1', sheetName);
       
       Sheet sheet = excel[sheetName];
-      sheet.appendRow(["Dispositivo", "Descripción", "Vista Reporte", "Actividad", "Tipo", "Frecuencia", "Valor Referencia", "Acumulativo"].map((e) => TextCellValue(e)).toList());
-
+      sheet.appendRow(["Dispositivo", "Descripción", "Vista Reporte", "Actividad", "Tipo", "Frecuencia", "Valor Referencia"].map((e) => TextCellValue(e)).toList());
       for (var dev in devices) {
         if (dev.activities.isEmpty) {
           sheet.appendRow([
@@ -336,7 +331,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
             TextCellValue(""), 
             TextCellValue(""), 
             TextCellValue(""),
-            TextCellValue(dev.isCumulative ? "SI" : "NO"),  // ★ NUEVO
           ]);
         } else {
           for (var act in dev.activities) {
@@ -348,7 +342,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
               TextCellValue(act.type.toString().split('.').last), 
               TextCellValue(act.frequency.toString().split('.').last), 
               TextCellValue(act.expectedValue),
-              TextCellValue(dev.isCumulative ? "SI" : "NO"),  // ★ NUEVO
             ]);
           }
         }
@@ -760,90 +753,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                   onChanged: (v) => _selectedDevice!.description = v,
                 ),
 
-                const SizedBox(height: 24),
-
-                // ═══════════════════════════════════════════════════════
-                // ★ NUEVO: SWITCH REPORTE ACUMULATIVO
-                // ═══════════════════════════════════════════════════════
-                Container(
-                  padding: const EdgeInsets.all(16),
-                  decoration: BoxDecoration(
-                    color: _selectedDevice!.isCumulative 
-                        ? const Color(0xFFFFF7ED)   // amber-50 cuando activo
-                        : _bgLight,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: _selectedDevice!.isCumulative 
-                          ? const Color(0xFFFBBF24)  // amber-400 cuando activo
-                          : Colors.grey.shade200,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      // Ícono
-                      Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: _selectedDevice!.isCumulative
-                              ? const Color(0xFFF59E0B).withOpacity(0.15)
-                              : Colors.grey.shade100,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Icon(
-                          Icons.inventory_2_outlined,
-                          size: 22,
-                          color: _selectedDevice!.isCumulative
-                              ? const Color(0xFFF59E0B)
-                              : const Color(0xFF94A3B8),
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      // Texto
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Reporte Acumulativo',
-                              style: TextStyle(
-                                fontWeight: FontWeight.w700,
-                                fontSize: 14,
-                                color: Color(0xFF0F172A),
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Para equipos que se revisan por partes durante '
-                              'toda la póliza (ej. 400 detectores revisados '
-                              'gradualmente en múltiples visitas)',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: _textSlate,
-                                height: 1.4,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      // Switch
-                      Switch(
-                        value: _selectedDevice!.isCumulative,
-                        activeColor: const Color(0xFFF59E0B),
-                        activeTrackColor: const Color(0xFFFDE68A),
-                        onChanged: (val) {
-                          setState(() {
-                            _selectedDevice!.isCumulative = val;
-                          });
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-                // ═══════════════════════════════════════════════════════
-
-                const SizedBox(height: 32),
-                
+                const SizedBox(height: 24),                
                 // --- SECCIÓN 2: ACTIVIDADES ---
                 Wrap(
                   alignment: WrapAlignment.spaceBetween,
@@ -1234,26 +1144,6 @@ class _DeviceProCard extends StatelessWidget {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      // ★ NUEVO: Badge "ACUMULATIVO" en la lista
-                      if (device.isCumulative) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF59E0B),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text(
-                            'ACUM.',
-                            style: TextStyle(
-                              fontSize: 8,
-                              fontWeight: FontWeight.w900,
-                              color: Colors.white,
-                              letterSpacing: 0.3,
-                            ),
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                   const SizedBox(height: 4),

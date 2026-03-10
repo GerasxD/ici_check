@@ -845,55 +845,7 @@ class DeviceSectionListCard extends ConsumerWidget {
                       measuredValue: val,
                     ),
                   )
-                else
-                  if (act.inputType == ActivityInputType.value)
-                  _ValueInputBadge(
-                    currentValue: status,
-                    expectedValue: act.expectedValue,
-                    canEdit: canEdit,
-                    onChanged: (val) => notifier.toggleStatus(
-                      globalIndex, act.id,
-                      inputType: ActivityInputType.value,
-                      measuredValue: val,
-                    ),
-                  )
-                else
-                  if (act.inputType == ActivityInputType.value)
-                  _ValueInputBadge(
-                    currentValue: status,
-                    expectedValue: act.expectedValue,
-                    canEdit: canEdit,
-                    onChanged: (val) => notifier.toggleStatus(
-                      globalIndex, act.id,
-                      inputType: ActivityInputType.value,
-                      measuredValue: val,
-                    ),
-                  )
-                else
-                 if (act.inputType == ActivityInputType.value)
-                  _ValueInputBadge(
-                    currentValue: status,
-                    expectedValue: act.expectedValue,
-                    canEdit: canEdit,
-                    onChanged: (val) => notifier.toggleStatus(
-                      globalIndex, act.id,
-                      inputType: ActivityInputType.value,
-                      measuredValue: val,
-                    ),
-                  )
-                else
-                  if (act.inputType == ActivityInputType.value)
-                  _ValueInputBadge(
-                    currentValue: status,
-                    expectedValue: act.expectedValue,
-                    canEdit: canEdit,
-                    onChanged: (val) => notifier.toggleStatus(
-                      globalIndex, act.id,
-                      inputType: ActivityInputType.value,
-                      measuredValue: val,
-                    ),
-                  )
-                else
+                  else
                   InkWell(
                     onTap: canEdit
                         ? () => notifier.toggleStatus(globalIndex, act.id)
