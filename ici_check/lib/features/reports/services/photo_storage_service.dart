@@ -77,6 +77,7 @@ class PhotoStorageService {
       rethrow;
     }
   }
+  
 
   /// Comprime una imagen para reducir su tamaño sin perder calidad perceptible
   Future<Uint8List> _compressImage(Uint8List imageBytes) async {

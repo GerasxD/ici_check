@@ -2068,178 +2068,256 @@ void _handleNotifierUpdate(ServiceReportModel report) {
   // OBSERVACIONES GENERALES
   // ══════════════════════════════════════════════════════════════════════
 
-  List<Map<String, String>> _getRegisteredFindings(ReportState state) {
-    final List<Map<String, String>> findings = [];
+  List<Map<String, dynamic>> _getRegisteredFindings(ReportState state) {
+  final List<Map<String, dynamic>> findings = [];
 
     for (final entry in state.report.entries) {
-      List<String> deviceFindingsTexts = [];
+      final nokActivityIds = entry.results.entries
+          .where((e) => e.value == 'NOK')
+          .map((e) => e.key)
+          .toSet();
 
-      if (entry.observations.trim().isNotEmpty) {
-        deviceFindingsTexts.add(entry.observations.trim());
+      final hasDeviceObs = entry.observations.trim().isNotEmpty;
+      final hasActivityObs =
+          entry.activityData.values.any((d) => d.observations.trim().isNotEmpty);
+      final hasNok = nokActivityIds.isNotEmpty;
+
+      if (!hasDeviceObs && !hasActivityObs && !hasNok) continue;
+
+      final List<Map<String, dynamic>> lines = [];
+
+      if (hasDeviceObs) {
+        lines.add({'text': entry.observations.trim(), 'isNok': false});
       }
-      for (var actData in entry.activityData.values) {
-        if (actData.observations.trim().isNotEmpty) {
-          deviceFindingsTexts.add(actData.observations.trim());
+
+      for (final actId in nokActivityIds) {
+        String actName = actId;
+        for (final dev in _devicesEffective) {
+          final match = dev.activities.where((a) => a.id == actId).toList();
+          if (match.isNotEmpty) {
+            actName = match.first.name;
+            break;
+          }
         }
+        final actObs = entry.activityData[actId]?.observations.trim() ?? '';
+        final text = actObs.isNotEmpty ? '$actName: $actObs' : actName;
+        lines.add({'text': text, 'isNok': true});
       }
 
-      if (deviceFindingsTexts.isNotEmpty) {
-        String distinctId = entry.customId.isNotEmpty
+      for (final mapEntry in entry.activityData.entries) {
+        if (nokActivityIds.contains(mapEntry.key)) continue;
+        if (mapEntry.value.observations.trim().isEmpty) continue;
+
+        String actName = mapEntry.key;
+        for (final dev in _devicesEffective) {
+          final match = dev.activities.where((a) => a.id == mapEntry.key).toList();
+          if (match.isNotEmpty) {
+            actName = match.first.name;
+            break;
+          }
+        }
+        lines.add({
+          'text': '$actName: ${mapEntry.value.observations.trim()}',
+          'isNok': false,
+        });
+      }
+
+      if (lines.isNotEmpty) {
+        final String distinctId = entry.customId.isNotEmpty
             ? entry.customId
             : 'Dispositivo #${entry.deviceIndex}';
         findings.add({
           'id': distinctId,
-          'text': deviceFindingsTexts.join('\n—\n'),
+          'lines': lines as dynamic,
         });
       }
     }
+
     return findings;
   }
 
   Widget _buildGeneralObservationsBox(ReportState state, bool isEditable) {
-    final registeredFindings = _getRegisteredFindings(state);
-    final hasFindings = registeredFindings.isNotEmpty;
+  final registeredFindings = _getRegisteredFindings(state);
+  final hasFindings = registeredFindings.isNotEmpty;
 
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 32),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-        border: Border.all(color: Colors.grey.shade100),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildSectionHeader(
-              Icons.notes, 'OBSERVACIONES GENERALES DEL SERVICIO'),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: TextField(
-              enabled: isEditable,
-              controller: _generalObsController,
-              maxLines: 3,
-              style:
-                  const TextStyle(fontSize: 13, color: Color(0xFF334155)),
-              decoration: InputDecoration(
-                hintText:
-                    'Comentarios globales sobre la visita, accesos, estado general...',
-                hintStyle:
-                    TextStyle(color: Colors.grey.shade400, fontSize: 12),
-                filled: true,
-                fillColor: const Color(0xFFF8FAFC),
-                contentPadding: const EdgeInsets.all(12),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide.none,
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: BorderSide(color: Colors.grey.shade200),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(
-                    color: Color(0xFF3B82F6),
-                    width: 1.5,
-                  ),
+  return Container(
+    margin: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(16),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.04),
+          blurRadius: 10,
+          offset: const Offset(0, 4),
+        ),
+      ],
+      border: Border.all(color: Colors.grey.shade100),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionHeader(
+            Icons.notes, 'OBSERVACIONES GENERALES DEL SERVICIO'),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: TextField(
+            enabled: isEditable,
+            controller: _generalObsController,
+            maxLines: 3,
+            style: const TextStyle(fontSize: 13, color: Color(0xFF334155)),
+            decoration: InputDecoration(
+              hintText:
+                  'Comentarios globales sobre la visita, accesos, estado general...',
+              hintStyle:
+                  TextStyle(color: Colors.grey.shade400, fontSize: 12),
+              filled: true,
+              fillColor: const Color(0xFFF8FAFC),
+              contentPadding: const EdgeInsets.all(12),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide.none,
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: Colors.grey.shade200),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: const BorderSide(
+                  color: Color(0xFF3B82F6),
+                  width: 1.5,
                 ),
               ),
-              onChanged: (val) {
-                _generalObsDebounce?.cancel();
-                _generalObsDebounce =
-                    Timer(const Duration(milliseconds: 1500), () {
-                  _notifier.updateGeneralObservations(val);
-                });
-              },
             ),
+            onChanged: (val) {
+              _generalObsDebounce?.cancel();
+              _generalObsDebounce =
+                  Timer(const Duration(milliseconds: 1500), () {
+                _notifier.updateGeneralObservations(val);
+              });
+            },
           ),
-          Divider(height: 1, color: Colors.grey.shade200),
-          _buildSectionHeader(
-            Icons.find_in_page_outlined,
-            'COMENTARIOS / HALLAZGOS REGISTRADOS EN DISPOSITIVOS',
-            color: const Color(0xFFF59E0B),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: hasFindings
-                ? Column(
-                    children: registeredFindings.map((finding) {
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 12.0),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFE2E8F0),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                "${finding['id']}:",
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w800,
-                                  color: Color(0xFF1E293B),
-                                ),
-                              ),
+        ),
+        Divider(height: 1, color: Colors.grey.shade200),
+        _buildSectionHeader(
+          Icons.find_in_page_outlined,
+          'COMENTARIOS / HALLAZGOS REGISTRADOS EN DISPOSITIVOS',
+          color: const Color(0xFFF59E0B),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: hasFindings
+              ? Column(
+                  children: registeredFindings.map((finding) {
+                    final lines = List<Map<String, dynamic>>.from(finding['lines'] as List);
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 12.0),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFE2E8F0),
+                              borderRadius: BorderRadius.circular(6),
                             ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                finding['text']!,
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  color: Color(0xFF334155),
-                                  height: 1.4,
-                                ),
+                            child: Text(
+                              "${finding['id']}:",
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                color: Color(0xFF1E293B),
                               ),
-                            ),
-                          ],
-                        ),
-                      );
-                    }).toList(),
-                  )
-                : Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8FAFC),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.grey.shade100),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(Icons.check_circle_outline,
-                            size: 16, color: Colors.grey.shade400),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            "No se registraron observaciones individuales en los equipos.",
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey.shade500,
-                              fontStyle: FontStyle.italic,
                             ),
                           ),
-                        ),
-                      ],
-                    ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: lines.map((line) {
+                                final isNok = line['isNok'] as bool;
+                                return Padding(
+                                  padding:
+                                      const EdgeInsets.only(bottom: 4),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      if (isNok) ...[
+                                        Container(
+                                          width: 16,
+                                          height: 16,
+                                          margin: const EdgeInsets.only(top: 1, right: 6),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFEF4444),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: const Icon(
+                                            Icons.close,
+                                            size: 11,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ],
+                                      Expanded(
+                                        child: Text(
+                                          line['text'] as String,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: isNok
+                                                ? const Color(0xFFEF4444)
+                                                : const Color(0xFF334155),
+                                            fontWeight: isNok
+                                                ? FontWeight.w700
+                                                : FontWeight.w400,
+                                            height: 1.4,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                )
+              : Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.grey.shade100),
                   ),
-          ),
-        ],
-      ),
-    );
-  }
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.check_circle_outline,
+                          size: 16, color: Colors.grey.shade400),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          "No se registraron observaciones individuales en los equipos.",
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade500,
+                            fontStyle: FontStyle.italic,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    ),
+  );
+}
 
   Widget _buildSectionHeader(
     IconData icon,
@@ -3036,3 +3114,4 @@ class _ObservationModalState extends State<_ObservationModal> {
     );
   }
 }
+

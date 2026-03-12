@@ -9,10 +9,10 @@ enum AttentionLevel {
 
 /// Estado del correctivo
 enum CorrectiveStatus {
-  PENDING,    // Detectado, sin acción
-  REPORTED,   // Reportado al cliente (como tu "REPORTADO A ETHAN ALLEN")
-  IN_PROGRESS, // En proceso de corrección
-  CORRECTED,  // Corregido
+  PENDING,              // Detectado, sin acción
+  IN_PROGRESS,          // En proceso de corrección
+  CORRECTED_BY_ICISI,   // Corregido por ICISI
+  CORRECTED_BY_THIRD,   // Corregido por Terceros
 }
 
 class CorrectiveItemModel {
@@ -20,34 +20,34 @@ class CorrectiveItemModel {
   final String policyId;
 
   // ═══════ ORIGEN (Auto-poblado desde el reporte) ═══════
-  final String reportId;        // ID del reporte donde se detectó
-  final String reportDateStr;   // "2025-08" o "2025-W12"
-  final String deviceInstanceId; // instanceId del equipo
-  final String deviceCustomId;   // ID visible del equipo (ej: "EXT-001")
-  final String deviceArea;       // Ubicación del equipo
-  final String deviceDefId;      // definitionId del tipo de dispositivo
-  final String deviceDefName;    // Nombre del tipo (ej: "Extintor")
-  final String activityId;       // ID de la actividad que falló
-  final String activityName;     // Nombre legible de la actividad
-  final DateTime detectionDate;  // Fecha real de detección
+  final String reportId;
+  final String reportDateStr;
+  final String deviceInstanceId;
+  final String deviceCustomId;
+  final String deviceArea;
+  final String deviceDefId;
+  final String deviceDefName;
+  final String activityId;
+  final String activityName;
+  final DateTime detectionDate;
 
   // ═══════ DESCRIPCIÓN DEL PROBLEMA ═══════
-  final String problemDescription;   // Auto: observación del reporte. Editable.
-  final List<String> problemPhotoUrls; // Fotos del "antes" (del reporte + adicionales)
+  final String problemDescription;
+  final List<String> problemPhotoUrls;
 
   // ═══════ GESTIÓN DEL CORRECTIVO ═══════
-  final AttentionLevel level;           // A, B o C
+  final AttentionLevel level;
   final CorrectiveStatus status;
-  final String? reportedTo;             // Nombre de a quién se reportó (ej: "ETHAN ALLEN")
+  final String? reportedTo;
   final DateTime? estimatedCorrectionDate;
-  final String correctionAction;         // Descripción de la acción correctiva
-  final List<String> correctionPhotoUrls; // Fotos del "después"
+  final String correctionAction;
+  final List<String> correctionPhotoUrls;
 
   // ═══════ CIERRE ═══════
   final DateTime? actualCorrectionDate;
-  final String? correctedByUserId;      // Quién lo corrigió (userId)
-  final String? correctedByName;        // Nombre de quién corrigió
-  final String observations;            // Observaciones generales
+  final String? correctedByUserId;
+  final String? correctedByName;
+  final String observations;
 
   // ═══════ META ═══════
   final DateTime createdAt;
@@ -82,10 +82,13 @@ class CorrectiveItemModel {
     required this.updatedAt,
   });
 
-  /// Clave única para evitar duplicados: combinación de reporte + equipo + actividad
+  /// Clave única para evitar duplicados
   String get uniqueKey => '${reportDateStr}_${deviceInstanceId}_$activityId';
 
-  bool get isCorrected => status == CorrectiveStatus.CORRECTED;
+  /// Ahora retorna true para ambos estados de corregido
+  bool get isCorrected =>
+      status == CorrectiveStatus.CORRECTED_BY_ICISI ||
+      status == CorrectiveStatus.CORRECTED_BY_THIRD;
 
   String get levelLabel {
     switch (level) {
@@ -97,10 +100,10 @@ class CorrectiveItemModel {
 
   String get statusLabel {
     switch (status) {
-      case CorrectiveStatus.PENDING:     return 'Pendiente';
-      case CorrectiveStatus.REPORTED:    return 'Reportado';
-      case CorrectiveStatus.IN_PROGRESS: return 'En Proceso';
-      case CorrectiveStatus.CORRECTED:   return 'Corregido';
+      case CorrectiveStatus.PENDING:            return 'Pendiente';
+      case CorrectiveStatus.IN_PROGRESS:        return 'En Proceso';
+      case CorrectiveStatus.CORRECTED_BY_ICISI: return 'Corregido por ICISI';
+      case CorrectiveStatus.CORRECTED_BY_THIRD: return 'Corregido por Terceros';
     }
   }
 
@@ -227,10 +230,7 @@ class CorrectiveItemModel {
         (e) => e.name == (map['level'] ?? 'B'),
         orElse: () => AttentionLevel.B,
       ),
-      status: CorrectiveStatus.values.firstWhere(
-        (e) => e.name == (map['status'] ?? 'PENDING'),
-        orElse: () => CorrectiveStatus.PENDING,
-      ),
+      status: _parseStatus(map['status']),
       reportedTo: map['reportedTo'],
       estimatedCorrectionDate: map['estimatedCorrectionDate'] != null
           ? (map['estimatedCorrectionDate'] as Timestamp).toDate()
@@ -250,5 +250,19 @@ class CorrectiveItemModel {
           ? (map['updatedAt'] as Timestamp).toDate()
           : DateTime.now(),
     );
+  }
+
+  /// Migración segura: convierte valores viejos de Firestore al nuevo enum
+  static CorrectiveStatus _parseStatus(dynamic raw) {
+    switch (raw) {
+      case 'CORRECTED_BY_ICISI': return CorrectiveStatus.CORRECTED_BY_ICISI;
+      case 'CORRECTED_BY_THIRD': return CorrectiveStatus.CORRECTED_BY_THIRD;
+      case 'IN_PROGRESS':        return CorrectiveStatus.IN_PROGRESS;
+      // Valores viejos → mapear al más cercano
+      case 'CORRECTED':          return CorrectiveStatus.CORRECTED_BY_ICISI;
+      case 'REPORTED':           return CorrectiveStatus.IN_PROGRESS;
+      case 'PENDING':
+      default:                   return CorrectiveStatus.PENDING;
+    }
   }
 }

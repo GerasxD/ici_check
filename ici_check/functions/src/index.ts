@@ -12,3 +12,4 @@ setGlobalOptions({
 
 // ✅ Exportar la función
 export { generateServiceReportPdf } from "./generateServiceReportPdf";
+export { generateCorrectiveLogPdf } from "./corrective_log_pdf";

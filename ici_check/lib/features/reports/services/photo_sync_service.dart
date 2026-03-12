@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' show min;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:ici_check/features/reports/services/offline_photo_queue.dart';
@@ -10,6 +11,7 @@ import 'package:ici_check/features/reports/services/photo_storage_service.dart';
 class PhotoSyncService {
   final PhotoStorageService _photoService = PhotoStorageService();
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final FirebaseStorage _storage = FirebaseStorage.instance;
   StreamSubscription? _connectivitySub;
   bool _isSyncing = false;
   Timer? _retryTimer;
@@ -109,8 +111,16 @@ class PhotoSyncService {
         activityId: photo.activityId,
       );
 
+      // ★ FIX: Verificar que la URL es accesible ANTES de actualizar Firebase
+      final isAccessible = await _verifyUrlAccessible(remoteUrl);
+      if (!isAccessible) {
+        debugPrint('❌ URL subida pero no accesible: $remoteUrl');
+        await OfflinePhotoQueue.incrementRetry(photo.localPath);
+        return;
+      }
+
       final localUrl = 'local://${photo.localPath}';
-      await _replacePhotoUrlInReport(
+      final updateSuccess = await _replacePhotoUrlInReport(
         reportId: photo.reportId,
         deviceInstanceId: photo.deviceInstanceId,
         activityId: photo.activityId,
@@ -118,15 +128,34 @@ class PhotoSyncService {
         newUrl: remoteUrl,
       );
 
-      await OfflinePhotoQueue.dequeue(photo.localPath);
-      debugPrint('✅ Foto sincronizada: ${photo.deviceInstanceId}');
+      // ★ FIX: Solo eliminar si la actualización fue exitosa
+      if (updateSuccess) {
+        await OfflinePhotoQueue.dequeue(photo.localPath);
+        debugPrint('✅ Foto sincronizada: ${photo.deviceInstanceId}');
+      } else {
+        debugPrint('⚠️ No se pudo actualizar Firestore, reintentando...');
+        await OfflinePhotoQueue.incrementRetry(photo.localPath);
+      }
     } catch (e) {
       debugPrint('❌ Error sincronizando foto: $e');
       await OfflinePhotoQueue.incrementRetry(photo.localPath);
     }
   }
 
-  Future<void> _replacePhotoUrlInReport({
+  /// ★ NUEVO: Verifica que una URL es accesible sin descargar la imagen completa
+  Future<bool> _verifyUrlAccessible(String url) async {
+    try {
+      final ref = _storage.refFromURL(url);
+      // Solo obtenemos metadata (sin descargar bytes)
+      await ref.getMetadata();
+      return true;
+    } catch (e) {
+      debugPrint('⚠️ URL no accesible: $url - $e');
+      return false;
+    }
+  }
+
+  Future<bool> _replacePhotoUrlInReport({
     required String reportId,
     required String deviceInstanceId,
     String? activityId,
@@ -135,7 +164,7 @@ class PhotoSyncService {
   }) async {
     try {
       final doc = await _db.collection('reports').doc(reportId).get();
-      if (!doc.exists) return;
+      if (!doc.exists) return false;
 
       final data = doc.data()!;
       final entries = data['entries'] as List<dynamic>? ?? [];
@@ -172,9 +201,12 @@ class PhotoSyncService {
 
       if (modified) {
         await doc.reference.update({'entries': entries});
+        return true;
       }
+      return false;
     } catch (e) {
       debugPrint('Error reemplazando URL: $e');
+      return false;
     }
   }
 

@@ -5,6 +5,7 @@ import * as logger from "firebase-functions/logger";
 import axios from "axios";
 import PDFDocument from "pdfkit";
 import type { Timestamp } from "firebase-admin/firestore";
+import sharp from "sharp";
 
 // ─── INTERFACES ────────────────────────────────────────────────────────────
 
@@ -124,23 +125,45 @@ const PDF_COLORS = {
 
 const MARGIN = 14.4;
 const PAGE_HEIGHT = 792;
+const FOOTER_HEIGHT = 18; 
 const PAGE_WIDTH = 612;
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 
-async function downloadImage(url: string): Promise<Buffer | null> {
+async function downloadImage(url: string, keepTransparency = false): Promise<Buffer | null> {
   if (!url) return null;
   try {
+    let rawBuffer: Buffer;
+
     if (url.startsWith("http")) {
       const res = await axios.get(url, {
         responseType: "arraybuffer",
         timeout: 20000,
       });
-      return Buffer.from(res.data);
+      rawBuffer = Buffer.from(res.data);
+    } else {
+      const b64 = url.includes("base64,") ? url.split("base64,")[1] : url;
+      rawBuffer = Buffer.from(b64, "base64");
     }
-    const b64 = url.includes("base64,") ? url.split("base64,")[1] : url;
-    return Buffer.from(b64, "base64");
-  } catch {
+
+    // Iniciamos el pipeline de Sharp
+    let imagePipeline = sharp(rawBuffer).resize({ width: 350, withoutEnlargement: true });
+
+    if (keepTransparency) {
+      // Para firmas: Usamos PNG con compresión alta para no subir el peso
+      return await imagePipeline
+        .png({ compressionLevel: 9 }) 
+        .toBuffer();
+    } else {
+      // Para fotos normales: Aplanamos a blanco y usamos JPEG ligero
+      return await imagePipeline
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .jpeg({ quality: 60, force: true })
+        .toBuffer();
+    }
+
+  } catch (error) {
+    logger.warn(`Error descargando o comprimiendo imagen (${url}): ${error}`);
     return null;
   }
 }
@@ -409,7 +432,7 @@ function addPageIfNeeded(
   requiredSpace: number,
   drawHeaderFn?: (d: PDFKit.PDFDocument) => number
 ): number {
-  if (currentY + requiredSpace > PAGE_HEIGHT - MARGIN - 25) {
+  if (currentY + requiredSpace > PAGE_HEIGHT - MARGIN - FOOTER_HEIGHT - 10) {
     doc.addPage();
     return drawHeaderFn ? drawHeaderFn(doc) : MARGIN;
   }
@@ -437,7 +460,7 @@ function needsNewPage(
   currentY: number,
   requiredSpace: number
 ): boolean {
-  return currentY + requiredSpace > PAGE_HEIGHT - MARGIN - 25;
+  return currentY + requiredSpace > PAGE_HEIGHT - MARGIN - FOOTER_HEIGHT - 10;
 }
 
 function calcSessionDuration(startTime: string, endTime?: string): string {
@@ -498,6 +521,90 @@ function calcListCellHeight(
   return h;
 }
 
+function drawPageFooters(
+  doc: PDFKit.PDFDocument,
+  imgCache: Map<string, Buffer | null>,
+  clientSignature: string | undefined,
+  clientSignerName: string | undefined,
+  companyName: string,
+  totalPages: number
+): void {
+  const FOOTER_H    = 18;
+  const FOOTER_Y    = PAGE_HEIGHT - FOOTER_H - 4;
+  const SIG_W       = 45;
+  const SIG_H       = 14;
+  const LEFT_W      = (PAGE_WIDTH - MARGIN * 2) * 0.55;
+  const RIGHT_W     = (PAGE_WIDTH - MARGIN * 2) - LEFT_W - 4;
+  const RIGHT_X     = MARGIN + LEFT_W + 4;
+
+  for (let i = 0; i < totalPages; i++) {
+    doc.switchToPage(i);
+
+    doc.page.margins.bottom = 0;
+
+    // Fondo del footer
+    doc.rect(MARGIN, FOOTER_Y, PAGE_WIDTH - MARGIN * 2, FOOTER_H)
+      .fillAndStroke("#F5F5F5", "#BDBDBD");
+
+    // Línea decorativa superior
+    doc.rect(MARGIN, FOOTER_Y, PAGE_WIDTH - MARGIN * 2, 1.5)
+      .fill("#424242");
+
+    // ── Lado izquierdo: empresa + número de página ──────────────────
+    doc.fontSize(4.5).font("Helvetica").fillColor("#757575")
+      .text(
+        companyName,
+        MARGIN + 4, FOOTER_Y + 4,
+        { width: LEFT_W - 8, ellipsis: true }
+      );
+
+    doc.fontSize(4.5).font("Helvetica-Bold").fillColor("#424242")
+      .text(
+        `Página ${i + 1} de ${totalPages}`,
+        MARGIN + 4, FOOTER_Y + 10,
+        { width: LEFT_W - 8 }
+      );
+
+    // ── Lado derecho: "Revisado y firmado por" + firma ───────────────
+    const labelX    = RIGHT_X;
+    const sigImgX   = RIGHT_X + RIGHT_W - SIG_W - 4;
+    const sigLineX1 = sigImgX - 2;
+    const sigLineX2 = RIGHT_X + RIGHT_W - 2;
+
+    doc.fontSize(4).font("Helvetica-Bold").fillColor("#757575")
+      .text("REVISADO Y FIRMADO POR:", labelX, FOOTER_Y + 3, { width: RIGHT_W - SIG_W - 10 });
+
+    if (clientSignerName) {
+      doc.fontSize(4.5).font("Helvetica-Bold").fillColor("#212121")
+        .text(clientSignerName, labelX, FOOTER_Y + 9, {
+          width: RIGHT_W - SIG_W - 10,
+          ellipsis: true,
+        });
+    }
+
+    // Línea de firma
+    doc.moveTo(sigLineX1, FOOTER_Y + FOOTER_H - 3)
+      .lineTo(sigLineX2, FOOTER_Y + FOOTER_H - 3)
+      .dash(1.5, { space: 1.5 })
+      .strokeColor("#BDBDBD")
+      .stroke();
+    doc.undash();
+
+    // Imagen de firma (si existe)
+    if (clientSignature) {
+      const buf = imgCache.get(clientSignature);
+      if (buf) {
+        try {
+          doc.image(buf, sigImgX, FOOTER_Y + 2, {
+            fit: [SIG_W, SIG_H],
+            align: "center",
+            valign: "center",
+          });
+        } catch { /* no rompe el PDF */ }
+      }
+    }
+  }
+}
 // ─── CONSTRUCTOR DEL PDF ───────────────────────────────────────────────────
 
 async function buildPdf(p: {
@@ -528,9 +635,25 @@ async function buildPdf(p: {
       const allUrls: string[] = [];
       if (company.logoUrl) allUrls.push(company.logoUrl);
       if (client.logoUrl) allUrls.push(client.logoUrl);
-      if (report.providerSignature) allUrls.push(report.providerSignature);
-      if (report.clientSignature) allUrls.push(report.clientSignature);
 
+      // ★ Declarar el cache PRIMERO
+      const imgCache = new Map<string, Buffer | null>();
+
+      // ★ Claves cortas para firmas (evita problemas con base64 enorme como clave)
+      const CLIENT_SIG_KEY = "__client_sig__";
+      const PROVIDER_SIG_KEY = "__provider_sig__";
+
+      // ★ Pre-cargar firmas con sus claves cortas
+      if (report.clientSignature) {
+        const buf = await downloadImage(report.clientSignature, true); 
+        imgCache.set(CLIENT_SIG_KEY, buf);
+      }
+      if (report.providerSignature) {
+        const buf = await downloadImage(report.providerSignature, true);
+        imgCache.set(PROVIDER_SIG_KEY, buf);
+      }
+
+      // ★ Resto de imágenes (fotos del reporte, logos)
       for (const e of report.entries) {
         allUrls.push(...e.photoUrls);
         for (const ad of Object.values(e.activityData)) {
@@ -539,11 +662,10 @@ async function buildPdf(p: {
       }
 
       const unique = [...new Set(allUrls)].filter(Boolean);
-      const imgCache = new Map<string, Buffer | null>();
 
       for (let i = 0; i < unique.length; i += 6) {
         const batch = unique.slice(i, i + 6);
-        const results = await Promise.allSettled(batch.map(downloadImage));
+        const results = await Promise.allSettled(batch.map((url) => downloadImage(url)));
         batch.forEach((url, idx) => {
           imgCache.set(
             url,
@@ -553,7 +675,6 @@ async function buildPdf(p: {
           );
         });
       }
-
       logger.info(`✅ ${imgCache.size} imágenes listas`);
 
       const W = PAGE_WIDTH - MARGIN * 2;
@@ -1437,8 +1558,11 @@ async function buildPdf(p: {
       doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
         .text("Nombre y Firma del Responsable (Proveedor)", MARGIN + 4, Y + 2);
 
-      if (report.providerSignature) {
-        renderImage(doc, imgCache, report.providerSignature, MARGIN + sigWidth / 2 - 30, Y + 15, 60, 30);
+      const provBuf = imgCache.get(PROVIDER_SIG_KEY);
+      if (provBuf) {
+        try {
+          doc.image(provBuf, MARGIN + sigWidth / 2 - 30, Y + 15, { fit: [60, 30], align: "center", valign: "center" });
+        } catch(e) { /* no rompe */ }
       }
 
       doc.moveTo(MARGIN + 20, Y + 55).lineTo(MARGIN + sigWidth - 20, Y + 55).stroke(PDF_COLORS.grey400);
@@ -1452,8 +1576,11 @@ async function buildPdf(p: {
       doc.fontSize(5).font("Helvetica-Bold").fillColor(PDF_COLORS.black)
         .text("Nombre y Firma del Responsable (Cliente)", sig2X + 4, Y + 2);
 
-      if (report.clientSignature) {
-        renderImage(doc, imgCache, report.clientSignature, sig2X + sigWidth / 2 - 30, Y + 15, 60, 30);
+      const clientBuf = imgCache.get(CLIENT_SIG_KEY);
+      if (clientBuf) {
+        try {
+          doc.image(clientBuf, sig2X + sigWidth / 2 - 30, Y + 15, { fit: [60, 30], align: "center", valign: "center" });
+        } catch(e) { /* no rompe */ }
       }
 
       doc.moveTo(sig2X + 20, Y + 55).lineTo(sig2X + sigWidth - 20, Y + 55).stroke(PDF_COLORS.grey400);
@@ -1462,6 +1589,16 @@ async function buildPdf(p: {
           width: sigWidth - 40,
           align: "center",
         });
+
+      const totalPages = (doc as any)._pageBuffer.length;
+      drawPageFooters(
+        doc,
+        imgCache,
+        CLIENT_SIG_KEY,
+        report.clientSignerName,
+        company.name,
+        totalPages
+      );
 
       doc.end();
     } catch (err) {
