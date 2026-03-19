@@ -58,6 +58,7 @@ class OfflinePhotoQueue {
         'sizeBytes': compressed.length,
         'createdAt': DateTime.now().toIso8601String(),
         'retryCount': 0,
+        'remoteUrl': null, // ★ NUEVO: se llena después de subir a Storage
       });
 
       queue.add(item);
@@ -117,6 +118,29 @@ class OfflinePhotoQueue {
     await _safeDeleteFile(localPath);
     if (thumbPath != null) await _safeDeleteFile(thumbPath!);
     if (removedSize > 0) await _subtractDiskUsage(removedSize);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // ★ NUEVO: Guardar la URL remota después de subir exitosamente
+  //   Así si el update de Firestore falla, no re-subimos la foto.
+  // ═══════════════════════════════════════════════════════════════════
+  static Future<void> updateRemoteUrl(String localPath, String remoteUrl) async {
+    final prefs = await SharedPreferences.getInstance();
+    final queue = prefs.getStringList(_queueKey) ?? [];
+
+    for (int i = 0; i < queue.length; i++) {
+      try {
+        final map = jsonDecode(queue[i]) as Map<String, dynamic>;
+        if (map['localPath'] == localPath) {
+          map['remoteUrl'] = remoteUrl;
+          queue[i] = jsonEncode(map);
+          break;
+        }
+      } catch (_) {}
+    }
+
+    await prefs.setStringList(_queueKey, queue);
+    debugPrint('💾 remoteUrl guardada en cola para: ${localPath.split('/').last}');
   }
 
   static Future<void> incrementRetry(String localPath) async {
@@ -291,6 +315,7 @@ class PendingPhoto {
   final int sizeBytes;
   final DateTime createdAt;
   final int retryCount;
+  final String? remoteUrl; // ★ NUEVO
 
   PendingPhoto({
     required this.localPath,
@@ -302,6 +327,7 @@ class PendingPhoto {
     required this.sizeBytes,
     required this.createdAt,
     required this.retryCount,
+    this.remoteUrl,
   });
 
   factory PendingPhoto.fromMap(Map<String, dynamic> map) {
@@ -315,6 +341,7 @@ class PendingPhoto {
       sizeBytes: map['sizeBytes'] as int? ?? 0,
       createdAt: DateTime.tryParse(map['createdAt'] as String? ?? '') ?? DateTime.now(),
       retryCount: map['retryCount'] as int? ?? 0,
+      remoteUrl: map['remoteUrl'] as String?, // ★ NUEVO
     );
   }
 }

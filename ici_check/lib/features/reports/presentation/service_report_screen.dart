@@ -16,6 +16,7 @@ import 'package:ici_check/features/devices/data/devices_repository.dart';
 import 'package:ici_check/features/reports/services/device_location_service.dart';
 import 'package:ici_check/features/reports/services/offline_photo_queue.dart';
 import 'package:ici_check/features/reports/services/photo_storage_service.dart';
+import 'package:ici_check/features/reports/services/photo_sync_service.dart';
 import 'package:ici_check/features/reports/widgets/device_section_improved.dart';
 import 'package:ici_check/features/reports/widgets/renumber_dialog.dart';
 import 'package:ici_check/features/reports/widgets/report_controls.dart';
@@ -72,6 +73,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
   final ImagePicker _picker = ImagePicker();
   final PhotoStorageService _photoService = PhotoStorageService();
   final DeviceLocationService _locationService = DeviceLocationService();
+  final PhotoSyncService _photoSyncService = PhotoSyncService();
 
   // ══════════════════════════════════════════════════════════════════════
   // ESTADO LOCAL DE UI (no pertenece al Notifier)
@@ -149,12 +151,23 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     _loadData();
     _providerSigController.addListener(_onSignatureChanged);
     _clientSigController.addListener(_onSignatureChanged);
+    // ★ NUEVO: Iniciar sincronización automática de fotos offline
+    _photoSyncService.onSyncComplete = () {
+      if (mounted) {
+        _showSnackBar('Fotos offline sincronizadas', Colors.green);
+      }
+    };
+    _photoSyncService.startListening();
   }
 
   @override
   void dispose() {
-    _searchDebounce?.cancel();
-    _searchController.dispose();
+    // ★ FIX: Proteger acceso a ref en dispose (no puede usarse después de disposed)
+    try {
+      _notifier.saveLocalBackupOnDispose();
+    } catch (e) {
+      debugPrint('⚠️ Error al guardar backup en dispose: $e');
+    }
     _locationSaveDebounce?.cancel();
     _signatureDebounce?.cancel();
     _providerSigController.dispose();
@@ -168,6 +181,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     for (final group in _scrollGroups.values) {
       group.dispose();
     }
+    _photoSyncService.stopListening();
     _scrollGroups.clear();
     super.dispose();
   }
@@ -448,56 +462,111 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     _handleNotifierUpdate(updatedReport);
   }
 
-  void _syncAndLoadReport(ServiceReportModel existingReport) {
-  // No pisar cambios locales pendientes
-  if (_notifier.hasPendingChanges) return;
-
+void _syncAndLoadReport(ServiceReportModel existingReport) {
+  // ★ FIX REALTIME: Reducido de 3s a 1s.
+  // 1 segundo es suficiente para ignorar nuestro propio eco de Firebase,
+  // pero no bloquea updates legítimos del otro usuario.
   final lastSave = _notifier.lastSaveTimestamp;
   if (lastSave != null &&
-      DateTime.now().difference(lastSave) < const Duration(seconds: 3)) {
+      DateTime.now().difference(lastSave) < const Duration(seconds: 1)) {
     return;
   }
-
+ 
+  // ★ MERGE FIX: Si hay cambios pendientes Y ya cargó → MERGE
+  if (_notifier.hasPendingChanges && !_isLoading) {
+    final localState = ref.read(reportNotifierProvider);
+    if (localState != null) {
+      final mergedReport = _notifier.mergeServerWithLocal(existingReport);
+      _handleNotifierUpdate(mergedReport);
+      return;
+    }
+  }
+ 
   if (_isCumulative) {
     _syncAndLoadCumulativeReport(existingReport);
     return;
   }
-
+ 
   final currentState = ref.read(reportNotifierProvider);
   if (currentState != null && !_isLoading) {
     final current = currentState.report;
-
-    // SOLUCIÓN 3: Validación de técnicos y secciones
-    if (current.entries.length == existingReport.entries.length &&
-        current.startTime == existingReport.startTime &&
-        current.endTime == existingReport.endTime &&
-        current.generalObservations == existingReport.generalObservations &&
-        current.providerSignerName == existingReport.providerSignerName &&
-        current.clientSignerName == existingReport.clientSignerName &&
-        jsonEncode(current.assignedTechnicianIds) ==
-            jsonEncode(existingReport.assignedTechnicianIds) &&
-        jsonEncode(current.sectionAssignments) ==
+ 
+    // ★ FIX REALTIME: Comparación rápida de metadata primero
+    if (current.entries.length != existingReport.entries.length ||
+        current.startTime != existingReport.startTime ||
+        current.endTime != existingReport.endTime ||
+        current.generalObservations != existingReport.generalObservations ||
+        current.providerSignerName != existingReport.providerSignerName ||
+        current.clientSignerName != existingReport.clientSignerName ||
+        jsonEncode(current.assignedTechnicianIds) !=
+            jsonEncode(existingReport.assignedTechnicianIds) ||
+        jsonEncode(current.sectionAssignments) !=
             jsonEncode(existingReport.sectionAssignments)) {
+      // Metadata cambió → procesar update (no hacer return)
+    } else {
+      // Metadata igual → revisar entries
+ 
+      // ★ FIX REALTIME: Revisar TODOS los entries, no solo 3 muestreados.
+      // Esto detecta cambios del otro usuario sin importar en qué entry estén.
       bool likelySame = true;
-
-      if (current.entries.isNotEmpty) {
-        final lastIdx = current.entries.length - 1;
-        final midIdx = current.entries.length ~/ 2;
-
-       for (final idx in <int>{0, midIdx, lastIdx}) {
-          if (idx < existingReport.entries.length) {
-            final a = current.entries[idx];
-            final b = existingReport.entries[idx];
-
-            if (a.instanceId != b.instanceId ||
-                a.results.length != b.results.length) {
+ 
+      for (int i = 0; i < current.entries.length && likelySame; i++) {
+        if (i >= existingReport.entries.length) {
+          likelySame = false;
+          break;
+        }
+ 
+        final a = current.entries[i];
+        final b = existingReport.entries[i];
+ 
+        // Comparar instanceId y cantidad de results
+        if (a.instanceId != b.instanceId ||
+            a.results.length != b.results.length) {
+          likelySame = false;
+          break;
+        }
+ 
+        // Comparar cada resultado (toggle status)
+        for (final key in a.results.keys) {
+          if (a.results[key] != b.results[key]) {
+            likelySame = false;
+            break;
+          }
+        }
+ 
+        // ★ FIX REALTIME: También detectar results nuevos del servidor
+        if (likelySame) {
+          for (final key in b.results.keys) {
+            if (!a.results.containsKey(key)) {
               likelySame = false;
               break;
             }
-
-            if (likelySame) {
-              for (final key in a.results.keys) {
-                if (a.results[key] != b.results[key]) {
+          }
+        }
+ 
+        // ★ FIX REALTIME: Detectar cambios en observations y fotos
+        if (likelySame) {
+          if (a.observations != b.observations ||
+              a.photoUrls.length != b.photoUrls.length) {
+            likelySame = false;
+          }
+        }
+ 
+        // ★ FIX REALTIME: Detectar cambios en activityData (fotos/obs por actividad)
+        if (likelySame) {
+          if (a.activityData.length != b.activityData.length) {
+            likelySame = false;
+          } else {
+            for (final actKey in b.activityData.keys) {
+              final aData = a.activityData[actKey];
+              final bData = b.activityData[actKey];
+              if (aData == null && bData != null) {
+                likelySame = false;
+                break;
+              }
+              if (aData != null && bData != null) {
+                if (aData.observations != bData.observations ||
+                    aData.photoUrls.length != bData.photoUrls.length) {
                   likelySame = false;
                   break;
                 }
@@ -506,22 +575,24 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
           }
         }
       }
-
-      if (likelySame) return;
+ 
+      if (likelySame) return; // ← Solo retorna si REALMENTE es idéntico
     }
   }
-
+ 
+  // ══════════════════════════════════════════════════════════════
+  // A partir de aquí TODO sigue igual que tu código original
+  // ══════════════════════════════════════════════════════════════
+ 
   if (_devicesEffective.isEmpty) {
     _handleNotifierUpdate(existingReport);
     return;
   }
-
+ 
   bool isWeekly = widget.dateStr.contains('W');
   int timeIndex = _calculateTimeIndex(isWeekly);
   final policyToUse = _currentPolicy ?? widget.policy;
-
-  // ★ FIX: Actualizar _savedLocations con los datos locales ANTES de hacer merge
-  // Esto evita que el merge sobreescriba los customId/area que el usuario acaba de editar
+ 
   final localState = ref.read(reportNotifierProvider);
   if (localState != null) {
     for (final entry in localState.report.entries) {
@@ -531,7 +602,7 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       };
     }
   }
-
+ 
   final idealEntries = _repo.generateEntriesForDate(
     policyToUse,
     widget.dateStr,
@@ -540,22 +611,22 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
     timeIndex,
     savedLocations: _savedLocations,
   );
-
+ 
   final mergedEntries =
       _mergeEntries(existingReport.entries, idealEntries);
-
+ 
   bool hasStructureChanges =
       _entriesStructureChanged(existingReport.entries, mergedEntries);
-
+ 
   bool hasLocationChanges = false;
-
+ 
   if (!hasStructureChanges && _savedLocations.isNotEmpty) {
     for (int i = 0; i < mergedEntries.length; i++) {
       if (i >= existingReport.entries.length) break;
-
+ 
       final original = existingReport.entries[i];
       final merged = mergedEntries[i];
-
+ 
       if (original.customId != merged.customId ||
           original.area != merged.area) {
         hasLocationChanges = true;
@@ -563,21 +634,11 @@ class _ServiceReportScreenState extends ConsumerState<ServiceReportScreen> {
       }
     }
   }
-
+ 
   if (hasStructureChanges || hasLocationChanges) {
-    // Al haber eliminado equipos en la póliza, es completamente normal y esperado
-    // que el número de respuestas disminuya. 
-    // Por lo tanto, confiamos ciegamente en el resultado de mergedEntries.
     final updatedReport = existingReport.copyWith(entries: mergedEntries);
-    
-    // 1. Actualizamos la pantalla (lo que ya hacía)
     _handleNotifierUpdate(updatedReport);
-    
-    // 🔥 2. EL SECRETO ESTÁ AQUÍ 🔥
-    // Obligamos a Firebase a guardar el reporte limpio inmediatamente.
-    // Así matamos a los "equipos fantasma" y sus respuestas viejas para siempre.
     _repo.saveReport(updatedReport);
-    
   } else {
     _handleNotifierUpdate(existingReport);
   }
@@ -656,6 +717,11 @@ void _handleNotifierUpdate(ServiceReportModel report) {
     );
 
     _syncGeneralObsController(report.generalObservations);
+
+    Future.microtask(() async {
+      if (!mounted) return;
+      await _notifier.restoreLocalDirtyBackup(report.id);
+    });
 
     if (mounted && _isLoading) {
       setState(() => _isLoading = false);

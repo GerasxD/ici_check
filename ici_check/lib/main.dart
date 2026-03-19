@@ -4,7 +4,6 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/auth/presentation/main_layout_screen.dart';
-import 'package:ici_check/features/reports/services/offline_photo_queue.dart';
 import 'package:ici_check/features/reports/services/photo_sync_service.dart';
 import 'firebase_options.dart'; // Generado por flutterfire configure
 
@@ -25,12 +24,7 @@ void main() async {
     cacheSizeBytes: Settings.CACHE_SIZE_UNLIMITED, // o un valor grande como 100MB
   );
 
-  OfflinePhotoQueue.cleanOrphans();
-
-  // ★ OFFLINE: Iniciar sincronización automática de fotos
-  final photoSync = PhotoSyncService();
-  photoSync.startListening();
-  photoSync.syncPendingPhotos();
+  PhotoSyncService().startListening();
 
   runApp(const ProviderScope(child: MainApp()));
 }

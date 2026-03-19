@@ -1,5 +1,6 @@
 import 'dart:math' show min;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 import 'package:ici_check/features/policies/data/policy_model.dart';
@@ -31,24 +32,8 @@ class ReportsRepository {
 
   static String unitInstanceId(String baseInstanceId, int unitIndex) {
     if (unitIndex == 1) return baseInstanceId;
-    // ✅ Optimizado: Interpolación simple sin instanciar RegExp
     return '${baseInstanceId}_$unitIndex';
   }
-
-  // Stream<ServiceReportModel?> getReportStream(String policyId, String dateStr) {
-  //   return _db
-  //       .collection('reports')
-  //       .where('policyId', isEqualTo: policyId)
-  //       .where('dateStr', isEqualTo: dateStr)
-  //       .limit(1)
-  //       .snapshots()
-  //       .map((snapshot) {
-  //     if (snapshot.docs.isEmpty) return null;
-  //     final data = snapshot.docs.first.data();
-  //     data['id'] = snapshot.docs.first.id;
-  //     return ServiceReportModel.fromMap(data);
-  //   });
-  // }
 
   Stream<ServiceReportModel?> getReportStream(String policyId, String dateStr) {
     return _db
@@ -56,7 +41,7 @@ class ReportsRepository {
         .where('policyId', isEqualTo: policyId)
         .where('dateStr', isEqualTo: dateStr)
         .limit(1)
-        .snapshots(includeMetadataChanges: true) // ★ OFFLINE FIX: emite cambios del cache
+        .snapshots(includeMetadataChanges: true)
         .map((snapshot) {
       if (snapshot.docs.isEmpty) return null;
       final data = snapshot.docs.first.data();
@@ -66,7 +51,6 @@ class ReportsRepository {
   }
 
   Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
-    // ★ OFFLINE FIX: Intentar cache primero
     try {
       final cacheSnapshot = await _db
           .collection('reports')
@@ -80,11 +64,8 @@ class ReportsRepository {
         data['id'] = cacheSnapshot.docs.first.id;
         return ServiceReportModel.fromMap(data);
       }
-    } catch (_) {
-      // Cache vacío, intentar server
-    }
+    } catch (_) {}
 
-    // Fallback al server
     try {
       final snapshot = await _db
           .collection('reports')
@@ -103,56 +84,168 @@ class ReportsRepository {
     }
   }
 
-  // Future<void> saveReport(ServiceReportModel report) async {
-  //   try {
-  //     final data = report.toMap();
-  //     final docRef = _db.collection('reports').doc(report.id);
-  //     // Usamos merge: true para simplificar y evitar errores.
-  //     await docRef.set(data, SetOptions(merge: true));
-  //     _savedReportIds.add(report.id);
-  //   } catch (e) {
-  //     debugPrint('Error en saveReport: $e');
-  //     rethrow;
-  //   }
-  // }
-
   Future<void> saveReport(ServiceReportModel report) async {
     try {
       final data = report.toMap();
       final docRef = _db.collection('reports').doc(report.id);
-      // ★ OFFLINE FIX: Sin await → Firestore encola localmente si no hay red
       docRef.set(data, SetOptions(merge: true));
       _savedReportIds.add(report.id);
     } catch (e) {
       debugPrint('Error en saveReport: $e');
-      // ★ NO rethrow → el dato queda en cache de Firestore para sync posterior
     }
   }
 
-  /// Evita llamar report.toMap() en el main thread.
-  // Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
-  //   try {
-  //     final docRef = _db.collection('reports').doc(reportId);
-  //     // Usamos merge: true. Si el documento no existe, lo crea. Si existe, lo actualiza.
-  //     await docRef.set(data, SetOptions(merge: true));
-  //     _savedReportIds.add(reportId); // Mantenemos el registro por si acaso
-  //   } catch (e) {
-  //     debugPrint('Error en saveReportRaw: $e');
-  //     rethrow;
-  //   }
-  // }
-
-   Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
+  Future<void> saveReportRaw(String reportId, Map<String, dynamic> data) async {
     try {
       final docRef = _db.collection('reports').doc(reportId);
-      // ★ OFFLINE FIX: Sin await → fire-and-forget
       docRef.set(data, SetOptions(merge: true));
       _savedReportIds.add(reportId);
     } catch (e) {
       debugPrint('Error en saveReportRaw: $e');
-      // ★ NO rethrow
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // ★ MERGE FIX DEFINITIVO: saveReportMerged
+  //
+  //   RETORNA:
+  //     true  → Se guardó exitosamente en el SERVIDOR (Transaction OK)
+  //     false → NO se pudo guardar en servidor (offline u otro error)
+  //
+  //   CLAVE: Cuando retorna false, NO escribe NADA a Firestore.
+  //          Así evitamos que la cola offline de Firestore aplaste
+  //          las respuestas del otro usuario al reconectar.
+  // ═══════════════════════════════════════════════════════════════════
+  Future<bool> saveReportMerged(
+    ServiceReportModel localReport, {
+    required Map<String, Set<String>> dirtyResults,
+    required Set<String> dirtyEntryFields,
+    required bool dirtyMeta,
+  }) async {
+    final docRef = _db.collection('reports').doc(localReport.id);
+
+    // ── Paso 1: Verificar conectividad ──
+    bool isOnline = true;
+    try {
+      final connectivity = await Connectivity().checkConnectivity();
+      isOnline = !connectivity.contains(ConnectivityResult.none);
+    } catch (_) {
+      isOnline = false;
+    }
+
+    // ★ CLAVE: Si estamos offline, NO escribimos NADA a Firestore.
+    // Los cambios se quedan en memoria (Riverpod state + dirty tracking).
+    // Cuando reconecte, el stream de Firebase disparará _syncAndLoadReport,
+    // que verá hasPendingChanges=true y hará el merge correctamente.
+    if (!isOnline) {
+      debugPrint('📴 Offline: cambios guardados solo en memoria (dirty tracking activo)');
+      return false;
+    }
+
+    // ── Paso 2: Online → Transaction con merge inteligente ──
+    try {
+      await _db.runTransaction((tx) async {
+        final snap = await tx.get(docRef);
+
+        if (!snap.exists) {
+          tx.set(docRef, localReport.toMap());
+          return;
+        }
+
+        final serverData = snap.data()!;
+        serverData['id'] = snap.id;
+        final serverReport = ServiceReportModel.fromMap(serverData);
+
+        // ── Construir lookup del servidor ──
+        final serverEntryMap = <String, ReportEntry>{};
+        for (final e in serverReport.entries) {
+          serverEntryMap[e.instanceId] = e;
+        }
+
+        final mergedEntries = <ReportEntry>[];
+        final processedIds = <String>{};
+
+        // ── Recorrer entries locales ──
+        for (final localEntry in localReport.entries) {
+          processedIds.add(localEntry.instanceId);
+          final serverEntry = serverEntryMap[localEntry.instanceId];
+
+          if (serverEntry == null) {
+            mergedEntries.add(localEntry);
+            continue;
+          }
+
+          final dirtyActs = dirtyResults[localEntry.instanceId];
+          final hasDirtyFields = dirtyEntryFields.contains(localEntry.instanceId);
+
+          if (dirtyActs == null && !hasDirtyFields) {
+            // Nada cambió localmente → usar servidor
+            mergedEntries.add(serverEntry);
+            continue;
+          }
+
+          // Merge results: servidor como base, overlay solo lo dirty
+          final mergedResults = Map<String, String?>.from(serverEntry.results);
+          if (dirtyActs != null) {
+            for (final actId in dirtyActs) {
+              if (localEntry.results.containsKey(actId)) {
+                mergedResults[actId] = localEntry.results[actId];
+              }
+            }
+          }
+
+          mergedEntries.add(serverEntry.copyWith(
+            results: mergedResults,
+            observations: hasDirtyFields
+                ? localEntry.observations
+                : serverEntry.observations,
+            photoUrls: hasDirtyFields
+                ? localEntry.photoUrls
+                : serverEntry.photoUrls,
+            activityData: hasDirtyFields
+                ? localEntry.activityData
+                : serverEntry.activityData,
+            customId: hasDirtyFields
+                ? localEntry.customId
+                : serverEntry.customId,
+            area: hasDirtyFields
+                ? localEntry.area
+                : serverEntry.area,
+          ));
+        }
+
+        // Entries que solo existen en servidor
+        for (final serverEntry in serverReport.entries) {
+          if (!processedIds.contains(serverEntry.instanceId)) {
+            mergedEntries.add(serverEntry);
+          }
+        }
+
+        // Merge reporte final
+        final ServiceReportModel mergedReport;
+        if (dirtyMeta) {
+          mergedReport = localReport.copyWith(entries: mergedEntries);
+        } else {
+          mergedReport = serverReport.copyWith(entries: mergedEntries);
+        }
+
+        tx.set(docRef, mergedReport.toMap());
+      });
+
+      debugPrint('✅ Transaction merge exitosa');
+      return true; // ★ Guardado exitosamente en servidor
+
+    } catch (e) {
+      debugPrint('⚠️ Transaction merge falló: $e');
+      // ★ NO escribimos nada como fallback. Retornamos false.
+      // El dirty tracking se mantiene y se reintentará.
+      return false;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Todo lo demás queda EXACTAMENTE igual que antes
+  // ═══════════════════════════════════════════════════════════════════
 
   List<ReportEntry> generateEntriesForDate(
     PolicyModel policy,
@@ -206,7 +299,6 @@ class ReportsRepository {
 
         final Map<String, String?> activityResults = {};
 
-        // (Lógica de frecuencias intacta)
         for (final act in def.activities) {
           if (devInstance.cumulativeActivities.contains(act.id)) continue;
           bool isDue = false;
@@ -243,16 +335,13 @@ class ReportsRepository {
           if (isDue) activityResults[act.id] = null;
         }
 
-        // Incrementamos el contador SIEMPRE, para mantener la numeración interna correcta
         final int deviceIndex = (deviceCounters[devInstance.definitionId] ?? 0) + 1;
         deviceCounters[devInstance.definitionId] = deviceIndex;
 
-        // ★ AQUÍ ESTÁ LA MAGIA DEL HISTORIAL ★
         final saved = savedLocations[uid];
         final savedCustomId = saved?['customId'] ?? '';
         final savedArea = saved?['area'] ?? '';
 
-        // Si tenemos un ID guardado en Firebase, lo usamos. Si no, generamos el automático (ej. "EXT-1")
         final autoCustomId = savedCustomId.isNotEmpty 
             ? savedCustomId 
             : '$namePrefix-$deviceIndex';
@@ -260,8 +349,8 @@ class ReportsRepository {
         entries.add(ReportEntry(
           instanceId:  uid,
           deviceIndex: deviceIndex,
-          customId:    autoCustomId,  // ¡ID pre-llenado!
-          area:        savedArea,     // ¡Ubicación pre-llenada!
+          customId:    autoCustomId,
+          area:        savedArea,
           results:     activityResults,
           observations: '',
           photoUrls: const [],
@@ -283,7 +372,6 @@ class ReportsRepository {
     final existing = await getReportOnce(policy.id, dateStr);
     if (existing != null) return existing;
 
-    // ★ CAMBIO: Verificar por póliza
     final bool hasCumulativeActivities = policy.devices.any(
       (d) => d.cumulativeActivities.isNotEmpty,
     );
@@ -324,7 +412,6 @@ class ReportsRepository {
     final Set<String> usedUids = {};
 
     for (final devInstance in policy.devices) {
-      // ★ CAMBIO CLAVE: Solo procesar si tiene actividades acumulativas
       if (devInstance.cumulativeActivities.isEmpty) continue;
 
       final def = definitionsMap[devInstance.definitionId];
@@ -345,18 +432,15 @@ class ReportsRepository {
         }
         usedUids.add(uid);
 
-        // ★ CAMBIO CLAVE: Solo incluir actividades que están en cumulativeActivities
         final Map<String, String?> activityResults = {};
         for (final act in def.activities) {
           if (devInstance.cumulativeActivities.contains(act.id)) {
-            // También respetar excludedActivities
             if (!devInstance.excludedActivities.contains(act.id)) {
               activityResults[act.id] = null;
             }
           }
         }
 
-        // Si no quedaron actividades, saltar esta unidad
         if (activityResults.isEmpty) continue;
 
         final int deviceIndex =
@@ -385,8 +469,6 @@ class ReportsRepository {
     return entries;
   }
 
-  /// Obtiene progreso global del reporte acumulativo para el cronograma.
-  /// Retorna {total: N, completed: N} o null si no existe.
   Future<({int total, int completed})?> getCumulativeProgress(
     String policyId,
   ) async {
@@ -415,7 +497,6 @@ class ReportsRepository {
   }) async {
     const String dateStr = 'CUMULATIVE';
 
-    // ★ CAMBIO: Ya no filtramos por def.isCumulative, sino por póliza
     final bool hasCumulativeActivities = policy.devices.any(
       (d) => d.cumulativeActivities.isNotEmpty,
     );
@@ -490,11 +571,9 @@ class ReportsRepository {
       }
     }
 
-    // ★ Set de IDs ideales para saber cuáles actividades deben existir
     // ignore: unused_local_variable
     final Set<String> idealIds = ideal.map((e) => e.instanceId).toSet();
     
-    // ★ Map de ideales para acceso rápido a los results esperados
     final Map<String, ReportEntry> idealMap = {};
     for (final e in ideal) {
       idealMap[e.instanceId] = e;
@@ -503,28 +582,22 @@ class ReportsRepository {
     final List<ReportEntry> result = [];
     final Set<String> processedIds = {};
 
-    // ─── Paso 1: Recorrer EXISTENTES (preserva el orden guardado en Firebase) ───
     for (final existingEntry in existing) {
       if (processedIds.contains(existingEntry.instanceId)) continue;
       processedIds.add(existingEntry.instanceId);
 
       final idealEntry = idealMap[existingEntry.instanceId];
       
-      // Si ya no está en el ideal (dispositivo eliminado de póliza), lo saltamos
       if (idealEntry == null) continue;
 
-      // Combinar resultados para no perder lo que ya se respondió
       final Map<String, String?> mergedResults = {};
 
-      // Paso A: Agregar todas las actividades del ideal (las que "tocan" ahora)
       for (final actId in idealEntry.results.keys) {
         mergedResults[actId] = existingEntry.results.containsKey(actId)
             ? existingEntry.results[actId]
             : null;
       }
 
-      // Paso B: Preservar actividades existentes que YA tienen respuesta
-      // aunque no estén en el ideal (evita borrar respuestas guardadas)
       for (final actId in existingEntry.results.keys) {
         if (!mergedResults.containsKey(actId) &&
             existingEntry.results[actId] != null) {
@@ -544,7 +617,6 @@ class ReportsRepository {
       ));
     }
 
-    // ─── Paso 2: Agregar entradas nuevas del ideal que no existían ───
     for (final idealEntry in ideal) {
       if (processedIds.contains(idealEntry.instanceId)) continue;
       processedIds.add(idealEntry.instanceId);
@@ -563,20 +635,6 @@ class ReportsRepository {
     return result;
   }
 
-  // Future<ServiceReportModel?> getReportOnce(String policyId, String dateStr) async {
-  //   final snapshot = await _db
-  //       .collection('reports')
-  //       .where('policyId', isEqualTo: policyId)
-  //       .where('dateStr', isEqualTo: dateStr)
-  //       .limit(1)
-  //       .get();
-
-  //   if (snapshot.docs.isEmpty) return null;
-  //   final data = snapshot.docs.first.data();
-  //   data['id'] = snapshot.docs.first.id;
-  //   return ServiceReportModel.fromMap(data);
-  // }
-
   ServiceReportModel initializeReport(
     PolicyModel policy,
     String dateStr,
@@ -591,7 +649,6 @@ class ReportsRepository {
     );
     debugPrint('✅ Reporte inicializado: ${entries.length} entradas para $dateStr');
     
-    // ★ EL FIX: El ID del reporte DEBE ser predecible para que el servicio de locaciones coincida.
     final reportId = '${policy.id}_$dateStr';
 
     return ServiceReportModel(
@@ -617,4 +674,3 @@ class ReportsRepository {
     }
   }
 }
-

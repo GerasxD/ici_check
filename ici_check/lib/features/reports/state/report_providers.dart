@@ -1,27 +1,14 @@
-// lib/features/reports/state/report_providers.dart
-//
-// ★ ESTE ES EL ÚNICO ARCHIVO DE PROVIDERS.
-// ★ TODOS los imports deben apuntar a ESTE archivo.
-
 import 'dart:async';
-import 'package:flutter/foundation.dart'; // ★ CAMBIO 1: Nuevo import para compute()
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:ici_check/features/devices/data/device_model.dart';
 import 'package:ici_check/features/reports/data/report_model.dart';
 import 'package:ici_check/features/reports/data/reports_repository.dart';
 import 'package:ici_check/features/reports/services/device_location_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import 'report_state.dart';
-
-// ★ CAMBIO 2: Función TOP-LEVEL para compute()
-// ─────────────────────────────────────────────────────────────────
-// compute() REQUIERE una función top-level (fuera de cualquier clase).
-// Se ejecuta en un Isolate separado → la serialización pesada de
-// 600+ entries a JSON NO bloquea el main thread.
-// ─────────────────────────────────────────────────────────────────
-Map<String, dynamic> _serializeReportInIsolate(ServiceReportModel report) {
-  return report.toMap();
-}
 
 // ─────────────────────────────────────────────────────────────────
 // NOTIFIER CENTRAL
@@ -33,10 +20,34 @@ class ReportNotifier extends Notifier<ReportState?> {
   Timer? _saveDebounce;
   bool _hasPendingChanges = false;
   ServiceReportModel? _pendingReport;
-  bool _isSaving = false; // ★ CAMBIO 3: Flag anti-concurrencia
-  // En la clase ReportNotifier, junto a las otras variables de instancia:
+  bool _isSaving = false;
   DateTime? _lastSaveTimestamp;
   DateTime? get lastSaveTimestamp => _lastSaveTimestamp;
+
+  // ═══════════════════════════════════════════════════════
+  // DIRTY TRACKING
+  // ═══════════════════════════════════════════════════════
+  final Map<String, Set<String>> _dirtyResults = {};
+  final Set<String> _dirtyEntryFields = {};
+  bool _dirtyMeta = false;
+
+  ({
+    Map<String, Set<String>> results,
+    Set<String> entryFields,
+    bool meta,
+  }) get dirtyState => (
+    results: Map<String, Set<String>>.from(
+      _dirtyResults.map((k, v) => MapEntry(k, Set<String>.from(v))),
+    ),
+    entryFields: Set<String>.from(_dirtyEntryFields),
+    meta: _dirtyMeta,
+  );
+
+  void _clearDirtyState() {
+    _dirtyResults.clear();
+    _dirtyEntryFields.clear();
+    _dirtyMeta = false;
+  }
 
   @override
   ReportState? build() => null;
@@ -46,11 +57,266 @@ class ReportNotifier extends Notifier<ReportState?> {
   }
 
   // ═══════════════════════════════════════════════════════
-  // TOGGLE STATUS — ÚNICO path que recalcula stats
+  // ★ PERSISTENCIA OFFLINE LOCAL — 3 métodos nuevos
+  // ═══════════════════════════════════════════════════════
+
+  /// Guarda los cambios dirty en SharedPreferences.
+  /// Se llama automáticamente cuando falla el save al servidor (offline)
+  /// y también desde dispose() para no perder cambios.
+  Future<void> _saveLocalDirtyBackup(ServiceReportModel report) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // Solo guardar los valores de las actividades que el usuario modificó
+      final Map<String, Map<String, String>> dirtyResultValues = {};
+
+      for (final mapEntry in _dirtyResults.entries) {
+        final instanceId = mapEntry.key;
+        final dirtyActIds = mapEntry.value;
+
+        final entryIdx = report.entries.indexWhere(
+          (e) => e.instanceId == instanceId,
+        );
+        if (entryIdx < 0) continue;
+
+        final entry = report.entries[entryIdx];
+        final actValues = <String, String>{};
+        for (final actId in dirtyActIds) {
+          if (entry.results.containsKey(actId)) {
+            // Guardamos el valor como string. null → "__NULL__"
+            actValues[actId] = entry.results[actId] ?? '__NULL__';
+          }
+        }
+        if (actValues.isNotEmpty) {
+          dirtyResultValues[instanceId] = actValues;
+        }
+      }
+
+      // También guardar dirty entry fields (observations, customId, area)
+      final Map<String, Map<String, String>> dirtyFieldValues = {};
+      for (final instanceId in _dirtyEntryFields) {
+        final entryIdx = report.entries.indexWhere(
+          (e) => e.instanceId == instanceId,
+        );
+        if (entryIdx < 0) continue;
+        final entry = report.entries[entryIdx];
+        dirtyFieldValues[instanceId] = {
+          'observations': entry.observations,
+          'customId': entry.customId,
+          'area': entry.area,
+        };
+      }
+
+      // Si no hay nada dirty, no guardar
+      if (dirtyResultValues.isEmpty && dirtyFieldValues.isEmpty && !_dirtyMeta) {
+        return;
+      }
+
+      final backup = <String, dynamic>{
+        'dirtyResults': dirtyResultValues,
+        'dirtyFields': dirtyFieldValues,
+        'dirtyMeta': _dirtyMeta,
+      };
+
+      // Si hay meta dirty, guardar generalObservations
+      if (_dirtyMeta) {
+        backup['generalObservations'] = report.generalObservations;
+      }
+
+      await prefs.setString(
+        'offline_dirty_${report.id}',
+        jsonEncode(backup),
+      );
+      debugPrint('💾 Backup local guardado: ${dirtyResultValues.length} entries con results dirty, ${dirtyFieldValues.length} con fields dirty');
+    } catch (e) {
+      debugPrint('Error guardando backup local: $e');
+    }
+  }
+
+  /// Restaura cambios dirty desde SharedPreferences.
+  /// Llamar DESPUÉS de _initializeNotifier en service_report_screen.
+  Future<void> restoreLocalDirtyBackup(String reportId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'offline_dirty_$reportId';
+      final jsonStr = prefs.getString(key);
+      if (jsonStr == null) return;
+
+      final backup = jsonDecode(jsonStr) as Map<String, dynamic>;
+
+      if (state == null) {
+        await prefs.remove(key);
+        return;
+      }
+
+      final report = state!.report;
+      final entries = List<ReportEntry>.from(report.entries);
+      bool anyChange = false;
+
+      // ── Restaurar dirty results (respuestas OK/NOK/NA/NR) ──
+      final dirtyResultsJson = backup['dirtyResults'] as Map<String, dynamic>?;
+      if (dirtyResultsJson != null) {
+        for (final mapEntry in dirtyResultsJson.entries) {
+          final instanceId = mapEntry.key;
+          final actValues = Map<String, dynamic>.from(mapEntry.value as Map);
+
+          final entryIdx = entries.indexWhere((e) => e.instanceId == instanceId);
+          if (entryIdx < 0) continue;
+
+          final entry = entries[entryIdx];
+          final newResults = Map<String, String?>.from(entry.results);
+
+          for (final actEntry in actValues.entries) {
+            final actId = actEntry.key;
+            final value = actEntry.value == '__NULL__' ? null : actEntry.value as String?;
+
+            // Solo aplicar si realmente es diferente
+            if (newResults.containsKey(actId) && newResults[actId] != value) {
+              newResults[actId] = value;
+              (_dirtyResults[instanceId] ??= {}).add(actId);
+              anyChange = true;
+            }
+          }
+
+          entries[entryIdx] = entry.copyWith(results: newResults);
+        }
+      }
+
+      // ── Restaurar dirty entry fields (observations, customId, area) ──
+      final dirtyFieldsJson = backup['dirtyFields'] as Map<String, dynamic>?;
+      if (dirtyFieldsJson != null) {
+        for (final mapEntry in dirtyFieldsJson.entries) {
+          final instanceId = mapEntry.key;
+          final fields = Map<String, dynamic>.from(mapEntry.value as Map);
+
+          final entryIdx = entries.indexWhere((e) => e.instanceId == instanceId);
+          if (entryIdx < 0) continue;
+
+          final entry = entries[entryIdx];
+          final savedObs = fields['observations'] as String? ?? '';
+          final savedCustomId = fields['customId'] as String? ?? '';
+          final savedArea = fields['area'] as String? ?? '';
+
+          if (entry.observations != savedObs ||
+              entry.customId != savedCustomId ||
+              entry.area != savedArea) {
+            entries[entryIdx] = entry.copyWith(
+              observations: savedObs.isNotEmpty ? savedObs : entry.observations,
+              customId: savedCustomId.isNotEmpty ? savedCustomId : entry.customId,
+              area: savedArea.isNotEmpty ? savedArea : entry.area,
+            );
+            _dirtyEntryFields.add(instanceId);
+            anyChange = true;
+          }
+        }
+      }
+
+      // ── Restaurar dirty meta ──
+      final dirtyMeta = backup['dirtyMeta'] as bool? ?? false;
+      String? restoredGeneralObs;
+      if (dirtyMeta) {
+        _dirtyMeta = true;
+        restoredGeneralObs = backup['generalObservations'] as String?;
+        anyChange = true;
+      }
+
+      // Limpiar el backup (ya lo restauramos)
+      await prefs.remove(key);
+
+      if (!anyChange) return;
+
+      // Reconstruir reporte con los cambios restaurados
+      ServiceReportModel newReport;
+      if (restoredGeneralObs != null &&
+          restoredGeneralObs != report.generalObservations) {
+        newReport = report.copyWith(
+          entries: entries,
+          generalObservations: restoredGeneralObs,
+        );
+      } else {
+        newReport = report.copyWith(entries: entries);
+      }
+
+      // Recalcular stats
+      int ok = 0, nok = 0, na = 0, nr = 0, pending = 0;
+      for (final e in entries) {
+        for (final v in e.results.values) {
+          switch (v) {
+            case 'OK':
+              ok++;
+              break;
+            case 'NOK':
+              nok++;
+              break;
+            case 'NA':
+              na++;
+              break;
+            case 'NR':
+              nr++;
+              break;
+            default:
+              if (v != null && v.isNotEmpty) {
+                ok++; // valor medido = completado
+              } else {
+                pending++;
+              }
+              break;
+          }
+        }
+      }
+
+      final newStats = ReportStats(
+        ok: ok,
+        nok: nok,
+        na: na,
+        nr: nr,
+        total: ok + nok + na + nr + pending,
+        pending: pending,
+      );
+
+      state = ReportState(
+        report: newReport,
+        stats: newStats,
+        isFullyComplete: pending == 0,
+        instanceIdToGlobalIndex: state!.instanceIdToGlobalIndex,
+        groupedEntriesMap: state!.groupedEntriesMap,
+        frequencies: state!.frequencies,
+      );
+
+      _hasPendingChanges = true;
+      _scheduleSave(newReport);
+
+      debugPrint('🔄 Backup local restaurado: cambios offline recuperados y programados para sync');
+    } catch (e) {
+      debugPrint('Error restaurando backup local: $e');
+    }
+  }
+
+  /// Limpia el backup local después de un save exitoso al servidor.
+  Future<void> _clearLocalDirtyBackup(String reportId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('offline_dirty_$reportId');
+    } catch (_) {}
+  }
+
+  /// Llamar desde dispose() del screen para persistir cambios pendientes.
+  /// Es fire-and-forget (async pero no esperamos).
+  void saveLocalBackupOnDispose() {
+    if (!_hasPendingChanges) return;
+    final report = _pendingReport ?? state?.report;
+    if (report == null) return;
+    if (_dirtyResults.isEmpty && _dirtyEntryFields.isEmpty && !_dirtyMeta) return;
+    // Fire-and-forget — SharedPreferences completará aunque el widget murió
+    _saveLocalDirtyBackup(report);
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // TOGGLE STATUS
   // ═══════════════════════════════════════════════════════
   void toggleStatus(int entryIndex, String activityId, {
-    ActivityInputType inputType = ActivityInputType.toggle, // ★ NUEVO parámetro
-    String? measuredValue, // ★ NUEVO: valor medido cuando inputType == value
+    ActivityInputType inputType = ActivityInputType.toggle,
+    String? measuredValue,
   }) {
     if (state == null) return;
     final report = state!.report;
@@ -59,25 +325,21 @@ class ReportNotifier extends Notifier<ReportState?> {
     final entry = report.entries[entryIndex];
     if (!entry.results.containsKey(activityId)) return;
 
-    // ★ Si es tipo value, guardamos el valor medido directamente
     if (inputType == ActivityInputType.value) {
-      if (measuredValue == null) return; // Nada que guardar
+      if (measuredValue == null) return;
       final newResults = Map<String, String?>.from(entry.results);
       newResults[activityId] = measuredValue.isEmpty ? null : measuredValue;
 
-      // Recalcular stats: un valor medido cuenta como "completado" (como OK)
       final currentStats = state!.stats;
       final oldValue = entry.results[activityId];
       int ok = currentStats.ok;
       int pending = currentStats.pending;
 
-      // Quitar el conteo anterior
       if (oldValue == null || oldValue == 'NR') pending--;
-      else ok--; // Contaba como completado
+      else ok--;
 
-      // Sumar el nuevo
       if (measuredValue.isEmpty) pending++;
-      else ok++; // Valor medido = completado
+      else ok++;
 
       final newStats = ReportStats(
         ok: ok, nok: currentStats.nok, na: currentStats.na, nr: currentStats.nr,
@@ -97,11 +359,11 @@ class ReportNotifier extends Notifier<ReportState?> {
         frequencies: state!.frequencies,
       );
 
+      (_dirtyResults[entry.instanceId] ??= {}).add(activityId);
       _scheduleSave(newReport);
       return;
     }
 
-    // ── Toggle normal (comportamiento anterior sin cambios) ──
     final current = entry.results[activityId];
     String? next;
     if (current == null) next = 'OK';
@@ -110,7 +372,6 @@ class ReportNotifier extends Notifier<ReportState?> {
     else if (current == 'NA') next = 'NR';
     else next = null;
 
-    // Aritmética delta O(1) — igual que antes
     final currentStats = state!.stats;
     int ok = currentStats.ok, nok = currentStats.nok,
         na = currentStats.na, nr = currentStats.nr, pending = currentStats.pending;
@@ -146,6 +407,7 @@ class ReportNotifier extends Notifier<ReportState?> {
       frequencies: state!.frequencies,
     );
 
+    (_dirtyResults[entry.instanceId] ??= {}).add(activityId);
     _scheduleSave(newReport);
   }
   
@@ -156,6 +418,7 @@ class ReportNotifier extends Notifier<ReportState?> {
     if (state == null) return;
     final report = state!.report;
     final entries = List<ReportEntry>.from(report.entries);
+    _dirtyEntryFields.add(entries[entryIndex].instanceId);
     entries[entryIndex] = _copyEntry(entries[entryIndex], observations: text);
     final newReport = report.copyWith(entries: entries);
     state = state!.copyWithReportOnly(newReport);
@@ -169,6 +432,7 @@ class ReportNotifier extends Notifier<ReportState?> {
     if (state == null) return;
     final report = state!.report;
     final entries = List<ReportEntry>.from(report.entries);
+    _dirtyEntryFields.add(entries[entryIndex].instanceId);
     entries[entryIndex] = _copyEntry(entries[entryIndex], activityData: activityData);
     final newReport = report.copyWith(entries: entries);
     state = state!.copyWithReportOnly(newReport);
@@ -176,7 +440,7 @@ class ReportNotifier extends Notifier<ReportState?> {
   }
 
   // ═══════════════════════════════════════════════════════
-  // FILL ALL OK — Solo para Admin/SuperUser
+  // FILL ALL OK
   // ═══════════════════════════════════════════════════════
   void fillAllOk() {
     if (state == null) return;
@@ -192,6 +456,7 @@ class ReportNotifier extends Notifier<ReportState?> {
       for (final actId in newResults.keys) {
         if (newResults[actId] == null || newResults[actId] == 'NR') {
           newResults[actId] = 'OK';
+          (_dirtyResults[entry.instanceId] ??= {}).add(actId);
         }
       }
 
@@ -235,7 +500,6 @@ class ReportNotifier extends Notifier<ReportState?> {
     if (state == null) return;
     final report = state!.report;
 
-    // 1. Obtener los instanceIds que pertenecen a esta sección
     final sectionInstanceIds = <String>{};
     final sectionEntries = state!.groupedEntriesMap[defId];
     if (sectionEntries == null || sectionEntries.length < 2) return;
@@ -244,34 +508,26 @@ class ReportNotifier extends Notifier<ReportState?> {
       sectionInstanceIds.add(e.instanceId);
     }
 
-    // 2. Separar entries de esta sección vs el resto (mantener posición relativa)
-    final List<ReportEntry> otherEntries = [];
     final List<ReportEntry> thisSectionEntries = [];
-    final List<int> sectionPositions = []; // posiciones originales en la lista global
+    final List<int> sectionPositions = [];
 
     for (int i = 0; i < report.entries.length; i++) {
       if (sectionInstanceIds.contains(report.entries[i].instanceId)) {
         thisSectionEntries.add(report.entries[i]);
         sectionPositions.add(i);
-      } else {
-        otherEntries.add(report.entries[i]);
       }
     }
 
-    // 3. Ordenar la sección por customId numérico/alfanumérico
     thisSectionEntries.sort((a, b) => _compareCustomIds(a.customId, b.customId));
 
-    // 4. Reinsertar los entries ordenados en sus posiciones originales
     final newEntries = List<ReportEntry>.from(report.entries);
     for (int i = 0; i < sectionPositions.length; i++) {
       newEntries[sectionPositions[i]] = thisSectionEntries[i];
     }
 
-    // 5. Reconstruir el groupedEntriesMap para esta sección
     final newGroupedMap = Map<String, List<ReportEntry>>.from(state!.groupedEntriesMap);
     newGroupedMap[defId] = thisSectionEntries;
 
-    // 6. Actualizar estado con recompute completo (recalcula índices)
     final newReport = report.copyWith(entries: newEntries);
     state = state!.copyWithFullRecompute(
       newReport,
@@ -281,29 +537,21 @@ class ReportNotifier extends Notifier<ReportState?> {
     _scheduleSave(newReport);
   }
 
-  /// Comparador inteligente: extrae la parte numérica del final del ID
-  /// para ordenar numéricamente (no alfabéticamente).
-  /// "EXT-002" < "EXT-010" < "EXT-100"
-  /// "3" < "4" < "12" (no "12" < "3" como sería alfabético)
   int _compareCustomIds(String a, String b) {
     if (a.isEmpty && b.isEmpty) return 0;
-    if (a.isEmpty) return 1;  // vacíos al final
+    if (a.isEmpty) return 1;
     if (b.isEmpty) return -1;
 
-    // Extraer prefijo y número
     final aParsed = _extractPrefixAndNumber(a);
     final bParsed = _extractPrefixAndNumber(b);
 
-    // Primero comparar por prefijo
     final prefixCompare = aParsed.prefix.compareTo(bParsed.prefix);
     if (prefixCompare != 0) return prefixCompare;
 
-    // Luego por número
     if (aParsed.number != null && bParsed.number != null) {
       return aParsed.number!.compareTo(bParsed.number!);
     }
 
-    // Fallback: comparar como string
     return a.compareTo(b);
   }
 
@@ -316,7 +564,6 @@ class ReportNotifier extends Notifier<ReportState?> {
     }
 
     if (numStart == id.length) {
-      // No hay número al final
       return (prefix: id, number: null);
     }
 
@@ -350,27 +597,21 @@ class ReportNotifier extends Notifier<ReportState?> {
     _scheduleSave(updatedReport);
   }
 
-
   // ═══════════════════════════════════════════════════════
-  // CUSTOM ID / AREA — NO recalcula, NO notifica
+  // CUSTOM ID / AREA
   // ═══════════════════════════════════════════════════════
   void updateCustomId(int entryIndex, String customId) {
     if (state == null) return;
     final report = state!.report;
     final entries = List<ReportEntry>.from(report.entries);
-    
+    _dirtyEntryFields.add(entries[entryIndex].instanceId);
     entries[entryIndex] = _copyEntry(entries[entryIndex], customId: customId);
     final newReport = report.copyWith(entries: entries);
-    
-    // ★ EL FIX: ¡Actualizar el estado local para que Riverpod se entere!
     state = state!.copyWithReportOnly(newReport);
-    
     _scheduleSaveQuiet(newReport);
 
-    final policyId = report.policyId;
-
     _locationService.saveLocation(
-      policyId: policyId,
+      policyId: report.policyId,
       instanceId: entries[entryIndex].instanceId,
       customId: customId,
       area: entries[entryIndex].area, 
@@ -381,18 +622,14 @@ class ReportNotifier extends Notifier<ReportState?> {
     if (state == null) return;
     final report = state!.report;
     final entries = List<ReportEntry>.from(report.entries);
-    
+    _dirtyEntryFields.add(entries[entryIndex].instanceId);
     entries[entryIndex] = _copyEntry(entries[entryIndex], area: area);
     final newReport = report.copyWith(entries: entries);
-    
-    // ★ EL FIX: Mantener el estado sincronizado
     state = state!.copyWithReportOnly(newReport);
-    
     _scheduleSaveQuiet(newReport);
 
-    final policyId = report.policyId;
     _locationService.saveLocation(
-      policyId: policyId,
+      policyId: report.policyId,
       instanceId: entries[entryIndex].instanceId,
       customId: entries[entryIndex].customId, 
       area: area,
@@ -406,6 +643,7 @@ class ReportNotifier extends Notifier<ReportState?> {
     if (state == null) return;
     final report = state!.report;
     final entries = List<ReportEntry>.from(report.entries);
+    _dirtyEntryFields.add(entries[entryIndex].instanceId);
     entries[entryIndex] = _copyEntry(entries[entryIndex], photoUrls: photoUrls);
     final newReport = report.copyWith(entries: entries);
     state = state!.copyWithReportOnly(newReport);
@@ -417,11 +655,9 @@ class ReportNotifier extends Notifier<ReportState?> {
   // ═══════════════════════════════════════════════════════
   void updateGeneralObservations(String text) {
     if (state == null) return;
+    _dirtyMeta = true;
     final newReport = state!.report.copyWith(generalObservations: text);
-    
-    // ★ EL FIX: Evita que se borren si finalizas el reporte muy rápido
     state = state!.copyWithReportOnly(newReport);
-    
     _scheduleSaveQuiet(newReport);
   }
 
@@ -430,6 +666,7 @@ class ReportNotifier extends Notifier<ReportState?> {
   // ═══════════════════════════════════════════════════════
   void startService(String timeStr, DateTime date) {
     if (state == null) return;
+    _dirtyMeta = true;
     final report = state!.report;
 
     final newSession = ServiceSession(
@@ -441,8 +678,6 @@ class ReportNotifier extends Notifier<ReportState?> {
 
     final updatedSessions = [...report.sessions, newSession];
 
-    // Compatibilidad con campos legacy startTime / endTime
-    // startTime = primera sesión, endTime = null (hay sesión abierta)
     final isFirstSession = report.sessions.isEmpty;
     final newReport = report.copyWith(
       sessions: updatedSessions,
@@ -458,13 +693,13 @@ class ReportNotifier extends Notifier<ReportState?> {
 
   void endService(String timeStr) {
     if (state == null) return;
+    _dirtyMeta = true;
     final report = state!.report;
 
     final sessions = List<ServiceSession>.from(report.sessions);
     final openIdx = sessions.lastIndexWhere((s) => s.isOpen);
 
     if (openIdx == -1) {
-      // Fallback: no hay sesión abierta, usamos legacy
       final newReport = report.copyWith(endTime: timeStr);
       state = state!.copyWithReportOnly(newReport);
       _saveImmediateAsync(newReport);
@@ -473,7 +708,6 @@ class ReportNotifier extends Notifier<ReportState?> {
 
     sessions[openIdx] = sessions[openIdx].copyWith(endTime: timeStr);
 
-    // Actualizar endTime legacy = última sesión cerrada
     final newReport = report.copyWith(
       sessions: sessions,
       endTime: timeStr,
@@ -485,9 +719,9 @@ class ReportNotifier extends Notifier<ReportState?> {
 
   void resumeService() {
     if (state == null) return;
+    _dirtyMeta = true;
     final report = state!.report;
 
-    // Abrimos una nueva sesión (continuación)
     final now = DateTime.now();
     final timeStr =
         '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
@@ -513,27 +747,31 @@ class ReportNotifier extends Notifier<ReportState?> {
 
   void updateServiceDate(DateTime date) {
     if (state == null) return;
+    _dirtyMeta = true;
     final newReport = state!.report.copyWith(serviceDate: date);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediateAsync(newReport); // ★ era _saveImmediate
+    _saveImmediateAsync(newReport);
   }
 
   void updateStartTime(String time) {
     if (state == null) return;
+    _dirtyMeta = true;
     final newReport = state!.report.copyWith(startTime: time);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediateAsync(newReport); // ★ era _saveImmediate
+    _saveImmediateAsync(newReport);
   }
 
   void updateEndTime(String time) {
     if (state == null) return;
+    _dirtyMeta = true;
     final newReport = state!.report.copyWith(endTime: time);
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediateAsync(newReport); // ★ era _saveImmediate
+    _saveImmediateAsync(newReport);
   }
 
   void updateSession(String sessionId, {String? startTime, String? endTime}) {
     if (state == null) return;
+    _dirtyMeta = true;
     final report = state!.report;
     final sessions = List<ServiceSession>.from(report.sessions);
     final idx = sessions.indexWhere((s) => s.id == sessionId);
@@ -549,23 +787,19 @@ class ReportNotifier extends Notifier<ReportState?> {
     _saveImmediateAsync(newReport);
   }
 
-  /// Elimina una sesión del historial (Admin Override).
-   void deleteSession(String sessionId) {
+  void deleteSession(String sessionId) {
     if (state == null) return;
+    _dirtyMeta = true;
     final report = state!.report;
 
-    // 1. Verificar que exista
     final exists = report.sessions.any((s) => s.id == sessionId);
     if (!exists) return;
 
-    // 2. Filtrar
     final remaining = report.sessions.where((s) => s.id != sessionId).toList();
 
-    // 3. Recalcular legacy fields
     ServiceReportModel newReport;
 
     if (remaining.isEmpty) {
-      // No quedan sesiones → vuelve a "no iniciado"
       newReport = report.copyWith(
         sessions: remaining,
         forceNullStartTime: true,
@@ -574,14 +808,12 @@ class ReportNotifier extends Notifier<ReportState?> {
     } else {
       final hasOpenSession = remaining.any((s) => s.isOpen);
       if (hasOpenSession) {
-        // Hay sesión abierta → en progreso
         newReport = report.copyWith(
           sessions: remaining,
           startTime: remaining.first.startTime,
           forceNullEndTime: true,
         );
       } else {
-        // Todas cerradas → finalizado
         newReport = report.copyWith(
           sessions: remaining,
           startTime: remaining.first.startTime,
@@ -594,13 +826,13 @@ class ReportNotifier extends Notifier<ReportState?> {
     _saveImmediateAsync(newReport);
   }
 
-  /// Agrega una sesión manual (Admin Override).
   void addManualSession({
     required DateTime date,
     required String startTime,
     required String endTime,
   }) {
     if (state == null) return;
+    _dirtyMeta = true;
     final report = state!.report;
 
     final newSession = ServiceSession(
@@ -612,7 +844,6 @@ class ReportNotifier extends Notifier<ReportState?> {
 
     final updatedSessions = [...report.sessions, newSession];
 
-    // ★ Ordenar por fecha y luego por hora de inicio
     updatedSessions.sort((a, b) {
       final dateCompare = a.date.compareTo(b.date);
       if (dateCompare != 0) return dateCompare;
@@ -638,6 +869,7 @@ class ReportNotifier extends Notifier<ReportState?> {
     String? clientName,
   }) {
     if (state == null) return;
+    _dirtyMeta = true;
     final newReport = state!.report.copyWith(
       providerSignature: providerSignature,
       clientSignature: clientSignature,
@@ -645,14 +877,13 @@ class ReportNotifier extends Notifier<ReportState?> {
       clientSignerName: clientName,
     );
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediateAsync(newReport); // ★ era _saveImmediate
+    _saveImmediateAsync(newReport);
   }
 
   List<String> getNokWithoutPhotos(List<DeviceModel> deviceDefs) {
     if (state == null) return [];
     final missing = <String>[];
 
-    // Construir mapa de activityId → nombre legible
     final actNameMap = <String, String>{};
     for (final dev in deviceDefs) {
       for (final act in dev.activities) {
@@ -685,6 +916,7 @@ class ReportNotifier extends Notifier<ReportState?> {
   // ═══════════════════════════════════════════════════════
   void toggleSectionAssignment(String defId, String userId) {
     if (state == null) return;
+    _dirtyMeta = true;
     final report = state!.report;
 
     final currentAssignments = List<String>.from(
@@ -709,7 +941,71 @@ class ReportNotifier extends Notifier<ReportState?> {
     );
 
     state = state!.copyWithReportOnly(newReport);
-    _saveImmediateAsync(newReport); // ★ era _saveImmediate
+    _saveImmediateAsync(newReport);
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // MERGE SERVER CON LOCAL
+  // ═══════════════════════════════════════════════════════
+  ServiceReportModel mergeServerWithLocal(ServiceReportModel serverReport) {
+    if (state == null) return serverReport;
+    final localReport = state!.report;
+
+    final serverEntryMap = <String, ReportEntry>{};
+    for (final e in serverReport.entries) {
+      serverEntryMap[e.instanceId] = e;
+    }
+
+    final mergedEntries = <ReportEntry>[];
+    final processedIds = <String>{};
+
+    for (final localEntry in localReport.entries) {
+      processedIds.add(localEntry.instanceId);
+      final serverEntry = serverEntryMap[localEntry.instanceId];
+
+      if (serverEntry == null) {
+        mergedEntries.add(localEntry);
+        continue;
+      }
+
+      final dirtyActs = _dirtyResults[localEntry.instanceId];
+      final hasDirtyFields = _dirtyEntryFields.contains(localEntry.instanceId);
+
+      if (dirtyActs == null && !hasDirtyFields) {
+        mergedEntries.add(serverEntry);
+        continue;
+      }
+
+      final mergedResults = Map<String, String?>.from(serverEntry.results);
+      if (dirtyActs != null) {
+        for (final actId in dirtyActs) {
+          if (localEntry.results.containsKey(actId)) {
+            mergedResults[actId] = localEntry.results[actId];
+          }
+        }
+      }
+
+      mergedEntries.add(serverEntry.copyWith(
+        results: mergedResults,
+        observations: hasDirtyFields ? localEntry.observations : serverEntry.observations,
+        photoUrls: hasDirtyFields ? localEntry.photoUrls : serverEntry.photoUrls,
+        activityData: hasDirtyFields ? localEntry.activityData : serverEntry.activityData,
+        customId: hasDirtyFields ? localEntry.customId : serverEntry.customId,
+        area: hasDirtyFields ? localEntry.area : serverEntry.area,
+      ));
+    }
+
+    for (final serverEntry in serverReport.entries) {
+      if (!processedIds.contains(serverEntry.instanceId)) {
+        mergedEntries.add(serverEntry);
+      }
+    }
+
+    if (_dirtyMeta) {
+      return localReport.copyWith(entries: mergedEntries);
+    } else {
+      return serverReport.copyWith(entries: mergedEntries);
+    }
   }
 
   // ═══════════════════════════════════════════════════════
@@ -720,14 +1016,28 @@ class ReportNotifier extends Notifier<ReportState?> {
     required List<MapEntry<String, List<ReportEntry>>> groupedEntries,
     required String frequencies,
   }) {
-    if (_hasPendingChanges) return;
+    if (!_hasPendingChanges || state == null) {
+      state = ReportState.fromReport(
+        updatedReport,
+        groupedEntries: groupedEntries,
+        frequencies: frequencies,
+      );
+      return;
+    }
+
+    final merged = mergeServerWithLocal(updatedReport);
     state = ReportState.fromReport(
-      updatedReport,
+      merged,
       groupedEntries: groupedEntries,
       frequencies: frequencies,
     );
+
+    _scheduleSave(merged);
   }
 
+  // ═══════════════════════════════════════════════════════
+  // SAVE PIPELINE
+  // ═══════════════════════════════════════════════════════
   void _scheduleSave(ServiceReportModel report) {
     _hasPendingChanges = true;
     _pendingReport = report;
@@ -742,7 +1052,6 @@ class ReportNotifier extends Notifier<ReportState?> {
     _saveDebounce = Timer(const Duration(milliseconds: 800), _flushPendingChangesAsync);
   }
 
-  /// ★ REEMPLAZA a _saveImmediate
   void _saveImmediateAsync(ServiceReportModel report) {
     _saveDebounce?.cancel();
     _hasPendingChanges = true;
@@ -750,7 +1059,6 @@ class ReportNotifier extends Notifier<ReportState?> {
     _saveInIsolate(report);
   }
 
-  /// ★ REEMPLAZA a _flushPendingChanges
   void _flushPendingChangesAsync() {
     if (_hasPendingChanges && _pendingReport != null) {
       final report = _pendingReport!;
@@ -759,7 +1067,9 @@ class ReportNotifier extends Notifier<ReportState?> {
     }
   }
 
-  /// ★ CORE: Serializa en Isolate, escribe en Firestore
+  // ═══════════════════════════════════════════════════════
+  // ★ _saveInIsolate — Ahora con backup/clear local
+  // ═══════════════════════════════════════════════════════
   Future<void> _saveInIsolate(ServiceReportModel report) async {
     if (_isSaving) {
       _hasPendingChanges = true;
@@ -775,36 +1085,49 @@ class ReportNotifier extends Notifier<ReportState?> {
     _isSaving = true;
 
     try {
-      final Map<String, dynamic> data = await compute(
-        _serializeReportInIsolate,
+      final dirty = dirtyState;
+
+      final bool savedToServer = await _repo.saveReportMerged(
         report,
+        dirtyResults: dirty.results,
+        dirtyEntryFields: dirty.entryFields,
+        dirtyMeta: dirty.meta,
       );
-      await _repo.saveReportRaw(report.id, data);
-      _lastSaveTimestamp = DateTime.now();
+
+      if (savedToServer) {
+        _lastSaveTimestamp = DateTime.now();
+        // ★ PERSISTENCIA: Limpiar backup local (ya está en servidor)
+        _clearLocalDirtyBackup(report.id);
+      } else {
+        // ★ PERSISTENCIA: Guardar backup local (estamos offline)
+        _saveLocalDirtyBackup(report);
+        debugPrint('📴 Save offline: backup local guardado');
+      }
     } catch (e) {
       debugPrint('Error en _saveInIsolate: $e');
-      try {
-        await _repo.saveReport(report);
-      } catch (e2) {
-        debugPrint('Error en fallback save: $e2');
-      }
+      // En caso de error, también intentar backup local
+      _saveLocalDirtyBackup(report);
     } finally {
       _isSaving = false;
-      // ★ Solo limpiar si NO hay más cambios pendientes en cola
+
       if (_pendingReport != null) {
         _flushPendingChangesAsync();
       } else {
-        _hasPendingChanges = false;  // ★ AHORA sí es seguro limpiar
+        if (_lastSaveTimestamp != null &&
+            DateTime.now().difference(_lastSaveTimestamp!) < const Duration(seconds: 5)) {
+          _hasPendingChanges = false;
+          _clearDirtyState();
+        }
       }
     }
   }
 
-  /// Para dispose() — sync fallback para no perder cambios
   void flushBeforeDispose() {
     if (_hasPendingChanges && _pendingReport != null) {
-      _hasPendingChanges = false;
       _repo.saveReport(_pendingReport!);
+      _hasPendingChanges = false;
       _pendingReport = null;
+      _clearDirtyState();
     }
   }
 
@@ -836,7 +1159,7 @@ class ReportNotifier extends Notifier<ReportState?> {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// PROVIDERS
+// PROVIDERS (sin cambios)
 // ─────────────────────────────────────────────────────────────────
 
 final reportNotifierProvider =
@@ -856,7 +1179,6 @@ final reportSessionsProvider = Provider<List<ServiceSession>>((ref) {
   );
 });
 
-/// ★ FIX: O(1) lookup con Map en vez de .where() lineal
 final sectionEntriesProvider =
     Provider.family<List<ReportEntry>, String>((ref, defId) {
   final state = ref.watch(reportNotifierProvider);
@@ -878,31 +1200,23 @@ final singleEntryProvider = Provider.family<ReportEntry?, int>((ref, index) {
   }));
 });
 
-/// Lee directamente del árbol principal del estado usando los índices globales.
-/// Ya no depende de ningún otro provider intermedio que pueda quedarse cacheado.
 final sectionProgressProvider =
     Provider.family<({int total, int completed, double percentage}), String>((ref, defId) {
   
-  // Escuchamos el estado central. Si cambia un toggle, esto se re-ejecuta.
   final state = ref.watch(reportNotifierProvider);
   if (state == null) return (total: 0, completed: 0, percentage: 0.0);
 
   int totalActivities = 0;
   int completedActivities = 0;
 
-  // 1. Usamos el mapa agrupado SOLO para saber qué IDs (instanceId) pertenecen a esta sección
   final groupedEntries = state.groupedEntriesMap[defId] ?? [];
   
   for (final staleEntry in groupedEntries) {
-    // 2. Buscamos el índice global exacto de este equipo en tiempo real
     final globalIndex = state.instanceIdToGlobalIndex[staleEntry.instanceId];
     if (globalIndex == null) continue;
     
-    // 3. Extraemos el equipo directamente de la lista maestra (¡Datos 100% frescos!)
     final freshEntry = state.report.entries[globalIndex];
     
-    // 4. Calculamos sobre los results actualizados
-    // DESPUÉS — También reconoce cualquier valor medido como completado:
     for (final value in freshEntry.results.values) {
       totalActivities++;
       if (value != null && value.isNotEmpty && value != 'NR') {
@@ -915,7 +1229,6 @@ final sectionProgressProvider =
       ? (completedActivities / totalActivities) * 100
       : 0.0;
   
-  // Retornamos el Record
   return (
     total: totalActivities, 
     completed: completedActivities, 
